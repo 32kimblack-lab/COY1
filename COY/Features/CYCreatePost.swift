@@ -492,9 +492,9 @@ struct CYCreatePost: View {
 				throw NSError(domain: "CYCreatePost", code: -1, userInfo: [NSLocalizedDescriptionKey: "Please select a collection to post in"])
 			}
 			
-			// Create post via backend API (handles S3 upload and MongoDB)
+			// Create post - saves to Firebase FIRST (like profile images), then syncs to backend
 			let taggedUserIds = taggedFriends.map { $0.id }
-			let response = try await APIClient.shared.createPost(
+			let postId = try await PostService.shared.createPost(
 				collectionId: targetCollectionId,
 				caption: caption.isEmpty ? nil : caption,
 				mediaItems: selectedMedia,
@@ -503,7 +503,7 @@ struct CYCreatePost: View {
 				allowReplies: allowReplies
 			)
 			
-			print("✅ Successfully created post in collection '\(collectionName)'")
+			print("✅ Successfully created post in collection '\(collectionName)' with ID: \(postId)")
 			
 			// Update UI and dismiss on main thread
 			await MainActor.run {
@@ -512,7 +512,7 @@ struct CYCreatePost: View {
 				NotificationCenter.default.post(
 					name: NSNotification.Name("PostCreated"),
 					object: targetCollectionId,
-					userInfo: ["postIds": [response.postId]]
+					userInfo: ["postIds": [postId]]
 				)
 				// Also post general collection update notification
 				NotificationCenter.default.post(name: NSNotification.Name("CollectionUpdated"), object: targetCollectionId)

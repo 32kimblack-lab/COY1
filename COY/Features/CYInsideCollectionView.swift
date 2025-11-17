@@ -315,8 +315,48 @@ struct CYInsideCollectionView: View {
 		isLoadingPosts = true
 		Task {
 			do {
-				// Use backend API to get collection posts
-				let loadedPosts = try await APIClient.shared.getCollectionPosts(collectionId: collection.id)
+				// Load from Firebase FIRST (source of truth) - like profile images
+				let db = Firestore.firestore()
+				let snapshot = try await db.collection("posts")
+					.whereField("collectionId", isEqualTo: collection.id)
+					.order(by: "createdAt", descending: true)
+					.getDocuments()
+				
+				let loadedPosts = snapshot.documents.compactMap { doc -> CollectionPost? in
+					let data = doc.data()
+					
+					// Parse firstMediaItem
+					var mediaItem: MediaItem?
+					if let firstMediaData = data["firstMediaItem"] as? [String: Any] {
+						mediaItem = MediaItem(
+							imageURL: firstMediaData["imageURL"] as? String,
+							thumbnailURL: firstMediaData["thumbnailURL"] as? String,
+							videoURL: firstMediaData["videoURL"] as? String,
+							videoDuration: firstMediaData["videoDuration"] as? Double,
+							isVideo: firstMediaData["isVideo"] as? Bool ?? false
+						)
+					}
+					
+					return CollectionPost(
+						id: doc.documentID,
+						title: data["title"] as? String ?? data["caption"] as? String ?? "",
+						collectionId: data["collectionId"] as? String ?? "",
+						authorId: data["authorId"] as? String ?? "",
+						authorName: data["authorName"] as? String ?? "",
+						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
+						firstMediaItem: mediaItem
+					)
+				}
+				
+				// Sync to backend in background (don't wait for it)
+				Task {
+					do {
+						_ = try await APIClient.shared.getCollectionPosts(collectionId: collection.id)
+					} catch {
+						// Silent fail - Firebase is source of truth
+						print("⚠️ Background sync to backend failed (non-critical): \(error.localizedDescription)")
+					}
+				}
 				
 				await MainActor.run {
 					posts = loadedPosts
