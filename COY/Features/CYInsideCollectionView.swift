@@ -74,6 +74,7 @@ struct CYInsideCollectionView: View {
 		.onAppear {
 			loadCollectionData()
 			loadPosts()
+			setupPostListener()
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostCreated"))) { notification in
 			if let collectionId = notification.object as? String, collectionId == collection.id {
@@ -390,6 +391,54 @@ struct CYInsideCollectionView: View {
 	private func deleteCollection() {
 		// TODO: Implement delete
 		dismiss()
+	}
+	
+	// MARK: - Real-time Post Listener
+	private func setupPostListener() {
+		let db = Firestore.firestore()
+		db.collection("posts")
+			.whereField("collectionId", isEqualTo: collection.id)
+			.addSnapshotListener { [self] snapshot, error in
+				if let error = error {
+					print("❌ Post listener error: \(error.localizedDescription)")
+					return
+				}
+				
+				guard let documents = snapshot?.documents else { return }
+				
+				let loadedPosts = documents.compactMap { doc -> CollectionPost? in
+					let data = doc.data()
+					
+					// Parse firstMediaItem
+					var mediaItem: MediaItem?
+					if let firstMediaData = data["firstMediaItem"] as? [String: Any] {
+						mediaItem = MediaItem(
+							imageURL: firstMediaData["imageURL"] as? String,
+							thumbnailURL: firstMediaData["thumbnailURL"] as? String,
+							videoURL: firstMediaData["videoURL"] as? String,
+							videoDuration: firstMediaData["videoDuration"] as? Double,
+							isVideo: firstMediaData["isVideo"] as? Bool ?? false
+						)
+					}
+					
+					return CollectionPost(
+						id: doc.documentID,
+						title: data["title"] as? String ?? data["caption"] as? String ?? "",
+						collectionId: data["collectionId"] as? String ?? "",
+						authorId: data["authorId"] as? String ?? "",
+						authorName: data["authorName"] as? String ?? "",
+						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
+						firstMediaItem: mediaItem
+					)
+				}
+				.sorted { $0.createdAt > $1.createdAt }
+				
+				Task { @MainActor in
+					posts = loadedPosts
+					isLoadingPosts = false
+					print("✅ Real-time update: Loaded \(loadedPosts.count) posts")
+				}
+			}
 	}
 }
 
