@@ -28,7 +28,7 @@ final class PostService {
 		
 		// Upload all media to Firebase Storage FIRST
 		var mediaURLs: [MediaItem] = []
-		for (index, item) in mediaItems.enumerated() {
+		for item in mediaItems {
 			if let image = item.image {
 				// Upload image to Firebase Storage
 				let imageURL = try await uploadImage(image, path: "posts/\(UUID().uuidString).jpg")
@@ -67,18 +67,18 @@ final class PostService {
 			"authorId": userId,
 			"authorName": authorName,
 			"firstMediaItem": [
-				"imageURL": mediaURLs[0].imageURL ?? "",
-				"thumbnailURL": mediaURLs[0].thumbnailURL ?? "",
-				"videoURL": mediaURLs[0].videoURL ?? "",
-				"videoDuration": mediaURLs[0].videoDuration ?? 0,
+				"imageURL": (mediaURLs[0].imageURL ?? "") as Any,
+				"thumbnailURL": (mediaURLs[0].thumbnailURL ?? "") as Any,
+				"videoURL": (mediaURLs[0].videoURL ?? "") as Any,
+				"videoDuration": (mediaURLs[0].videoDuration ?? 0) as Any,
 				"isVideo": mediaURLs[0].isVideo
 			],
 			"mediaItems": mediaURLs.map { item in
 				[
-					"imageURL": item.imageURL ?? "",
-					"thumbnailURL": item.thumbnailURL ?? "",
-					"videoURL": item.videoURL ?? "",
-					"videoDuration": item.videoDuration ?? 0,
+					"imageURL": (item.imageURL ?? "") as Any,
+					"thumbnailURL": (item.thumbnailURL ?? "") as Any,
+					"videoURL": (item.videoURL ?? "") as Any,
+					"videoDuration": (item.videoDuration ?? 0) as Any,
 					"isVideo": item.isVideo
 				]
 			},

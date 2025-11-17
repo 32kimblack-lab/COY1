@@ -157,9 +157,10 @@ final class CollectionService {
 			// Fall back to Firebase if backend fails
 			print("⚠️ Backend getUserCollections failed, falling back to Firebase: \(error.localizedDescription)")
 			let db = Firestore.firestore()
-			let snapshot = try await db.collection("collections")
-				.whereField("ownerId", isEqualTo: userId)
-				.getDocuments()
+			do {
+				let snapshot = try await db.collection("collections")
+					.whereField("ownerId", isEqualTo: userId)
+					.getDocuments()
 			
 			return snapshot.documents.compactMap { doc in
 				let data = doc.data()

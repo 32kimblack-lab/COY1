@@ -217,7 +217,6 @@ struct CYPostDetailView: View {
 	
 	private func loadStarStatus() {
 		// TODO: Load star status from Firebase/backend
-		guard let currentUserId = Auth.auth().currentUser?.uid else { return }
 		// Check if current user has starred this post
 		// For now, default to false
 		isStarred = false

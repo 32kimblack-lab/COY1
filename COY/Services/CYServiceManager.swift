@@ -140,7 +140,7 @@ final class CYServiceManager: ObservableObject {
 		
 		// Use backend API instead of direct Firestore
 		let apiClient = APIClient.shared
-		let userResponse = try await apiClient.updateUser(
+		_ = try await apiClient.updateUser(
 			userId: currentUserId,
 			collectionSortPreference: preference,
 			customCollectionOrder: nil
@@ -158,7 +158,7 @@ final class CYServiceManager: ObservableObject {
 		
 		// Use backend API instead of direct Firestore
 		let apiClient = APIClient.shared
-		let userResponse = try await apiClient.updateUser(
+		_ = try await apiClient.updateUser(
 			userId: currentUserId,
 			collectionSortPreference: nil,
 			customCollectionOrder: order
