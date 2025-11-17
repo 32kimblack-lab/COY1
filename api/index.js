@@ -121,6 +121,15 @@ app.get('/', (req, res) => {
   });
 });
 
+// API root route
+app.get('/api', (req, res) => {
+  res.json({ 
+    message: 'COY Backend API is running!', 
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Health check
 app.get('/health', async (req, res) => {
   try {
