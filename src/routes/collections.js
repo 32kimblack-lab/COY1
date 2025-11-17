@@ -8,7 +8,15 @@ const { verifyToken } = require('../middleware/auth');
 const { uploadToS3 } = require('../utils/s3Upload');
 
 // Configure multer for memory storage (for Vercel serverless)
-const upload = multer({ storage: multer.memoryStorage() });
+// Increase file size limits - Vercel has a 4.5MB limit, but we can try to handle larger files
+const upload = multer({ 
+	storage: multer.memoryStorage(),
+	limits: {
+		fileSize: 50 * 1024 * 1024, // 50MB per file
+		fieldSize: 50 * 1024 * 1024, // 50MB for fields
+		files: 5 // Max 5 files
+	}
+});
 
 // Create a new collection
 router.post('/', verifyToken, upload.single('image'), async (req, res) => {

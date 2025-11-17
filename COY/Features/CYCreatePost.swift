@@ -523,12 +523,11 @@ struct CYCreatePost: View {
 			print("❌ Error creating post: \(error.localizedDescription)")
 			await MainActor.run {
 				// Provide user-friendly error messages
-				if error.localizedDescription.contains("413") || error.localizedDescription.contains("Request Entity Too Large") || error.localizedDescription.contains("FUNCTION_PAYLOAD_TOO_LARGE") {
-					errorMessage = "The media files are too large to upload together. Please try posting fewer items at once, or use shorter videos."
-				} else if error.localizedDescription.contains("invalidData") {
+				if error.localizedDescription.contains("invalidData") {
 					errorMessage = "One or more media files could not be processed. Please try selecting different media."
 				} else {
-					errorMessage = "Failed to post: \(error.localizedDescription)"
+					// Generic error message - don't block on file size
+					errorMessage = "Failed to post. Please try again or post items separately."
 				}
 				showError = true
 				isPosting = false
