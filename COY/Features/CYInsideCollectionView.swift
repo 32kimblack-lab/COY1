@@ -318,9 +318,9 @@ struct CYInsideCollectionView: View {
 			do {
 				// Load from Firebase FIRST (source of truth) - like profile images
 				let db = Firestore.firestore()
+				// Query without orderBy to avoid index requirement, then sort in memory
 				let snapshot = try await db.collection("posts")
 					.whereField("collectionId", isEqualTo: collection.id)
-					.order(by: "createdAt", descending: true)
 					.getDocuments()
 				
 				let loadedPosts = snapshot.documents.compactMap { doc -> CollectionPost? in
@@ -348,6 +348,8 @@ struct CYInsideCollectionView: View {
 						firstMediaItem: mediaItem
 					)
 				}
+				// Sort by createdAt descending (newest first)
+				.sorted { $0.createdAt > $1.createdAt }
 				
 				// Sync to backend in background (don't wait for it)
 				Task {
@@ -362,6 +364,7 @@ struct CYInsideCollectionView: View {
 				await MainActor.run {
 					posts = loadedPosts
 					isLoadingPosts = false
+					print("✅ Loaded \(loadedPosts.count) posts from Firebase")
 				}
 			} catch {
 				print("❌ Error loading posts: \(error)")
