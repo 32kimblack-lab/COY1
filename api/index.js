@@ -1,5 +1,5 @@
 // api/index.js
-export default function handler(req, res) {
+module.exports = function handler(req, res) {
   res.json({ 
     message: "COY Backend API is running!",
     version: "1.0.0",
@@ -10,4 +10,4 @@ export default function handler(req, res) {
       collectionPosts: "/api/collections/[collectionId]/posts"
     }
   });
-}
+};
