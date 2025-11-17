@@ -1,4 +1,6 @@
+import Foundation
 import SwiftUI
+import UIKit
 import PhotosUI
 import AVFoundation
 import UniformTypeIdentifiers
@@ -20,312 +22,406 @@ struct CYCreatePost: View {
 	@State private var caption: String = ""
 	@State private var allowDownload: Bool = false
 	@State private var allowReplies: Bool = true
+	@State private var selectedCollection: CollectionData?
+	@State private var myCollections: [CollectionData] = []
 	@State private var isPosting = false
 	@State private var showError = false
 	@State private var errorMessage = ""
+	@State private var showCollectionPicker = false
 	
-	// Tag friends
+	// Tag friends functionality
 	@State private var taggedFriends: [CYUser] = []
 	@State private var showTagFriendsSheet = false
 	@State private var allUsers: [CYUser] = []
+	@State private var isLoadingUsers = false
 	
-	// Photo picker
-	@State private var showPhotoPicker = false
+	// Custom photo picker state
+	@State private var showCustomPhotoPicker = false
 	
 	var body: some View {
-		VStack(spacing: 0) {
-			// Header
+		VStack(alignment: .leading, spacing: 0) {
 			headerView
 			
-			// Content
-			ScrollView {
-				VStack(spacing: 20) {
-					// Media Grid (Pinterest style)
-					mediaGridSection
-					
-					// Post Options
-					postOptionsSection
-				}
-				.padding()
-			}
+			contentScrollView
+				.frame(maxHeight: .infinity)
 			
-			// Post Button
+			Spacer(minLength: 0)
+			
 			postButton
 		}
 		.background(colorScheme == .dark ? Color.black : Color.white)
+		.navigationBarHidden(true)
+		.navigationBarBackButtonHidden(true)
 		.alert("Error", isPresented: $showError) {
 			Button("OK", role: .cancel) { }
 		} message: {
 			Text(errorMessage)
 		}
-		.sheet(isPresented: $showPhotoPicker) {
-			SimplePhotoPicker(
-				selectedMedia: $selectedMedia,
-				maxSelection: 5,
-				isProcessing: $isProcessingMedia
-			)
-		}
-		.sheet(isPresented: $showTagFriendsSheet) {
-			TagFriendsSheet(
-				allUsers: allUsers,
-				taggedFriends: $taggedFriends
-			)
-		}
 		.task {
-			if allUsers.isEmpty {
-				await loadUsers()
-			}
+			print("Using collection ID: \(collectionId)")
+			await loadAllUsers()
+		}
+		.onAppear {
+			// Set initial caption if provided
 			if !initialCaption.isEmpty {
 				caption = initialCaption
 			}
 		}
+		.sheet(isPresented: $showTagFriendsSheet) {
+			TagFriendsView(
+				allUsers: allUsers,
+				taggedFriends: $taggedFriends,
+				isLoadingUsers: $isLoadingUsers
+			)
+		}
+		.sheet(isPresented: $showCustomPhotoPicker) {
+			CustomPhotoPickerView(
+				selectedMedia: $selectedMedia,
+				maxSelectionCount: max(1, 5 - selectedMedia.count),
+				isProcessingMedia: $isProcessingMedia
+			)
+		}
+		.onChange(of: selectedMedia.count) { oldCount, newCount in
+			// Ensure media count never exceeds 5
+			if newCount > 5 {
+				selectedMedia = Array(selectedMedia.prefix(5))
+			}
+		}
 	}
 	
-	// MARK: - Header
+	// MARK: - Subviews
+	
 	private var headerView: some View {
 		HStack {
-			Button(action: { dismiss() }) {
+			Button(action: { 
+				dismiss()
+			}) {
 				Image(systemName: "xmark")
+					.foregroundColor(colorScheme == .dark ? .white : .black)
 					.font(.title2)
-					.foregroundColor(.primary)
 					.frame(width: 44, height: 44)
 			}
+			.buttonStyle(PlainButtonStyle())
 			
 			Spacer()
 			
 			Text("Create Post")
-				.font(.headline)
-				.foregroundColor(.primary)
+				.font(.title2)
+				.fontWeight(.bold)
+				.foregroundColor(colorScheme == .dark ? .white : .black)
 			
 			Spacer()
 			
 			Color.clear
 				.frame(width: 44, height: 44)
 		}
-		.padding()
+		.padding([.horizontal, .top])
 		.background(colorScheme == .dark ? Color.black : Color.white)
 	}
 	
-	// MARK: - Media Grid (Pinterest Style)
-	private var mediaGridSection: some View {
-		VStack(alignment: .leading, spacing: 12) {
-			Text("Media")
-				.font(.headline)
-				.foregroundColor(.primary)
-			
-			if selectedMedia.isEmpty {
-				// Empty state - add media button
-				Button(action: { showPhotoPicker = true }) {
-					VStack(spacing: 12) {
-						Image(systemName: "plus.circle.fill")
-							.font(.system(size: 50))
-							.foregroundColor(.blue)
-						Text("Add Photos or Videos")
-							.font(.subheadline)
-							.foregroundColor(.secondary)
-					}
-					.frame(maxWidth: .infinity)
-					.frame(height: 200)
-					.background(Color.gray.opacity(0.1))
-					.cornerRadius(12)
+	private var contentScrollView: some View {
+		ScrollView {
+			VStack(alignment: .leading, spacing: 20) {
+				mediaSelectionSection
+				postDetailsSection
+			}
+		}
+		.background(colorScheme == .dark ? Color.black : Color.white)
+	}
+	
+	private var mediaSelectionSection: some View {
+		ScrollView(.horizontal, showsIndicators: false) {
+			HStack(spacing: 10) {
+				ForEach(selectedMedia.indices, id: \.self) { index in
+					mediaItemView(for: selectedMedia[index], index: index)
 				}
-			} else {
-				// Pinterest-style grid
-				LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 2), spacing: 8) {
-					ForEach(selectedMedia.indices, id: \.self) { index in
-						mediaCardView(selectedMedia[index], index: index)
-					}
-					
-					// Add more button
-					if selectedMedia.count < 5 {
-						addMoreButton
+				
+				// Add Media Button (Visible only if less than 5 items are selected)
+				if selectedMedia.count < 5 {
+					Button(action: { 
+						// Ensure we don't exceed 5 items
+						guard selectedMedia.count < 5 else { return }
+						showCustomPhotoPicker = true 
+					}) {
+						ZStack {
+							RoundedRectangle(cornerRadius: 10)
+								.strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [5]))
+								.frame(width: 150, height: 150)
+								.overlay(Image(systemName: "plus").font(.largeTitle).foregroundColor(colorScheme == .dark ? .white : .black))
+								.foregroundColor(colorScheme == .dark ? .white : .black)
+							
+							if isProcessingMedia {
+								ProgressView()
+									.progressViewStyle(CircularProgressViewStyle(tint: colorScheme == .dark ? .white : .black))
+									.scaleEffect(1.5)
+							}
+						}
 					}
 				}
 			}
+			.padding(.horizontal)
 		}
 	}
 	
 	@ViewBuilder
-	private func mediaCardView(_ item: CreatePostMediaItem, index: Int) -> some View {
-		ZStack(alignment: .topTrailing) {
-			// Media content
+	private func mediaItemView(for item: CreatePostMediaItem, index: Int) -> some View {
+		ZStack(alignment: .topLeading) {
+			// Main content
 			if let image = item.image {
 				Image(uiImage: image)
 					.resizable()
 					.aspectRatio(contentMode: .fill)
-					.frame(height: 200)
+					.frame(width: 150, height: 150)
+					.cornerRadius(10)
 					.clipped()
-					.cornerRadius(12)
 			} else if let thumbnail = item.videoThumbnail {
-				ZStack {
-					Image(uiImage: thumbnail)
-						.resizable()
-						.aspectRatio(contentMode: .fill)
-						.frame(height: 200)
-						.clipped()
-						.cornerRadius(12)
-					
-					// Video indicator
-					VStack {
-						Spacer()
-						HStack {
-							Spacer()
-							Image(systemName: "play.circle.fill")
-								.font(.title2)
-								.foregroundColor(.white)
-								.padding(8)
-						}
-					}
-				}
+				Image(uiImage: thumbnail)
+					.resizable()
+					.aspectRatio(contentMode: .fill)
+					.frame(width: 150, height: 150)
+					.cornerRadius(10)
+					.clipped()
 			} else {
 				Rectangle()
 					.fill(Color.gray.opacity(0.3))
-					.frame(height: 200)
-					.cornerRadius(12)
+					.frame(width: 150, height: 150)
+					.cornerRadius(10)
 			}
+			
+			// Order number overlay (top-left)
+			Text("\(index + 1)")
+				.font(.system(size: 18, weight: .bold))
+				.foregroundColor(.white)
+				.padding(.horizontal, 10)
+				.padding(.vertical, 6)
+				.background(Color.black.opacity(0.9))
+				.cornerRadius(15)
+				.overlay(
+					RoundedRectangle(cornerRadius: 15)
+						.stroke(Color.white, lineWidth: 2)
+				)
+				.padding(.top, 8)
+				.padding(.leading, 8)
 			
 			// Remove button
 			Button(action: {
-				selectedMedia.remove(at: index)
+				if let index = selectedMedia.firstIndex(where: { $0.id == item.id }) {
+					selectedMedia.remove(at: index)
+				}
 			}) {
 				Image(systemName: "xmark.circle.fill")
-					.font(.title3)
-					.foregroundColor(.white)
-					.background(Color.black.opacity(0.5))
+					.font(.title2)
+					.foregroundColor(colorScheme == .dark ? .white : .black)
+					.background((colorScheme == .dark ? Color.black : Color.white).opacity(0.7))
 					.clipShape(Circle())
 			}
 			.padding(8)
 		}
+		.frame(width: 150, height: 150)
 	}
 	
-	private var addMoreButton: some View {
-		Button(action: { showPhotoPicker = true }) {
-			VStack(spacing: 8) {
-				Image(systemName: "plus")
-					.font(.title)
-					.foregroundColor(.secondary)
+	private var postDetailsSection: some View {
+		VStack(alignment: .leading, spacing: 20) {
+			captionSection
+			tagFriendsSection
+			downloadToggleSection
+			repliesToggleSection
+			
+			// Collection dropdown - only show when coming from camera
+			if isFromCamera {
+				collectionDropdownSection
 			}
-			.frame(maxWidth: .infinity)
-			.frame(height: 200)
-			.background(Color.gray.opacity(0.1))
-			.cornerRadius(12)
-			.overlay(
-				RoundedRectangle(cornerRadius: 12)
-					.strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [5]))
-					.foregroundColor(.secondary)
-			)
 		}
 	}
 	
-	// MARK: - Post Options
-	private var postOptionsSection: some View {
-		VStack(alignment: .leading, spacing: 20) {
-			// Caption
-			VStack(alignment: .leading, spacing: 8) {
-				Text("Caption")
-					.font(.headline)
-					.foregroundColor(.primary)
-				
-				TextEditor(text: $caption)
-					.frame(height: 100)
-					.padding(8)
-					.background(Color.gray.opacity(0.1))
-					.cornerRadius(8)
-					.overlay(
-						Group {
-							if caption.isEmpty {
-								VStack {
-									HStack {
-										Text("Write a caption...")
-											.foregroundColor(.gray.opacity(0.6))
-											.padding(.horizontal, 12)
-											.padding(.vertical, 16)
-										Spacer()
-									}
-									Spacer()
-								}
-							}
-						}
-					)
-			}
+	private var collectionDropdownSection: some View {
+		VStack(alignment: .leading, spacing: 5) {
+			Text("Collection")
+				.font(.headline)
+				.foregroundColor(colorScheme == .dark ? .white : .black)
 			
-			Divider()
-			
-			// Tag Friends
-			VStack(alignment: .leading, spacing: 8) {
+			Button(action: {
+				showCollectionPicker = true
+			}) {
 				HStack {
-					Text("Tag Friends")
-						.font(.headline)
-						.foregroundColor(.primary)
+					VStack(alignment: .leading, spacing: 2) {
+						Text(selectedCollection?.name ?? "Select Collection")
+							.foregroundColor(selectedCollection != nil ? (colorScheme == .dark ? .white : .black) : .gray)
+							.font(.system(size: 16, weight: selectedCollection != nil ? .semibold : .regular))
+						
+						if let collection = selectedCollection {
+							Text("\(collection.memberCount) members")
+								.font(.caption)
+								.foregroundColor(.gray)
+						}
+					}
 					
 					Spacer()
 					
-					Button(action: { showTagFriendsSheet = true }) {
-						Image(systemName: "plus.circle")
-							.foregroundColor(.blue)
-					}
+					Image(systemName: "chevron.down")
+						.foregroundColor(colorScheme == .dark ? .white : .black)
+						.font(.system(size: 12))
 				}
+				.padding(.horizontal, 15)
+				.padding(.vertical, 12)
+				.background(
+					selectedCollection != nil 
+						? Color.blue.opacity(0.15) 
+						: Color.gray.opacity(0.2)
+				)
+				.overlay(
+					RoundedRectangle(cornerRadius: 8)
+						.stroke(
+							selectedCollection != nil ? Color.blue : Color.gray.opacity(0.5), 
+							lineWidth: selectedCollection != nil ? 2 : 1
+						)
+				)
+				.clipShape(RoundedRectangle(cornerRadius: 8))
+			}
+		}
+		.padding(.horizontal)
+		.sheet(isPresented: $showCollectionPicker) {
+			CollectionPickerView(
+				collections: myCollections,
+				selectedCollection: $selectedCollection
+			)
+		}
+		.task {
+			if isFromCamera {
+				await loadUserCollections()
+			}
+		}
+	}
+	
+	private var captionSection: some View {
+		VStack(alignment: .leading, spacing: 5) {
+			Text("Caption (Optional)")
+				.font(.headline)
+				.foregroundColor(colorScheme == .dark ? .white : .black)
+			
+			ZStack(alignment: .topLeading) {
+				TextEditor(text: $caption)
+					.frame(height: 100)
+					.background(Color.gray.opacity(0.3))
+					.cornerRadius(8)
+					.foregroundColor(colorScheme == .dark ? .white : .black)
+					.padding(.top, 0)
 				
-				if !taggedFriends.isEmpty {
-					ScrollView(.horizontal, showsIndicators: false) {
-						HStack(spacing: 8) {
-							ForEach(taggedFriends, id: \.id) { friend in
-								taggedFriendChip(friend)
+				if caption.isEmpty {
+					Text("Write here")
+						.foregroundColor(Color.gray.opacity(0.6))
+						.padding(.horizontal, 14)
+						.padding(.vertical, 16)
+						.allowsHitTesting(false)
+				}
+			}
+		}
+		.padding(.horizontal)
+		.contentShape(Rectangle())
+		.onTapGesture {
+			hideKeyboard()
+		}
+	}
+	
+	private var tagFriendsSection: some View {
+		VStack {
+			Divider().background(Color.gray)
+			HStack {
+				Text("Tag friends")
+					.foregroundColor(colorScheme == .dark ? .white : .black)
+				Spacer()
+				Button(action: {
+					if allUsers.isEmpty {
+						Task {
+							await loadAllUsers()
+						}
+					}
+					showTagFriendsSheet = true
+				}) {
+					Image(systemName: "plus")
+						.foregroundColor(colorScheme == .dark ? .white : .black)
+				}
+			}
+			.padding(.horizontal)
+			
+			// Show tagged friends if any
+			if !taggedFriends.isEmpty {
+				ScrollView(.horizontal, showsIndicators: false) {
+					HStack(spacing: 8) {
+						ForEach(taggedFriends, id: \.id) { friend in
+							TaggedFriendView(friend: friend) {
+								if let index = taggedFriends.firstIndex(where: { $0.id == friend.id }) {
+									taggedFriends.remove(at: index)
+								}
 							}
 						}
 					}
+					.padding(.horizontal)
 				}
+				.padding(.top, 8)
 			}
-			
-			Divider()
-			
-			// Toggles
-			VStack(spacing: 16) {
-				Toggle(isOn: $allowDownload) {
-					Text("Allow Download")
-						.foregroundColor(.primary)
-				}
-				
+		}
+	}
+	
+	private func loadAllUsers() async {
+		isLoadingUsers = true
+		do {
+			// TODO: Implement fetchAllUsers - for now using empty array
+			// This would need to be implemented in UserService or APIClient
+			allUsers = []
+		} catch {
+			print("Error loading users: \(error.localizedDescription)")
+		}
+		isLoadingUsers = false
+	}
+	
+	private func loadUserCollections() async {
+		guard let userId = Auth.auth().currentUser?.uid else { return }
+		
+		do {
+			myCollections = try await CollectionService.shared.getUserCollections(userId: userId, forceFresh: true)
+			print("✅ Loaded \(myCollections.count) collections for user")
+			if myCollections.isEmpty {
+				print("⚠️ No collections found for user")
+			} else {
+				print("📦 Collections: \(myCollections.map { $0.name }.joined(separator: ", "))")
+			}
+		} catch {
+			print("❌ Error loading user collections: \(error.localizedDescription)")
+			await MainActor.run {
+				errorMessage = "Failed to load collections: \(error.localizedDescription)"
+				showError = true
+			}
+		}
+	}
+	
+	private var downloadToggleSection: some View {
+		VStack {
+			Divider().background(Color.gray)
+			Toggle(isOn: $allowDownload) {
+				Text("Download")
+					.foregroundColor(colorScheme == .dark ? .white : .black)
+			}
+			.toggleStyle(SwitchToggleStyle(tint: .blue))
+			.padding(.horizontal)
+		}
+	}
+	
+	private var repliesToggleSection: some View {
+		VStack {
+			VStack {
+				Divider().background(Color.gray)
 				Toggle(isOn: $allowReplies) {
-					Text("Allow Replies")
-						.foregroundColor(.primary)
+					Text("Replies")
+						.foregroundColor(colorScheme == .dark ? .white : .black)
 				}
+				.toggleStyle(SwitchToggleStyle(tint: .blue))
+				.padding(.horizontal)
 			}
 		}
 	}
 	
-	@ViewBuilder
-	private func taggedFriendChip(_ friend: CYUser) -> some View {
-		HStack(spacing: 4) {
-			if !friend.profileImageURL.isEmpty, let url = URL(string: friend.profileImageURL) {
-				AsyncImage(url: url) { image in
-					image.resizable()
-				} placeholder: {
-					Circle().fill(Color.gray.opacity(0.3))
-				}
-				.frame(width: 20, height: 20)
-				.clipShape(Circle())
-			}
-			
-			Text(friend.username)
-				.font(.caption)
-				.foregroundColor(.primary)
-			
-			Button(action: {
-				taggedFriends.removeAll { $0.id == friend.id }
-			}) {
-				Image(systemName: "xmark.circle.fill")
-					.font(.caption2)
-					.foregroundColor(.gray)
-			}
-		}
-		.padding(.horizontal, 8)
-		.padding(.vertical, 4)
-		.background(Color.gray.opacity(0.2))
-		.cornerRadius(12)
-	}
-	
-	// MARK: - Post Button
+	// Post Button
 	private var postButton: some View {
 		Button(action: {
 			Task {
@@ -335,96 +431,310 @@ struct CYCreatePost: View {
 			HStack {
 				if isPosting {
 					ProgressView()
-						.progressViewStyle(CircularProgressViewStyle(tint: .white))
+						.progressViewStyle(CircularProgressViewStyle(tint: colorScheme == .dark ? .white : .black))
+						.padding(.trailing, 5)
 				}
-				Text(isPosting ? "Posting..." : "Post")
+				Text(isPosting ? "Posting..." : (isFromCamera && selectedCollection == nil) ? "Select Collection" : "Post")
 					.font(.headline)
-					.foregroundColor(.white)
+					.foregroundColor(colorScheme == .dark ? .white : .black)
 			}
 			.frame(maxWidth: .infinity)
 			.padding()
-			.background(isPosting || selectedMedia.isEmpty ? Color.gray : Color.blue)
-			.cornerRadius(12)
+			.background(isPosting ? Color.gray : (isFromCamera && selectedCollection == nil) ? Color.gray : Color.blue)
+			.cornerRadius(10)
 		}
-		.disabled(isPosting || selectedMedia.isEmpty)
-		.padding()
-	}
-	
-	// MARK: - Functions
-	private func loadUsers() async {
-		// TODO: Implement fetchAllUsers in CYServiceManager or use backend API
-		// For now, using empty array - will need to add this method
-		allUsers = []
+		.disabled(isPosting || selectedMedia.isEmpty || (isFromCamera && selectedCollection == nil))
+		.padding(.horizontal)
+		.padding(.bottom, 20)
 	}
 	
 	private func createPost() async {
-		guard !selectedMedia.isEmpty else { return }
+		guard !selectedMedia.isEmpty else {
+			errorMessage = "Please select at least one image or video to post."
+			showError = true
+			return
+		}
+		
+		// Validate media count (max 5)
+		guard selectedMedia.count <= 5 else {
+			errorMessage = "You can only post up to 5 images or videos at once."
+			showError = true
+			return
+		}
+		
+		// Validate all videos are within duration limit (2 minutes = 120 seconds)
+		for mediaItem in selectedMedia {
+			if let videoDuration = mediaItem.videoDuration, videoDuration > 120.0 {
+				errorMessage = "One or more videos exceed the 2:00 maximum duration limit."
+				showError = true
+				return
+			}
+			if mediaItem.videoURL != nil && mediaItem.videoDuration == nil {
+				errorMessage = "One or more videos could not be processed. Please try again."
+				showError = true
+				return
+			}
+		}
 		
 		isPosting = true
 		
 		do {
-			guard !collectionId.isEmpty else {
-				throw NSError(domain: "CYCreatePost", code: -1, userInfo: [NSLocalizedDescriptionKey: "Please select a collection"])
+			// Use selected collection ID if coming from camera, otherwise use the provided collectionId
+			let targetCollectionId = isFromCamera ? (selectedCollection?.id ?? "") : collectionId
+			let collectionName = isFromCamera ? (selectedCollection?.name ?? "Unknown") : "Provided"
+			
+			print("📸 isFromCamera: \(isFromCamera)")
+			print("📦 Selected collection: \(collectionName) (ID: \(targetCollectionId))")
+			print("📊 Posting \(selectedMedia.count) media items")
+			
+			// Validate collection ID
+			guard !targetCollectionId.isEmpty else {
+				throw NSError(domain: "CYCreatePost", code: -1, userInfo: [NSLocalizedDescriptionKey: "Please select a collection to post in"])
 			}
 			
-			// Upload media and create posts
-			// This will be handled by the backend API
-			// For now, we'll need to upload to backend which handles S3
-			let postIds = try await uploadAndCreatePosts()
+			// Create post via backend API (handles S3 upload and MongoDB)
+			let taggedUserIds = taggedFriends.map { $0.id }
+			let response = try await APIClient.shared.createPost(
+				collectionId: targetCollectionId,
+				caption: caption.isEmpty ? nil : caption,
+				mediaItems: selectedMedia,
+				taggedUsers: taggedUserIds.isEmpty ? nil : taggedUserIds,
+				allowDownload: allowDownload,
+				allowReplies: allowReplies
+			)
 			
+			print("✅ Successfully created post in collection '\(collectionName)'")
+			
+			// Update UI and dismiss on main thread
 			await MainActor.run {
 				onPost(selectedMedia)
+				// Post notification for immediate post refresh
 				NotificationCenter.default.post(
 					name: NSNotification.Name("PostCreated"),
-					object: collectionId,
-					userInfo: ["postIds": postIds]
+					object: targetCollectionId,
+					userInfo: ["postIds": [response.postId]]
 				)
+				// Also post general collection update notification
+				NotificationCenter.default.post(name: NSNotification.Name("CollectionUpdated"), object: targetCollectionId)
 				dismiss()
 			}
+			
 		} catch {
+			print("❌ Error creating post: \(error.localizedDescription)")
 			await MainActor.run {
-				errorMessage = "Failed to post: \(error.localizedDescription)"
+				// Provide user-friendly error messages
+				if error.localizedDescription.contains("413") || error.localizedDescription.contains("Request Entity Too Large") || error.localizedDescription.contains("FUNCTION_PAYLOAD_TOO_LARGE") {
+					errorMessage = "The media files are too large to upload together. Please try posting fewer items at once, or use shorter videos."
+				} else if error.localizedDescription.contains("invalidData") {
+					errorMessage = "One or more media files could not be processed. Please try selecting different media."
+				} else {
+					errorMessage = "Failed to post: \(error.localizedDescription)"
+				}
 				showError = true
 				isPosting = false
 			}
 		}
 	}
+}
+
+// MARK: - Supporting Views
+
+struct TagFriendsView: View {
+	let allUsers: [CYUser]
+	@Binding var taggedFriends: [CYUser]
+	@Binding var isLoadingUsers: Bool
+	@Environment(\.colorScheme) var colorScheme
+	@Environment(\.dismiss) var dismiss
+	@StateObject private var services = CYServiceManager.shared
+	@State private var searchText = ""
 	
-	private func uploadAndCreatePosts() async throws -> [String] {
-		guard let currentUserId = Auth.auth().currentUser?.uid else {
-			throw NSError(domain: "CYCreatePost", code: -1, userInfo: [NSLocalizedDescriptionKey: "User not authenticated"])
+	var filteredUsers: [CYUser] {
+		if searchText.isEmpty {
+			return allUsers.filter { $0.id != services.currentUser?.username }
+		} else {
+			return allUsers.filter { 
+				$0.id != services.currentUser?.username && 
+				($0.username.localizedCaseInsensitiveContains(searchText) || 
+				 $0.name.localizedCaseInsensitiveContains(searchText))
+			}
 		}
-		
-		let taggedUserIds = taggedFriends.map { $0.id }
-		
-		// Create post via backend API (handles S3 upload and MongoDB)
-		let response = try await APIClient.shared.createPost(
-			collectionId: collectionId,
-			caption: caption.isEmpty ? nil : caption,
-			mediaItems: selectedMedia,
-			taggedUsers: taggedUserIds.isEmpty ? nil : taggedUserIds,
-			allowDownload: allowDownload,
-			allowReplies: allowReplies
-		)
-		
-		return [response.postId] // Backend returns single post ID for now
+	}
+	
+	var body: some View {
+		VStack(spacing: 0) {
+			// Header
+			HStack {
+				Button("Cancel") {
+					dismiss()
+				}
+				.foregroundColor(colorScheme == .dark ? .white : .black)
+				
+				Spacer()
+				
+				Text("Tag Friends")
+					.font(.headline)
+					.fontWeight(.semibold)
+					.foregroundColor(colorScheme == .dark ? .white : .black)
+				
+				Spacer()
+				
+				Button("Done") {
+					dismiss()
+				}
+				.foregroundColor(colorScheme == .dark ? .white : .black)
+			}
+			.padding()
+			.background(colorScheme == .dark ? Color.black : Color.white)
+			
+			// Search bar
+			HStack {
+				Image(systemName: "magnifyingglass")
+					.foregroundColor(.gray)
+				TextField("Search users...", text: $searchText)
+					.foregroundColor(colorScheme == .dark ? .white : .black)
+			}
+			.padding()
+			.background(Color.gray.opacity(0.1))
+			.cornerRadius(10)
+			.padding(.horizontal)
+			
+			if isLoadingUsers {
+				Spacer()
+				ProgressView("Loading users...")
+					.foregroundColor(colorScheme == .dark ? .white : .black)
+				Spacer()
+			} else {
+				// Users list
+				ScrollView {
+					LazyVStack(spacing: 0) {
+						ForEach(filteredUsers, id: \.id) { user in
+							CompactUserRowView(
+								user: user,
+								isTagged: taggedFriends.contains(where: { $0.id == user.id }),
+								onToggle: {
+									if let index = taggedFriends.firstIndex(where: { $0.id == user.id }) {
+										taggedFriends.remove(at: index)
+									} else {
+										taggedFriends.append(user)
+									}
+								}
+							)
+							Divider()
+								.background(Color.gray.opacity(0.3))
+								.padding(.leading, 60)
+						}
+					}
+				}
+			}
+		}
+		.background(colorScheme == .dark ? Color.black : Color.white)
 	}
 }
 
-// MARK: - Simple Photo Picker
-struct SimplePhotoPicker: UIViewControllerRepresentable {
+struct CompactUserRowView: View {
+	let user: CYUser
+	let isTagged: Bool
+	let onToggle: () -> Void
+	@Environment(\.colorScheme) var colorScheme
+	
+	var body: some View {
+		HStack(spacing: 12) {
+			// Profile image
+			if !user.profileImageURL.isEmpty, let url = URL(string: user.profileImageURL) {
+				AsyncImage(url: url) { image in
+					image.resizable()
+						.aspectRatio(contentMode: .fill)
+				} placeholder: {
+					Circle().fill(Color.gray.opacity(0.3))
+				}
+				.frame(width: 44, height: 44)
+				.clipShape(Circle())
+			} else {
+				DefaultProfileImageView(size: 44)
+			}
+			
+			// User info
+			VStack(alignment: .leading, spacing: 2) {
+				Text(user.username)
+					.font(.system(size: 16, weight: .medium))
+					.foregroundColor(colorScheme == .dark ? .white : .black)
+				Text(user.name)
+					.font(.system(size: 14))
+					.foregroundColor(.gray)
+			}
+			
+			Spacer()
+			
+			// Toggle button
+			Button(action: onToggle) {
+				Image(systemName: isTagged ? "checkmark.circle.fill" : "circle")
+					.font(.title2)
+					.foregroundColor(isTagged ? .blue : .gray)
+			}
+		}
+		.padding(.horizontal, 16)
+		.padding(.vertical, 12)
+		.background(Color.clear)
+		.contentShape(Rectangle())
+		.onTapGesture {
+			onToggle()
+		}
+	}
+}
+
+struct TaggedFriendView: View {
+	let friend: CYUser
+	let onRemove: () -> Void
+	@Environment(\.colorScheme) var colorScheme
+	
+	var body: some View {
+		HStack(spacing: 4) {
+			// Profile image
+			if !friend.profileImageURL.isEmpty, let url = URL(string: friend.profileImageURL) {
+				AsyncImage(url: url) { image in
+					image.resizable()
+						.aspectRatio(contentMode: .fill)
+				} placeholder: {
+					Circle().fill(Color.gray.opacity(0.3))
+				}
+				.frame(width: 24, height: 24)
+				.clipShape(Circle())
+			} else {
+				DefaultProfileImageView(size: 24)
+			}
+			
+			Text(friend.username)
+				.font(.caption)
+				.foregroundColor(colorScheme == .dark ? .white : .black)
+			
+			Button(action: onRemove) {
+				Image(systemName: "xmark.circle.fill")
+					.font(.caption)
+					.foregroundColor(.red)
+			}
+		}
+		.padding(.horizontal, 8)
+		.padding(.vertical, 4)
+		.background(Color.gray.opacity(0.2))
+		.cornerRadius(12)
+	}
+}
+
+// MARK: - Photo Picker View
+
+struct CustomPhotoPickerView: UIViewControllerRepresentable {
 	@Binding var selectedMedia: [CreatePostMediaItem]
-	let maxSelection: Int
-	@Binding var isProcessing: Bool
+	let maxSelectionCount: Int
+	@Binding var isProcessingMedia: Bool
 	@Environment(\.dismiss) var dismiss
 	
 	func makeUIViewController(context: Context) -> PHPickerViewController {
-		var config = PHPickerConfiguration()
-		config.selectionLimit = maxSelection
-		config.filter = .any(of: [.images, .videos])
-		config.preferredAssetRepresentationMode = .current
+		var configuration = PHPickerConfiguration()
+		configuration.selectionLimit = maxSelectionCount
+		configuration.filter = .any(of: [.images, .videos])
+		configuration.preferredAssetRepresentationMode = .current
 		
-		let picker = PHPickerViewController(configuration: config)
+		let picker = PHPickerViewController(configuration: configuration)
 		picker.delegate = context.coordinator
 		return picker
 	}
@@ -436,204 +746,316 @@ struct SimplePhotoPicker: UIViewControllerRepresentable {
 	}
 	
 	class Coordinator: NSObject, PHPickerViewControllerDelegate {
-		let parent: SimplePhotoPicker
+		let parent: CustomPhotoPickerView
 		
-		init(_ parent: SimplePhotoPicker) {
+		init(_ parent: CustomPhotoPickerView) {
 			self.parent = parent
 		}
 		
 		func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-			guard !results.isEmpty else {
-				parent.dismiss()
-				return
-			}
-			
 			Task {
-				parent.isProcessing = true
-				await loadMedia(results)
-				await MainActor.run {
-					parent.isProcessing = false
-					parent.dismiss()
+				parent.isProcessingMedia = true
+				
+				if results.isEmpty {
+					// User cancelled - dismiss picker
+					await MainActor.run {
+						parent.dismiss()
+						parent.isProcessingMedia = false
+					}
+				} else {
+					// User selected media - load the results
+					await loadSelectedResults(results)
+					await MainActor.run {
+						parent.dismiss()
+						parent.isProcessingMedia = false
+					}
 				}
 			}
 		}
 		
-		private func loadMedia(_ results: [PHPickerResult]) async {
+		private func loadSelectedResults(_ results: [PHPickerResult]) async {
 			var newItems: [CreatePostMediaItem] = []
 			
-			for result in results.prefix(parent.maxSelection - parent.selectedMedia.count) {
-				if result.itemProvider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
-					// Video
-					if let item = await loadVideo(result) {
-						newItems.append(item)
-					}
-				} else {
-					// Image
-					if let item = await loadImage(result) {
-						newItems.append(item)
+			// Calculate remaining slots (max 5 total)
+			let remainingSlots = min(results.count, 5 - parent.selectedMedia.count)
+			
+			for (index, result) in results.enumerated() where index < remainingSlots {
+				let mediaItem = await createMediaItem(from: result)
+				
+				// Only add valid media items (videos with valid duration, images, etc.)
+				if mediaItem.image != nil || (mediaItem.videoURL != nil && mediaItem.videoDuration != nil) {
+					newItems.append(mediaItem)
+				}
+			}
+			
+			// Show alert if trying to add more than 5 total
+			if parent.selectedMedia.count + newItems.count > 5 {
+				await MainActor.run {
+					let alert = UIAlertController(
+						title: "Maximum Items Reached",
+						message: "You can only post up to 5 images or videos at once.",
+						preferredStyle: .alert
+					)
+					alert.addAction(UIAlertAction(title: "OK", style: .default))
+					
+					if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+					   let window = windowScene.windows.first,
+					   let rootVC = window.rootViewController {
+						var topVC = rootVC
+						while let presentedVC = topVC.presentedViewController {
+							topVC = presentedVC
+						}
+						topVC.present(alert, animated: true)
 					}
 				}
 			}
 			
 			await MainActor.run {
-				parent.selectedMedia.append(contentsOf: newItems)
+				// Only add up to the 5-item limit
+				let itemsToAdd = min(newItems.count, 5 - parent.selectedMedia.count)
+				if itemsToAdd > 0 {
+					parent.selectedMedia.append(contentsOf: Array(newItems.prefix(itemsToAdd)))
+				}
 			}
 		}
 		
-		private func loadVideo(_ result: PHPickerResult) async -> CreatePostMediaItem? {
-			return await withCheckedContinuation { continuation in
-				result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, error in
-					guard let url = url, error == nil else {
-						continuation.resume(returning: nil)
-						return
-					}
-					
-					let tempURL = FileManager.default.temporaryDirectory
-						.appendingPathComponent(UUID().uuidString + ".\(url.pathExtension)")
-					
-					do {
-						try FileManager.default.copyItem(at: url, to: tempURL)
-						
-						Task {
-							let asset = AVURLAsset(url: tempURL)
-							let duration = try? await asset.load(.duration).seconds
-							let thumbnail = try? await self.generateThumbnail(from: tempURL)
-							
-							let item = CreatePostMediaItem(
+		private func createMediaItem(from result: PHPickerResult) async -> CreatePostMediaItem {
+			if result.itemProvider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+				// Handle video
+				print("🎥 Processing video selection...")
+				return await withCheckedContinuation { continuation in
+					result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, error in
+						if let error = error {
+							print("❌ Error loading video: \(error)")
+							let mediaItem = CreatePostMediaItem(
 								image: nil,
-								videoURL: tempURL,
-								videoDuration: duration,
-								videoThumbnail: thumbnail
+								videoURL: nil,
+								videoDuration: nil,
+								videoThumbnail: nil
 							)
-							continuation.resume(returning: item)
+							continuation.resume(returning: mediaItem)
+							return
 						}
-					} catch {
-						continuation.resume(returning: nil)
+						
+						if let url = url {
+							print("🎥 Video URL received: \(url)")
+							let originalExtension = url.pathExtension.isEmpty ? "mov" : url.pathExtension
+							let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".\(originalExtension)")
+							do {
+								try FileManager.default.copyItem(at: url, to: tempURL)
+								print("🎥 Video copied to temp location: \(tempURL)")
+								
+								Task {
+									let asset = AVURLAsset(url: tempURL)
+									let duration = try? await asset.load(.duration).seconds
+									print("🎥 Video duration: \(duration ?? 0) seconds")
+									
+									// Check if video is longer than 2:00 (120 seconds)
+									if let duration = duration, duration > 120.0 {
+										print("❌ Video too long: \(String(format: "%.2f", duration))s (max: 120s)")
+										
+										// Show alert on main thread
+										await MainActor.run {
+											let minutes = Int(duration) / 60
+											let seconds = Int(duration) % 60
+											let durationText = minutes > 0 ? "\(minutes):\(String(format: "%02d", seconds))" : "\(Int(duration)) seconds"
+											
+											let alert = UIAlertController(
+												title: "Video Too Long",
+												message: "Please select a video that is 2:00 or shorter. This video is \(durationText) long.",
+												preferredStyle: .alert
+											)
+											alert.addAction(UIAlertAction(title: "OK", style: .default))
+											
+											// Find the top view controller to present alert
+											if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+											   let window = windowScene.windows.first,
+											   let rootVC = window.rootViewController {
+												var topVC = rootVC
+												while let presentedVC = topVC.presentedViewController {
+													topVC = presentedVC
+												}
+												topVC.present(alert, animated: true)
+											}
+										}
+										
+										// Return empty media item (video rejected)
+										let mediaItem = CreatePostMediaItem(
+											image: nil,
+											videoURL: nil,
+											videoDuration: nil,
+											videoThumbnail: nil
+										)
+										continuation.resume(returning: mediaItem)
+										return
+									}
+									
+									// Generate thumbnail for preview
+									let thumbnail = try? await generateVideoThumbnail(from: tempURL)
+									print("🎥 Thumbnail generated for preview: \(thumbnail != nil)")
+									
+									let mediaItem = CreatePostMediaItem(
+										image: nil,
+										videoURL: tempURL,
+										videoDuration: duration,
+										videoThumbnail: thumbnail
+									)
+									print("🎥 MediaItem created with video URL: \(tempURL)")
+									continuation.resume(returning: mediaItem)
+								}
+							} catch {
+								print("❌ Error copying video: \(error)")
+								let mediaItem = CreatePostMediaItem(
+									image: nil,
+									videoURL: nil,
+									videoDuration: nil,
+									videoThumbnail: nil
+								)
+								continuation.resume(returning: mediaItem)
+							}
+						} else {
+							print("❌ No video URL received")
+							let mediaItem = CreatePostMediaItem(
+								image: nil,
+								videoURL: nil,
+								videoDuration: nil,
+								videoThumbnail: nil
+							)
+							continuation.resume(returning: mediaItem)
+						}
+					}
+				}
+			} else {
+				// Handle image
+				return await withCheckedContinuation { continuation in
+					result.itemProvider.loadObject(ofClass: UIImage.self) { object, error in
+						if let image = object as? UIImage {
+							let mediaItem = CreatePostMediaItem(
+								image: image,
+								videoURL: nil,
+								videoDuration: nil,
+								videoThumbnail: nil
+							)
+							continuation.resume(returning: mediaItem)
+						} else {
+							let mediaItem = CreatePostMediaItem(
+								image: nil,
+								videoURL: nil,
+								videoDuration: nil,
+								videoThumbnail: nil
+							)
+							continuation.resume(returning: mediaItem)
+						}
 					}
 				}
 			}
-		}
-		
-		private func loadImage(_ result: PHPickerResult) async -> CreatePostMediaItem? {
-			return await withCheckedContinuation { continuation in
-				result.itemProvider.loadObject(ofClass: UIImage.self) { object, _ in
-					if let image = object as? UIImage {
-						let item = CreatePostMediaItem(image: image, videoURL: nil, videoDuration: nil, videoThumbnail: nil)
-						continuation.resume(returning: item)
-					} else {
-						continuation.resume(returning: nil)
-					}
-				}
-			}
-		}
-		
-		private func generateThumbnail(from url: URL) async throws -> UIImage {
-			let asset = AVURLAsset(url: url)
-			let generator = AVAssetImageGenerator(asset: asset)
-			generator.appliesPreferredTrackTransform = true
-			let time = CMTime(seconds: 0.1, preferredTimescale: 600)
-			let cgImage = try await generator.image(at: time).image
-			return UIImage(cgImage: cgImage)
 		}
 	}
 }
 
-// MARK: - Tag Friends Sheet
-struct TagFriendsSheet: View {
-	let allUsers: [CYUser]
-	@Binding var taggedFriends: [CYUser]
+// MARK: - Collection Picker View
+
+struct CollectionPickerView: View {
+	let collections: [CollectionData]
+	@Binding var selectedCollection: CollectionData?
 	@Environment(\.dismiss) var dismiss
 	@Environment(\.colorScheme) var colorScheme
-	@State private var searchText = ""
-	
-	var filteredUsers: [CYUser] {
-		if searchText.isEmpty {
-			return allUsers
-		}
-		return allUsers.filter {
-			$0.username.localizedCaseInsensitiveContains(searchText) ||
-			$0.name.localizedCaseInsensitiveContains(searchText)
-		}
-	}
 	
 	var body: some View {
 		NavigationView {
-			VStack(spacing: 0) {
-				// Search
-				HStack {
-					Image(systemName: "magnifyingglass")
-						.foregroundColor(.gray)
-					TextField("Search...", text: $searchText)
-						.foregroundColor(.primary)
-				}
-				.padding()
-				.background(Color.gray.opacity(0.1))
-				.cornerRadius(10)
-				.padding()
-				
-				// Users list
-				List(filteredUsers, id: \.id) { user in
-					UserRowView(
-						user: user,
-						isSelected: taggedFriends.contains { $0.id == user.id },
-						onToggle: {
-							if let index = taggedFriends.firstIndex(where: { $0.id == user.id }) {
-								taggedFriends.remove(at: index)
-							} else {
-								taggedFriends.append(user)
-							}
-						}
-					)
+			Group {
+				if collections.isEmpty {
+					VStack(spacing: 16) {
+						Image(systemName: "folder.badge.plus")
+							.font(.system(size: 60))
+							.foregroundColor(.gray)
+						Text("No Collections")
+							.font(.title2)
+							.fontWeight(.semibold)
+						Text("Create a collection first to post your photos and videos")
+							.font(.subheadline)
+							.foregroundColor(.gray)
+							.multilineTextAlignment(.center)
+							.padding(.horizontal, 40)
+					}
+					.frame(maxWidth: .infinity, maxHeight: .infinity)
+				} else {
+					List(collections, id: \.id) { collection in
+						collectionRow(collection)
+					}
 				}
 			}
-			.navigationTitle("Tag Friends")
+			.navigationTitle("Select Collection")
 			.navigationBarTitleDisplayMode(.inline)
 			.toolbar {
-				ToolbarItem(placement: .navigationBarTrailing) {
-					Button("Done") { dismiss() }
+				ToolbarItem(placement: .navigationBarLeading) {
+					Button("Cancel") {
+						dismiss()
+					}
 				}
 			}
 		}
 	}
-}
-
-struct UserRowView: View {
-	let user: CYUser
-	let isSelected: Bool
-	let onToggle: () -> Void
-	@Environment(\.colorScheme) var colorScheme
 	
-	var body: some View {
-		Button(action: onToggle) {
+	private func collectionRow(_ collection: CollectionData) -> some View {
+		Button(action: {
+			selectedCollection = collection
+			dismiss()
+		}) {
 			HStack {
-				if !user.profileImageURL.isEmpty, let url = URL(string: user.profileImageURL) {
-					AsyncImage(url: url) { image in
-						image.resizable()
-					} placeholder: {
-						Circle().fill(Color.gray.opacity(0.3))
-					}
-					.frame(width: 44, height: 44)
-					.clipShape(Circle())
-				} else {
-					DefaultProfileImageView(size: 44)
-				}
-				
-				VStack(alignment: .leading, spacing: 2) {
-					Text(user.username)
-						.font(.headline)
-						.foregroundColor(.primary)
-					Text(user.name)
-						.font(.caption)
-						.foregroundColor(.secondary)
-				}
-				
+				collectionInfo(collection)
 				Spacer()
-				
-				Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-					.foregroundColor(isSelected ? .blue : .gray)
+				selectionIndicator(collection)
 			}
 		}
 		.buttonStyle(PlainButtonStyle())
 	}
+	
+	private func collectionInfo(_ collection: CollectionData) -> some View {
+		VStack(alignment: .leading) {
+			Text(collection.name)
+				.font(.headline)
+				.foregroundColor(colorScheme == .dark ? .white : .black)
+			Text("\(collection.memberCount) members")
+				.font(.caption)
+				.foregroundColor(.gray)
+		}
+	}
+	
+	private func selectionIndicator(_ collection: CollectionData) -> some View {
+		Group {
+			if selectedCollection?.id == collection.id {
+				Image(systemName: "checkmark")
+					.foregroundColor(.blue)
+			}
+		}
+	}
 }
 
+// MARK: - Video Thumbnail Generation
+
+private func generateVideoThumbnail(from videoURL: URL) async throws -> UIImage {
+	print("🎥 Generating thumbnail for preview: \(videoURL)")
+	
+	let asset = AVURLAsset(url: videoURL)
+	let imageGenerator = AVAssetImageGenerator(asset: asset)
+	imageGenerator.appliesPreferredTrackTransform = true
+	imageGenerator.maximumSize = CGSize(width: 300, height: 300)
+	imageGenerator.requestedTimeToleranceBefore = .zero
+	imageGenerator.requestedTimeToleranceAfter = .zero
+	
+	// Get thumbnail at the very beginning (0.1 seconds) for a more representative frame
+	let time = CMTime(seconds: 0.1, preferredTimescale: 600)
+	
+	let cgImage = try await imageGenerator.image(at: time).image
+	let thumbnail = UIImage(cgImage: cgImage)
+	
+	print("🎥 Preview thumbnail generated successfully at 0.1 seconds")
+	return thumbnail
+}
+
+// MARK: - Helper Functions
+
+private func hideKeyboard() {
+	UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
