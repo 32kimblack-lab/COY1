@@ -1,0 +1,12 @@
+{
+  "name": "coy-backend",
+  "version": "1.0.0",
+  "main": "api/index.js",
+  "dependencies": {
+    "mongodb": "^6.0.0",
+    "firebase-admin": "^12.0.0"
+  },
+  "devDependencies": {
+    "@vercel/node": "^3.0.0"
+  }
+}
