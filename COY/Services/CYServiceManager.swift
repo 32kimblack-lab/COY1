@@ -41,22 +41,58 @@ final class CYServiceManager: ObservableObject {
 			throw NSError(domain: "CYServiceManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "No authenticated user"])
 		}
 		
-		// Use backend API instead of direct Firestore
-		let apiClient = APIClient.shared
-		let userResponse = try await apiClient.getUser(userId: userId)
-		
-		self.currentUser = CurrentUser(
-			profileImageURL: userResponse.profileImageURL ?? "",
-			backgroundImageURL: userResponse.backgroundImageURL ?? "",
-			name: userResponse.name,
-			username: userResponse.username,
-			blockedUsers: userResponse.blockedUsers ?? [],
-			blockedCollectionIds: userResponse.blockedCollectionIds ?? [],
-			hiddenPostIds: userResponse.hiddenPostIds ?? [],
-			starredPostIds: userResponse.starredPostIds ?? [],
-			collectionSortPreference: userResponse.collectionSortPreference,
-			customCollectionOrder: userResponse.customCollectionOrder ?? []
-		)
+		// Try backend API first, fall back to Firebase if it fails
+		do {
+			let apiClient = APIClient.shared
+			let userResponse = try await apiClient.getUser(userId: userId)
+			
+			self.currentUser = CurrentUser(
+				profileImageURL: userResponse.profileImageURL ?? "",
+				backgroundImageURL: userResponse.backgroundImageURL ?? "",
+				name: userResponse.name,
+				username: userResponse.username,
+				blockedUsers: userResponse.blockedUsers ?? [],
+				blockedCollectionIds: userResponse.blockedCollectionIds ?? [],
+				hiddenPostIds: userResponse.hiddenPostIds ?? [],
+				starredPostIds: userResponse.starredPostIds ?? [],
+				collectionSortPreference: userResponse.collectionSortPreference,
+				customCollectionOrder: userResponse.customCollectionOrder ?? []
+			)
+		} catch {
+			// Fall back to Firebase if backend fails
+			print("⚠️ Backend loadCurrentUser failed, falling back to Firebase: \(error.localizedDescription)")
+			let db = Firestore.firestore()
+			let doc = try await db.collection("users").document(userId).getDocument()
+			
+			if let data = doc.data() {
+				self.currentUser = CurrentUser(
+					profileImageURL: data["profileImageURL"] as? String ?? "",
+					backgroundImageURL: data["backgroundImageURL"] as? String ?? "",
+					name: data["name"] as? String ?? "",
+					username: data["username"] as? String ?? "",
+					blockedUsers: data["blockedUsers"] as? [String] ?? [],
+					blockedCollectionIds: data["blockedCollectionIds"] as? [String] ?? [],
+					hiddenPostIds: data["hiddenPostIds"] as? [String] ?? [],
+					starredPostIds: data["starredPostIds"] as? [String] ?? [],
+					collectionSortPreference: data["collectionSortPreference"] as? String,
+					customCollectionOrder: data["customCollectionOrder"] as? [String] ?? []
+				)
+			} else {
+				// Create default user if not found
+				self.currentUser = CurrentUser(
+					profileImageURL: "",
+					backgroundImageURL: "",
+					name: "",
+					username: "",
+					blockedUsers: [],
+					blockedCollectionIds: [],
+					hiddenPostIds: [],
+					starredPostIds: [],
+					collectionSortPreference: nil,
+					customCollectionOrder: []
+				)
+			}
+		}
 	}
 	
 	func getBlockedUsers() -> [String] {

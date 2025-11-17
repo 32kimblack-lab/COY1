@@ -82,25 +82,45 @@ final class UserService: ObservableObject {
 	func getUser(userId: String) async throws -> AppUser? {
 		if let cached = cache[userId] { return cached }
 		
-		let db = Firestore.firestore()
-		let doc = try await db.collection("users").document(userId).getDocument()
-		
-		guard let data = doc.data() else { return nil }
-		
-		let user = AppUser(
-			userId: userId,
-			name: data["name"] as? String ?? "",
-			username: data["username"] as? String ?? "",
-			profileImageURL: data["profileImageURL"] as? String,
-			backgroundImageURL: data["backgroundImageURL"] as? String,
-			birthMonth: data["birthMonth"] as? String ?? "",
-			birthDay: data["birthDay"] as? String ?? "",
-			birthYear: data["birthYear"] as? String ?? "",
-			email: data["email"] as? String ?? ""
-		)
-		
-		cache[userId] = user
-		return user
+		// Try backend API first, fall back to Firebase if it fails
+		do {
+			let userResponse = try await APIClient.shared.getUser(userId: userId)
+			let user = AppUser(
+				userId: userResponse.userId,
+				name: userResponse.name,
+				username: userResponse.username,
+				profileImageURL: userResponse.profileImageURL,
+				backgroundImageURL: userResponse.backgroundImageURL,
+				birthMonth: userResponse.birthMonth ?? "",
+				birthDay: userResponse.birthDay ?? "",
+				birthYear: userResponse.birthYear ?? "",
+				email: userResponse.email
+			)
+			cache[userId] = user
+			return user
+		} catch {
+			// Fall back to Firebase if backend fails
+			print("⚠️ Backend getUser failed, falling back to Firebase: \(error.localizedDescription)")
+			let db = Firestore.firestore()
+			let doc = try await db.collection("users").document(userId).getDocument()
+			
+			guard let data = doc.data() else { return nil }
+			
+			let user = AppUser(
+				userId: userId,
+				name: data["name"] as? String ?? "",
+				username: data["username"] as? String ?? "",
+				profileImageURL: data["profileImageURL"] as? String,
+				backgroundImageURL: data["backgroundImageURL"] as? String,
+				birthMonth: data["birthMonth"] as? String ?? "",
+				birthDay: data["birthDay"] as? String ?? "",
+				birthYear: data["birthYear"] as? String ?? "",
+				email: data["email"] as? String ?? ""
+			)
+			
+			cache[userId] = user
+			return user
+		}
 	}
 	
 	func getAllUsers() async throws -> [User] {

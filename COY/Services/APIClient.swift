@@ -9,7 +9,7 @@ final class APIClient {
 	private init() {}
 	
 	// Vercel API URL - Update this if your deployment URL changes
-	private let baseURL = "https://backend-delta-two-66.vercel.app/api"
+	private let baseURL = "https://backend-delta-two-66.vercel.app"
 	
 	// MARK: - User Profile Endpoints
 	
@@ -51,7 +51,7 @@ final class APIClient {
 			imageDataDict["backgroundImage"] = bgData
 		}
 		
-		request.httpBody = try createMultipartBody(formData: formData, images: imageDataDict)
+		request.httpBody = try createMultipartBody(formData: formData, media: imageDataDict)
 		request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 		
 		let (data, response) = try await URLSession.shared.data(for: request)
@@ -99,7 +99,7 @@ final class APIClient {
 			imageDataDict["image"] = imgData
 		}
 		
-		request.httpBody = try createMultipartBody(formData: formData, images: imageDataDict)
+		request.httpBody = try createMultipartBody(formData: formData, media: imageDataDict)
 		request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 		
 		let (data, response) = try await URLSession.shared.data(for: request)
@@ -113,6 +113,94 @@ final class APIClient {
 		let (data, response) = try await URLSession.shared.data(for: request)
 		try validateResponse(response)
 		return try JSONDecoder().decode([CollectionResponse].self, from: data)
+	}
+	
+	/// Create a post in a collection
+	func createPost(
+		collectionId: String,
+		caption: String?,
+		mediaItems: [CreatePostMediaItem],
+		taggedUsers: [String]?,
+		allowDownload: Bool,
+		allowReplies: Bool
+	) async throws -> PostResponse {
+		var request = try await createRequest(endpoint: "/collections/\(collectionId)/posts", method: "POST")
+		
+		var formData: [String: String] = [
+			"allowDownload": String(allowDownload),
+			"allowReplies": String(allowReplies)
+		]
+		
+		if let caption = caption, !caption.isEmpty {
+			formData["caption"] = caption
+		}
+		
+		if let taggedUsers = taggedUsers, !taggedUsers.isEmpty {
+			formData["taggedUsers"] = taggedUsers.joined(separator: ",")
+		}
+		
+		// Add media files (images and videos)
+		var mediaDataDict: [String: Data] = [:]
+		var videoKeys: Set<String> = [] // Track which keys are videos
+		for (index, item) in mediaItems.enumerated() {
+			let key = "media\(index)"
+			if let image = item.image,
+			   let imageData = image.jpegData(compressionQuality: 0.8) {
+				formData[key] = key
+				mediaDataDict[key] = imageData
+			} else if let videoURL = item.videoURL,
+					  let videoData = try? Data(contentsOf: videoURL) {
+				formData[key] = key
+				mediaDataDict[key] = videoData
+				videoKeys.insert(key) // Mark as video
+			}
+		}
+		
+		request.httpBody = try createMultipartBody(formData: formData, media: mediaDataDict, videoKeys: videoKeys)
+		request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+		
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response)
+		return try JSONDecoder().decode(PostResponse.self, from: data)
+	}
+	
+	/// Get posts for a collection
+	func getCollectionPosts(collectionId: String) async throws -> [CollectionPost] {
+		let request = try await createRequest(endpoint: "/collections/\(collectionId)/posts", method: "GET")
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response)
+		
+		let postsResponse = try JSONDecoder().decode(PostsResponse.self, from: data)
+		
+		// Convert PostData to CollectionPost
+		return postsResponse.posts.map { postData in
+			// Parse createdAt date
+			let dateFormatter = ISO8601DateFormatter()
+			dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+			let createdAt = dateFormatter.date(from: postData.createdAt) ?? Date()
+			
+			// Convert PostMediaItem to MediaItem
+			var mediaItem: MediaItem?
+			if let postMedia = postData.firstMediaItem {
+				mediaItem = MediaItem(
+					imageURL: postMedia.imageURL,
+					thumbnailURL: postMedia.thumbnailURL,
+					videoURL: postMedia.videoURL,
+					videoDuration: postMedia.videoDuration,
+					isVideo: postMedia.isVideo ?? false
+				)
+			}
+			
+			return CollectionPost(
+				id: postData.id,
+				title: postData.title,
+				collectionId: postData.collectionId,
+				authorId: postData.authorId,
+				authorName: postData.authorName,
+				createdAt: createdAt,
+				firstMediaItem: mediaItem
+			)
+		}
 	}
 	
 	/// Get visible collections (for home/search feeds)
@@ -158,7 +246,7 @@ final class APIClient {
 	// MARK: - Helper Methods
 	
 	private func createRequest(endpoint: String, method: String) async throws -> URLRequest {
-		guard let url = URL(string: "\(baseURL)\(endpoint)") else {
+		guard let url = URL(string: "\(baseURL)/api\(endpoint)") else {
 			throw APIError.invalidURL
 		}
 		
@@ -193,21 +281,29 @@ final class APIClient {
 	
 	private let boundary = "Boundary-\(UUID().uuidString)"
 	
-	private func createMultipartBody(formData: [String: String], images: [String: Data]) throws -> Data {
+	private func createMultipartBody(formData: [String: String], media: [String: Data], videoKeys: Set<String> = []) throws -> Data {
 		var body = Data()
 		
 		// Add form fields
 		for (key, value) in formData {
+			// Skip media keys - they're added separately
+			if media.keys.contains(key) {
+				continue
+			}
 			body.append("--\(boundary)\r\n".data(using: .utf8)!)
 			body.append("Content-Disposition: form-data; name=\"\(key)\"\r\n\r\n".data(using: .utf8)!)
 			body.append("\(value)\r\n".data(using: .utf8)!)
 		}
 		
-		// Add image files
-		for (key, data) in images {
+		// Add media files (images and videos)
+		for (key, data) in media {
+			let isVideo = videoKeys.contains(key)
+			let contentType = isVideo ? "video/mp4" : "image/jpeg"
+			let fileExtension = isVideo ? "mp4" : "jpg"
+			
 			body.append("--\(boundary)\r\n".data(using: .utf8)!)
-			body.append("Content-Disposition: form-data; name=\"\(key)\"; filename=\"\(key).jpg\"\r\n".data(using: .utf8)!)
-			body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+			body.append("Content-Disposition: form-data; name=\"\(key)\"; filename=\"\(key).\(fileExtension)\"\r\n".data(using: .utf8)!)
+			body.append("Content-Type: \(contentType)\r\n\r\n".data(using: .utf8)!)
 			body.append(data)
 			body.append("\r\n".data(using: .utf8)!)
 		}
@@ -235,6 +331,25 @@ struct UserResponse: Codable {
 	let starredPostIds: [String]?
 	let collectionSortPreference: String?
 	let customCollectionOrder: [String]?
+	
+	// Handle backend response - map uid (Firebase user ID) to userId
+	enum CodingKeys: String, CodingKey {
+		case userId = "uid"  // Backend uses "uid" for Firebase user ID
+		case name
+		case username
+		case email
+		case profileImageURL
+		case backgroundImageURL
+		case birthMonth
+		case birthDay
+		case birthYear
+		case blockedUsers
+		case blockedCollectionIds
+		case hiddenPostIds
+		case starredPostIds
+		case collectionSortPreference
+		case customCollectionOrder
+	}
 }
 
 struct CollectionResponse: Codable {
@@ -249,6 +364,39 @@ struct CollectionResponse: Codable {
 	let members: [String]
 	let memberCount: Int
 	let createdAt: String
+}
+
+struct PostResponse: Codable {
+	let postId: String
+	let collectionId: String
+	let mediaURLs: [String]
+}
+
+// Response model for getting collection posts
+struct PostsResponse: Codable {
+	let posts: [PostData]
+}
+
+struct PostData: Codable {
+	let id: String
+	let title: String
+	let collectionId: String
+	let authorId: String
+	let authorName: String
+	let createdAt: String
+	let firstMediaItem: PostMediaItem?
+	let caption: String?
+	let allowDownload: Bool?
+	let allowReplies: Bool?
+	let taggedUsers: [String]?
+}
+
+struct PostMediaItem: Codable {
+	let imageURL: String?
+	let thumbnailURL: String?
+	let videoURL: String?
+	let videoDuration: Double?
+	let isVideo: Bool?
 }
 
 // MARK: - API Errors
