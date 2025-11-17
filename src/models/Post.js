@@ -13,6 +13,13 @@ const postSchema = new mongoose.Schema({
     videoDuration: Number,
     isVideo: Boolean
   },
+  mediaItems: [{
+    imageURL: String,
+    thumbnailURL: String,
+    videoURL: String,
+    videoDuration: Number,
+    isVideo: Boolean
+  }],
   allowDownload: { type: Boolean, default: false },
   allowReplies: { type: Boolean, default: true },
   taggedUsers: [{ type: String }]

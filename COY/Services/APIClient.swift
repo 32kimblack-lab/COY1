@@ -153,6 +153,10 @@ final class APIClient {
 				formData[key] = key
 				mediaDataDict[key] = videoData
 				videoKeys.insert(key) // Mark as video
+				// Add video duration if available
+				if let duration = item.videoDuration {
+					formData["\(key)_duration"] = String(duration)
+				}
 			}
 		}
 		
@@ -298,8 +302,31 @@ final class APIClient {
 		// Add media files (images and videos)
 		for (key, data) in media {
 			let isVideo = videoKeys.contains(key)
-			let contentType = isVideo ? "video/mp4" : "image/jpeg"
-			let fileExtension = isVideo ? "mp4" : "jpg"
+			// Determine MIME type based on file extension or video detection
+			let contentType: String
+			let fileExtension: String
+			
+			if isVideo {
+				// Try to detect video format from data or default to mp4
+				// Check first few bytes for video signatures
+				if data.count >= 4 {
+					let header = data.prefix(4)
+					// QuickTime/MOV files start with specific bytes
+					if header[0] == 0x00 && header[1] == 0x00 && header[2] == 0x00 {
+						contentType = "video/quicktime"
+						fileExtension = "mov"
+					} else {
+						contentType = "video/mp4"
+						fileExtension = "mp4"
+					}
+				} else {
+					contentType = "video/mp4"
+					fileExtension = "mp4"
+				}
+			} else {
+				contentType = "image/jpeg"
+				fileExtension = "jpg"
+			}
 			
 			body.append("--\(boundary)\r\n".data(using: .utf8)!)
 			body.append("Content-Disposition: form-data; name=\"\(key)\"; filename=\"\(key).\(fileExtension)\"\r\n".data(using: .utf8)!)

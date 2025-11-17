@@ -20,14 +20,29 @@ const BUCKET_NAME = process.env.AWS_S3_BUCKET_NAME || 'coy-images-2025';
  */
 async function uploadToS3(imageBuffer, folder, mimeType = 'image/jpeg') {
   try {
-    const fileName = `${folder}/${uuidv4()}.${mimeType === 'image/png' ? 'png' : 'jpg'}`;
+    // Determine file extension based on mime type
+    let fileExtension = 'jpg';
+    if (mimeType === 'image/png') {
+      fileExtension = 'png';
+    } else if (mimeType && mimeType.startsWith('video/')) {
+      // Handle video types
+      if (mimeType.includes('mp4')) {
+        fileExtension = 'mp4';
+      } else if (mimeType.includes('mov')) {
+        fileExtension = 'mov';
+      } else {
+        fileExtension = 'mp4'; // Default for videos
+      }
+    }
+    
+    const fileName = `${folder}/${uuidv4()}.${fileExtension}`;
     
     const params = {
       Bucket: BUCKET_NAME,
       Key: fileName,
       Body: imageBuffer,
       ContentType: mimeType,
-      ACL: 'public-read' // Make images publicly accessible
+      ACL: 'public-read' // Make files publicly accessible
     };
 
     const result = await s3.upload(params).promise();
