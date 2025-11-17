@@ -80,10 +80,10 @@ struct CYInsideCollectionView: View {
 			}
 		}
 		.sheet(isPresented: $showPhotoPicker) {
-			SimplePhotoPicker(
+			CustomPhotoPickerView(
 				selectedMedia: $selectedMedia,
-				maxSelection: 5,
-				isProcessing: $isProcessingMedia
+				maxSelectionCount: 5,
+				isProcessingMedia: $isProcessingMedia
 			)
 		}
 		.sheet(isPresented: Binding(
