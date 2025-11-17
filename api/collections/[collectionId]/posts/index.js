@@ -1,6 +1,5 @@
-// api/collections/[collectionId]/posts/index.js
-import { connectToDatabase } from '../../../lib/mongodb';
-import { verifyToken } from '../../../lib/auth';
+const { connectToDatabase } = require('../../../lib/mongodb');
+const { verifyToken } = require('../../../lib/auth');
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
