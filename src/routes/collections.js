@@ -77,6 +77,143 @@ router.post('/', verifyToken, upload.single('image'), async (req, res) => {
   }
 });
 
+// ==========================================
+// DISCOVER/SEARCH ROUTES - MUST BE BEFORE ALL PARAMETERIZED ROUTES
+// ==========================================
+
+// Search collections - returns all public collections and collections user has access to
+router.get('/discover/collections', verifyToken, async (req, res) => {
+  try {
+    console.log('🔍 Search collections endpoint hit');
+    const userId = req.userId; // From verifyToken middleware
+    const { query } = req.query; // Optional search query
+    console.log('Search query:', query, 'UserId:', userId);
+
+    // Find all collections that the user can see:
+    // 1. Public collections (isPublic === true)
+    // 2. Collections where user is owner
+    // 3. Collections where user is a member
+    let collectionsQuery = {
+      $or: [
+        { isPublic: true },
+        { ownerId: userId },
+        { members: userId }
+      ]
+    };
+
+    // If search query provided, filter by name or description
+    if (query && query.trim()) {
+      const searchRegex = new RegExp(query.trim(), 'i');
+      collectionsQuery = {
+        $and: [
+          {
+            $or: [
+              { isPublic: true },
+              { ownerId: userId },
+              { members: userId }
+            ]
+          },
+          {
+            $or: [
+              { name: searchRegex },
+              { description: searchRegex }
+            ]
+          }
+        ]
+      };
+    }
+
+    const collections = await Collection.find(collectionsQuery)
+      .sort({ createdAt: -1 })
+      .limit(100); // Limit results
+
+    res.json(collections.map(c => ({
+      id: c._id.toString(),
+      name: c.name,
+      description: c.description || '',
+      type: c.type,
+      isPublic: c.isPublic || false,
+      ownerId: c.ownerId,
+      ownerName: c.ownerName || '',
+      imageURL: c.imageURL || null,
+      members: c.members || [],
+      memberCount: c.memberCount || c.members?.length || 0,
+      createdAt: c.createdAt ? c.createdAt.toISOString() : new Date().toISOString()
+    })));
+  } catch (error) {
+    console.error('Search collections error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Search posts - returns posts from all accessible collections
+router.get('/discover/posts', verifyToken, async (req, res) => {
+  try {
+    console.log('🔍 Search posts endpoint hit');
+    const userId = req.userId; // From verifyToken middleware
+    const { query } = req.query; // Optional search query
+    console.log('Search query:', query, 'UserId:', userId);
+
+    // First, find all collections the user can access
+    const accessibleCollections = await Collection.find({
+      $or: [
+        { isPublic: true },
+        { ownerId: userId },
+        { members: userId }
+      ]
+    });
+
+    const accessibleCollectionIds = accessibleCollections.map(c => c._id.toString());
+
+    if (accessibleCollectionIds.length === 0) {
+      return res.json({ posts: [] });
+    }
+
+    // Build posts query
+    let postsQuery = {
+      collectionId: { $in: accessibleCollectionIds }
+    };
+
+    // If search query provided, filter by title/caption
+    if (query && query.trim()) {
+      const searchRegex = new RegExp(query.trim(), 'i');
+      postsQuery = {
+        $and: [
+          { collectionId: { $in: accessibleCollectionIds } },
+          {
+            $or: [
+              { title: searchRegex },
+              { caption: searchRegex }
+            ]
+          }
+        ]
+      };
+    }
+
+    const posts = await Post.find(postsQuery)
+      .sort({ createdAt: -1 })
+      .limit(100); // Limit results
+
+    res.json({ posts: posts.map(p => ({
+      id: p._id.toString(),
+      title: p.title || p.caption || '',
+      collectionId: p.collectionId,
+      authorId: p.authorId,
+      authorName: p.authorName || '',
+      createdAt: p.createdAt ? p.createdAt.toISOString() : new Date().toISOString(),
+      firstMediaItem: p.firstMediaItem || null,
+      mediaItems: p.mediaItems || [],
+      caption: p.caption || '',
+      allowDownload: p.allowDownload || false,
+      allowReplies: p.allowReplies !== false, // Default to true
+      taggedUsers: p.taggedUsers || []
+    })) });
+  } catch (error) {
+    console.error('Search posts error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Create a post in a collection
 router.post('/:collectionId/posts', verifyToken, (req, res, next) => {
   // Handle multer errors

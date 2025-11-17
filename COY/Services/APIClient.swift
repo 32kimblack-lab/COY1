@@ -235,6 +235,105 @@ final class APIClient {
 		return try JSONDecoder().decode([CollectionResponse].self, from: data)
 	}
 	
+	/// Search collections - returns all public collections and collections user has access to
+	func searchCollections(query: String? = nil) async throws -> [CollectionResponse] {
+		var endpoint = "/collections/discover/collections"
+		if let query = query, !query.isEmpty {
+			let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+			endpoint += "?query=\(encodedQuery)"
+		}
+		print("🔍 Searching collections at: \(baseURL)/api\(endpoint)")
+		let request = try await createRequest(endpoint: endpoint, method: "GET")
+		let (data, response) = try await URLSession.shared.data(for: request)
+		
+		// Log response for debugging
+		if let httpResponse = response as? HTTPURLResponse {
+			print("📡 Collections search response: \(httpResponse.statusCode)")
+			if httpResponse.statusCode != 200 {
+				if let errorData = String(data: data, encoding: .utf8) {
+					print("❌ Error response: \(errorData)")
+				}
+			}
+		}
+		
+		try validateResponse(response)
+		return try JSONDecoder().decode([CollectionResponse].self, from: data)
+	}
+	
+	/// Search posts - returns posts from all accessible collections
+	func searchPosts(query: String? = nil) async throws -> [CollectionPost] {
+		var endpoint = "/collections/discover/posts"
+		if let query = query, !query.isEmpty {
+			let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+			endpoint += "?query=\(encodedQuery)"
+		}
+		print("🔍 Searching posts at: \(baseURL)/api\(endpoint)")
+		let request = try await createRequest(endpoint: endpoint, method: "GET")
+		let (data, response) = try await URLSession.shared.data(for: request)
+		
+		// Log response for debugging
+		if let httpResponse = response as? HTTPURLResponse {
+			print("📡 Posts search response: \(httpResponse.statusCode)")
+			if httpResponse.statusCode != 200 {
+				if let errorData = String(data: data, encoding: .utf8) {
+					print("❌ Error response: \(errorData)")
+				}
+			}
+		}
+		
+		try validateResponse(response)
+		
+		let postsResponse = try JSONDecoder().decode(PostsResponse.self, from: data)
+		
+		// Convert PostData to CollectionPost
+		return postsResponse.posts.map { postData in
+			// Parse createdAt date
+			let dateFormatter = ISO8601DateFormatter()
+			dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+			let createdAt = dateFormatter.date(from: postData.createdAt) ?? Date()
+			
+			// Convert PostMediaItem to MediaItem
+			var mediaItem: MediaItem?
+			var allMediaItems: [MediaItem] = []
+			
+			// Use mediaItems array if available, otherwise fall back to firstMediaItem
+			if let mediaItemsArray = postData.mediaItems, !mediaItemsArray.isEmpty {
+				allMediaItems = mediaItemsArray.map { postMedia in
+					MediaItem(
+						imageURL: postMedia.imageURL,
+						thumbnailURL: postMedia.thumbnailURL,
+						videoURL: postMedia.videoURL,
+						videoDuration: postMedia.videoDuration,
+						isVideo: postMedia.isVideo ?? false
+					)
+				}
+				mediaItem = allMediaItems.first
+			} else if let postMedia = postData.firstMediaItem {
+				mediaItem = MediaItem(
+					imageURL: postMedia.imageURL,
+					thumbnailURL: postMedia.thumbnailURL,
+					videoURL: postMedia.videoURL,
+					videoDuration: postMedia.videoDuration,
+					isVideo: postMedia.isVideo ?? false
+				)
+				if let item = mediaItem {
+					allMediaItems = [item]
+				}
+			}
+			
+			return CollectionPost(
+				id: postData.id,
+				title: postData.title,
+				collectionId: postData.collectionId,
+				authorId: postData.authorId,
+				authorName: postData.authorName,
+				createdAt: createdAt,
+				firstMediaItem: mediaItem,
+				mediaItems: allMediaItems
+			)
+		}
+	}
+	
 	/// Get a specific collection
 	func getCollection(collectionId: String) async throws -> CollectionResponse {
 		let request = try await createRequest(endpoint: "/collections/\(collectionId)", method: "GET")
@@ -432,6 +531,7 @@ struct PostData: Codable {
 	let authorName: String
 	let createdAt: String
 	let firstMediaItem: PostMediaItem?
+	let mediaItems: [PostMediaItem]?
 	let caption: String?
 	let allowDownload: Bool?
 	let allowReplies: Bool?
