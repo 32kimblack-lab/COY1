@@ -117,7 +117,7 @@ struct PinterestPostCard: View {
 		.onAppear {
 			checkStarVisibility()
 		}
-		.sheet(isPresented: $showPostDetail) {
+		.fullScreenCover(isPresented: $showPostDetail) {
 			CYPostDetailView(post: post, collection: collection)
 		}
 	}

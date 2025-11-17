@@ -16,7 +16,7 @@ struct CYPostDetailView: View {
 	private let maxHeight: CGFloat = UIScreen.main.bounds.height * 0.6
 	
 	var body: some View {
-		NavigationView {
+		NavigationStack {
 			ScrollView {
 				VStack(alignment: .leading, spacing: 0) {
 					// Media Carousel
