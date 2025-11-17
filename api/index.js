@@ -57,59 +57,59 @@ app.use(async (req, res, next) => {
 let authRoutes, userRoutes, collectionRoutes, postRoutes, chatRoutes, notificationRoutes, friendRequestRoutes;
 
 try {
-  authRoutes = require('../routes/auth');
+  authRoutes = require('../src/routes/auth');
   app.use('/api/auth', authRoutes);
   console.log('✅ Auth routes loaded');
 } catch (error) {
-  console.error('❌ Failed to load auth routes:', error);
+  console.log('⚠️ Auth routes not found (optional)');
 }
 
 try {
-  userRoutes = require('../routes/users');
+  userRoutes = require('../src/routes/users');
   app.use('/api/users', userRoutes);
   console.log('✅ User routes loaded');
 } catch (error) {
-  console.error('❌ Failed to load user routes:', error);
+  console.log('⚠️ User routes not found (optional)');
 }
 
 try {
-  collectionRoutes = require('../routes/collections');
+  collectionRoutes = require('../src/routes/collections');
   app.use('/api/collections', collectionRoutes);
   console.log('✅ Collection routes loaded');
 } catch (error) {
-  console.error('❌ Failed to load collection routes:', error);
+  console.log('⚠️ Collection routes not found (optional)');
 }
 
 try {
-  postRoutes = require('../routes/posts');
+  postRoutes = require('../src/routes/posts');
   app.use('/api/posts', postRoutes);
   console.log('✅ Post routes loaded');
 } catch (error) {
-  console.error('❌ Failed to load post routes:', error);
+  console.log('⚠️ Post routes not found (optional)');
 }
 
 try {
-  chatRoutes = require('../routes/enhancedChat');
+  chatRoutes = require('../src/routes/enhancedChat');
   app.use('/api/chat', chatRoutes);
   console.log('✅ Chat routes loaded');
 } catch (error) {
-  console.error('❌ Failed to load chat routes:', error);
+  console.log('⚠️ Chat routes not found (optional)');
 }
 
 try {
-  notificationRoutes = require('../routes/notifications');
+  notificationRoutes = require('../src/routes/notifications');
   app.use('/api/notifications', notificationRoutes);
   console.log('✅ Notification routes loaded');
 } catch (error) {
-  console.error('❌ Failed to load notification routes:', error);
+  console.log('⚠️ Notification routes not found (optional)');
 }
 
 try {
-  friendRequestRoutes = require('../routes/friendRequests');
+  friendRequestRoutes = require('../src/routes/friendRequests');
   app.use('/api/friend-requests', friendRequestRoutes);
   console.log('✅ Friend request routes loaded');
 } catch (error) {
-  console.error('❌ Failed to load friend request routes:', error);
+  console.log('⚠️ Friend request routes not found (optional)');
 }
 
 // Root route
