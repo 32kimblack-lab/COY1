@@ -82,45 +82,47 @@ final class UserService: ObservableObject {
 	func getUser(userId: String) async throws -> AppUser? {
 		if let cached = cache[userId] { return cached }
 		
-		// Try backend API first, fall back to Firebase if it fails
-		do {
-			let userResponse = try await APIClient.shared.getUser(userId: userId)
-			let user = AppUser(
-				userId: userResponse.userId,
-				name: userResponse.name,
-				username: userResponse.username,
-				profileImageURL: userResponse.profileImageURL,
-				backgroundImageURL: userResponse.backgroundImageURL,
-				birthMonth: userResponse.birthMonth ?? "",
-				birthDay: userResponse.birthDay ?? "",
-				birthYear: userResponse.birthYear ?? "",
-				email: userResponse.email
-			)
-			cache[userId] = user
-			return user
-		} catch {
-			// Fall back to Firebase if backend fails
-			print("⚠️ Backend getUser failed, falling back to Firebase: \(error.localizedDescription)")
-			let db = Firestore.firestore()
-			let doc = try await db.collection("users").document(userId).getDocument()
-			
-			guard let data = doc.data() else { return nil }
-			
-			let user = AppUser(
-				userId: userId,
-				name: data["name"] as? String ?? "",
-				username: data["username"] as? String ?? "",
-				profileImageURL: data["profileImageURL"] as? String,
-				backgroundImageURL: data["backgroundImageURL"] as? String,
-				birthMonth: data["birthMonth"] as? String ?? "",
-				birthDay: data["birthDay"] as? String ?? "",
-				birthYear: data["birthYear"] as? String ?? "",
-				email: data["email"] as? String ?? ""
-			)
-			
-			cache[userId] = user
-			return user
+		// Firebase is source of truth - load from Firebase first
+		let db = Firestore.firestore()
+		let doc = try await db.collection("users").document(userId).getDocument()
+		
+		guard let data = doc.data() else { return nil }
+		
+		let user = AppUser(
+			userId: userId,
+			name: data["name"] as? String ?? "",
+			username: data["username"] as? String ?? "",
+			profileImageURL: data["profileImageURL"] as? String,
+			backgroundImageURL: data["backgroundImageURL"] as? String,
+			birthMonth: data["birthMonth"] as? String ?? "",
+			birthDay: data["birthDay"] as? String ?? "",
+			birthYear: data["birthYear"] as? String ?? "",
+			email: data["email"] as? String ?? ""
+		)
+		
+		cache[userId] = user
+		
+		// Sync to backend in background (don't wait for it)
+		Task {
+			do {
+				_ = try await APIClient.shared.createOrUpdateUser(
+					userId: userId,
+					name: user.name,
+					username: user.username,
+					email: user.email,
+					birthMonth: user.birthMonth,
+					birthDay: user.birthDay,
+					birthYear: user.birthYear,
+					profileImage: nil, // Don't re-upload images on read
+					backgroundImage: nil
+				)
+			} catch {
+				// Silent fail - Firebase is source of truth
+				print("⚠️ Background sync to backend failed (non-critical): \(error.localizedDescription)")
+			}
 		}
+		
+		return user
 	}
 	
 	func getAllUsers() async throws -> [User] {
@@ -150,21 +152,67 @@ final class UserService: ObservableObject {
 			"username": username
 		]
 		
-		// Upload images if provided
+		var profileImageURL: String?
+		var backgroundImageURL: String?
+		
+		// Upload images to Firebase Storage if provided
 		if let profileImage = profileImage {
 			let profileURL = try await uploadImage(profileImage, path: "profile_images/\(userId).jpg")
 			updateData["profileImageURL"] = profileURL
+			profileImageURL = profileURL
 		}
 		
 		if let backgroundImage = backgroundImage {
 			let backgroundURL = try await uploadImage(backgroundImage, path: "background_images/\(userId).jpg")
 			updateData["backgroundImageURL"] = backgroundURL
+			backgroundImageURL = backgroundURL
 		}
 		
+		// Save to Firebase FIRST (source of truth)
 		try await db.collection("users").document(userId).updateData(updateData)
 		
-		// Return updated user
-		return try await getUser(userId: userId) ?? AppUser(userId: userId, name: name, username: username)
+		// Get email and birth info from Firebase for backend sync
+		let firestoreDoc = try await db.collection("users").document(userId).getDocument()
+		let firestoreData = firestoreDoc.data() ?? [:]
+		let email = firestoreData["email"] as? String ?? ""
+		let birthMonth = firestoreData["birthMonth"] as? String ?? ""
+		let birthDay = firestoreData["birthDay"] as? String ?? ""
+		let birthYear = firestoreData["birthYear"] as? String ?? ""
+		
+		// Sync to backend API (this will upload images to S3 and save to MongoDB)
+		do {
+			_ = try await APIClient.shared.createOrUpdateUser(
+				userId: userId,
+				name: name,
+				username: username,
+				email: email,
+				birthMonth: birthMonth,
+				birthDay: birthDay,
+				birthYear: birthYear,
+				profileImage: profileImage,
+				backgroundImage: backgroundImage
+			)
+			print("✅ User profile synced to backend after Firebase update")
+		} catch {
+			// Log error but don't fail - Firebase is source of truth
+			print("⚠️ Failed to sync to backend (Firebase is source of truth): \(error.localizedDescription)")
+		}
+		
+		// Clear cache to force fresh load
+		cache[userId] = nil
+		
+		// Return updated user from Firebase (source of truth)
+		return AppUser(
+			userId: userId,
+			name: name,
+			username: username,
+			profileImageURL: profileImageURL ?? (firestoreData["profileImageURL"] as? String),
+			backgroundImageURL: backgroundImageURL ?? (firestoreData["backgroundImageURL"] as? String),
+			birthMonth: birthMonth,
+			birthDay: birthDay,
+			birthYear: birthYear,
+			email: email
+		)
 	}
 	
 	private func uploadImage(_ image: UIImage, path: String) async throws -> String {

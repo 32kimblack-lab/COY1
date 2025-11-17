@@ -337,31 +337,30 @@ struct EditProfileDesign: View {
 	private func loadUserData() {
 		guard let user = authService.user else { return }
 		
-		// Always load fresh data from backend to ensure we have the latest
-		// This prevents showing stale cached data
-		print("🔄 EditProfile: Loading fresh data from backend")
+		// Load from Firebase (source of truth) - not backend
+		print("🔄 EditProfile: Loading fresh data from Firebase (source of truth)")
 		
 		// Clear caches to force fresh load
 		UserService.shared.clearUserCache(userId: user.uid)
 		
 		Task {
 			do {
-				// Get user data from backend API (has latest image URLs from S3)
-				let backendUser = try await userService.getUser(userId: user.uid)
-				guard let backendUser = backendUser else {
-					print("❌ EditProfile: User not found in backend")
+				// Get user data from Firebase (source of truth)
+				let firebaseUser = try await userService.getUser(userId: user.uid)
+				guard let firebaseUser = firebaseUser else {
+					print("❌ EditProfile: User not found in Firebase")
 					return
 				}
 				
-				print("✅ EditProfile: Got user from backend - Name: \(backendUser.name), Username: \(backendUser.username)")
-				print("   - Profile URL: \(backendUser.profileImageURL ?? "nil")")
-				print("   - Background URL: \(backendUser.backgroundImageURL ?? "nil")")
+				print("✅ EditProfile: Got user from Firebase - Name: \(firebaseUser.name), Username: \(firebaseUser.username)")
+				print("   - Profile URL: \(firebaseUser.profileImageURL ?? "nil")")
+				print("   - Background URL: \(firebaseUser.backgroundImageURL ?? "nil")")
 				
-				// Extract URLs from backend (these are the latest S3 URLs)
-				let profileImageURL = backendUser.profileImageURL
-				let backgroundImageURL = backendUser.backgroundImageURL
+				// Extract URLs from Firebase (source of truth)
+				let profileImageURL = firebaseUser.profileImageURL
+				let backgroundImageURL = firebaseUser.backgroundImageURL
 				
-				// Also get additional data from Firestore (birthday, email, etc.)
+				// Get additional data from Firestore (birthday, email, etc.)
 				let db = Firestore.firestore()
 				let document = try await db.collection("users").document(user.uid).getDocument()
 				let firestoreData = document.data() ?? [:]
@@ -372,18 +371,18 @@ struct EditProfileDesign: View {
 				
 				let (loadedProfileImage, loadedBackgroundImage) = await (profileImageTask, backgroundImageTask)
 				
-				// Combine backend and Firestore data
+				// Combine Firebase data
 				var combinedData = firestoreData
-				combinedData["name"] = backendUser.name
-				combinedData["username"] = backendUser.username
+				combinedData["name"] = firebaseUser.name
+				combinedData["username"] = firebaseUser.username
 				combinedData["profileImageURL"] = profileImageURL ?? ""
 				combinedData["backgroundImageURL"] = backgroundImageURL ?? ""
 				
 				// Update cache with fresh data
 				let cache = EditProfileCache.shared
 				cache.userData = combinedData
-				cache.name = backendUser.name
-				cache.username = backendUser.username
+				cache.name = firebaseUser.name
+				cache.username = firebaseUser.username
 				cache.profileImage = loadedProfileImage
 				cache.backgroundImage = loadedBackgroundImage
 				cache.lastLoadedUserId = user.uid
@@ -391,13 +390,13 @@ struct EditProfileDesign: View {
 				// Update UI
 				await MainActor.run {
 					self.userData = combinedData
-					self.name = backendUser.name
-					self.username = backendUser.username
-					self.originalName = backendUser.name
-					self.originalUsername = backendUser.username
+					self.name = firebaseUser.name
+					self.username = firebaseUser.username
+					self.originalName = firebaseUser.name
+					self.originalUsername = firebaseUser.username
 					self.profileImage = loadedProfileImage
 					self.backgroundImage = loadedBackgroundImage
-					print("✅ EditProfile: Data loaded and cached from backend")
+					print("✅ EditProfile: Data loaded and cached from Firebase")
 					print("   - Loaded profile image: \(loadedProfileImage != nil ? "yes" : "no")")
 					print("   - Loaded background image: \(loadedBackgroundImage != nil ? "yes" : "no")")
 				}
@@ -482,13 +481,13 @@ struct EditProfileDesign: View {
 		}
 		
 		do {
-			// Save to backend API (which handles image uploads to S3 and updates Firestore)
-			print("🔄 Syncing profile update to backend...")
+			// Save to Firebase FIRST (source of truth), then sync to backend
+			print("🔄 Saving profile to Firebase (source of truth)...")
 			
 			// Clear UserService cache BEFORE update to ensure fresh data
 			UserService.shared.clearUserCache(userId: user.uid)
 			
-			// Use UserService to update profile (this syncs to backend)
+			// Use UserService to update profile (saves to Firebase, then syncs to backend)
 			let updatedUser = try await userService.updateUserProfile(
 				userId: user.uid,
 				name: nameToSave,
@@ -496,7 +495,7 @@ struct EditProfileDesign: View {
 				profileImage: profileImageToSave,
 				backgroundImage: backgroundImageToSave
 			)
-			print("✅ User profile synced to backend")
+			print("✅ User profile saved to Firebase and synced to backend")
 			
 			// Get the URLs returned from backend
 			let profileImageURL = updatedUser.profileImageURL

@@ -52,7 +52,7 @@ struct ProfileView: View {
 			.onAppear {
 				loadSortPreference()
 				
-				// Always force fresh load from backend when view appears
+				// Always force fresh load from Firebase (source of truth) when view appears
 				// This ensures we show the latest data, especially after editing
 				if !hasLoadedUserDataOnce {
 					loadUserDataFromBackend()
@@ -79,7 +79,7 @@ struct ProfileView: View {
 							}
 						}
 						
-						// Then refresh in background to ensure we have latest data
+						// Then refresh from Firebase to ensure we have latest data
 						loadUserDataFromBackend()
 					}
 				}
@@ -115,8 +115,7 @@ struct ProfileView: View {
 						}
 					}
 					
-					// Force refresh from backend to get latest data including images
-					// This ensures we have the complete, verified data from the backend
+					// Force refresh from Firebase (source of truth) to get latest data including images
 					loadUserDataFromBackend()
 					
 					// Trigger UI refresh with new IDs for images
@@ -547,39 +546,39 @@ struct ProfileView: View {
 		isLoadingUserData = true
 		Task {
 			do {
-				// Clear cache to force fresh data from backend
+				// Clear cache to force fresh data from Firebase (source of truth)
 				UserService.shared.clearUserCache(userId: userId)
 				
-				// Load current user data via CYServiceManager (has all the fields we need)
-				// This fetches fresh data from backend API
-				try await CYServiceManager.shared.loadCurrentUser()
+				// Load from Firebase (source of truth) - not backend
+				let user = try await UserService.shared.getUser(userId: userId)
 				
-				if let cyUser = CYServiceManager.shared.currentUser {
-					// Also fetch birth info from UserService (also from backend)
-					let user = try await UserService.shared.getUser(userId: userId)
-					
-					await MainActor.run {
-						if let user = user {
-							// Use data from backend (has latest image URLs)
-							self.userData = [
-								"profileImageURL": user.profileImageURL ?? "",
-								"backgroundImageURL": user.backgroundImageURL ?? "",
-								"name": user.name,
-								"username": user.username,
-								"email": user.email,
-								"birthDay": user.birthDay,
-								"birthMonth": user.birthMonth,
-								"birthYear": user.birthYear,
-								"collectionSortPreference": cyUser.collectionSortPreference ?? "Newest to Oldest",
-								"customCollectionOrder": cyUser.customCollectionOrder
-							]
-							print("✅ ProfileView: Loaded fresh user data from backend")
-							print("   - Profile URL: \(user.profileImageURL ?? "nil")")
-							print("   - Background URL: \(user.backgroundImageURL ?? "nil")")
-							print("   - Name: \(user.name)")
-							print("   - Username: \(user.username)")
-						} else {
-							// Fallback to just CYUser data if UserService fails
+				// Also load CYServiceManager data for preferences
+				try await CYServiceManager.shared.loadCurrentUser()
+				let cyUser = CYServiceManager.shared.currentUser
+				
+				await MainActor.run {
+					if let user = user {
+						// Use data from Firebase (source of truth)
+						self.userData = [
+							"profileImageURL": user.profileImageURL ?? "",
+							"backgroundImageURL": user.backgroundImageURL ?? "",
+							"name": user.name,
+							"username": user.username,
+							"email": user.email,
+							"birthDay": user.birthDay,
+							"birthMonth": user.birthMonth,
+							"birthYear": user.birthYear,
+							"collectionSortPreference": cyUser?.collectionSortPreference ?? "Newest to Oldest",
+							"customCollectionOrder": cyUser?.customCollectionOrder ?? []
+						]
+						print("✅ ProfileView: Loaded fresh user data from Firebase (source of truth)")
+						print("   - Profile URL: \(user.profileImageURL ?? "nil")")
+						print("   - Background URL: \(user.backgroundImageURL ?? "nil")")
+						print("   - Name: \(user.name)")
+						print("   - Username: \(user.username)")
+					} else {
+						// Fallback to CYUser data if UserService fails
+						if let cyUser = cyUser {
 							self.userData = [
 								"profileImageURL": cyUser.profileImageURL,
 								"backgroundImageURL": cyUser.backgroundImageURL,
@@ -590,24 +589,17 @@ struct ProfileView: View {
 								"birthMonth": "",
 								"birthYear": "",
 								"collectionSortPreference": cyUser.collectionSortPreference ?? "Newest to Oldest",
-								"customCollectionOrder": cyUser.customCollectionOrder
+								"customCollectionOrder": cyUser.customCollectionOrder ?? []
 							]
 							print("✅ ProfileView: Loaded CYUser data (fallback)")
 						}
-						
-						// Force UI refresh with new trigger ID
-						self.profileRefreshTrigger = UUID()
-						
-						print("🔄 ProfileView: UI refreshed with trigger ID including URLs")
 					}
-				} else {
-					await MainActor.run {
-						self.isLoadingUserData = false
-						self.hasLoadedUserDataOnce = true
-					}
-				}
-				
-				await MainActor.run {
+					
+					// Force UI refresh with new trigger ID
+					self.profileRefreshTrigger = UUID()
+					
+					print("🔄 ProfileView: UI refreshed with trigger ID including URLs")
+					
 					self.isLoadingUserData = false
 					self.hasLoadedUserDataOnce = true
 				}
