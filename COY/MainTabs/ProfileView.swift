@@ -73,7 +73,7 @@ struct ProfileView: View {
 									"birthMonth": "",
 									"birthYear": "",
 									"collectionSortPreference": cyUser.collectionSortPreference ?? "Newest to Oldest",
-									"customCollectionOrder": cyUser.customCollectionOrder ?? []
+									"customCollectionOrder": cyUser.customCollectionOrder
 								]
 								self.profileRefreshTrigger = UUID()
 							}
@@ -503,7 +503,7 @@ struct ProfileView: View {
 	}
 	
 	private func saveCustomOrder() {
-		guard let userId = authService.user?.uid else {
+		guard authService.user?.uid != nil else {
 			return
 		}
 		
@@ -637,79 +637,99 @@ struct CustomizeCollectionsView: View {
 	@Binding var selectedCollections: Set<String>
 	@Binding var customOrder: [String]
 	@Environment(\.colorScheme) var colorScheme
+	@EnvironmentObject var authService: AuthService
 	
 	var body: some View {
+		collectionsList
+	}
+	
+	private var collectionsList: some View {
 		List {
 			if allCollections.isEmpty {
-				VStack {
-					Spacer()
-					Text("No Collections")
-						.font(.headline)
-						.foregroundColor(.gray)
-					Text("Create some collections first")
-						.font(.subheadline)
-						.foregroundColor(.gray)
-					Spacer()
-				}
-				.frame(maxWidth: .infinity)
-				.listRowInsets(EdgeInsets())
-				.listRowSeparator(.hidden)
-				.listRowBackground(Color.clear)
+				emptyStateView
 			} else {
-				ForEach(allCollections, id: \.id) { collection in
-					HStack(alignment: .center, spacing: 12) {
-						// Selection circle - FIXED position from left, always visible
-						Button(action: {
-							toggleCollectionSelection(collection)
-						}) {
-							ZStack {
-								Circle()
-									.stroke(colorScheme == .dark ? Color.white : Color.black, lineWidth: 2)
-									.frame(width: 24, height: 24)
-								
-								if selectedCollections.contains(collection.id) {
-									if let index = customOrder.firstIndex(of: collection.id) {
-										Text("\(index + 1)")
-											.foregroundColor(colorScheme == .dark ? .white : .black)
-											.font(.system(size: 12, weight: .bold))
-									}
-								}
-							}
-						}
-						.frame(width: 40, height: 40)
-						.buttonStyle(PlainButtonStyle())
-						.fixedSize(horizontal: true, vertical: false)
-						
-						// Collection row - flexible width with navigation
-						NavigationLink(destination: CYInsideCollectionView(collection: collection).environmentObject(authService)) {
-							CollectionRowDesign(
-								collection: collection,
-								isFollowing: false,
-								hasRequested: false,
-								isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
-								isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
-								onFollowTapped: {},
-								onActionTapped: {},
-								onProfileTapped: {}
-							)
-							.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-						}
-						.buttonStyle(PlainButtonStyle())
-					}
-					.padding(.vertical, 4)
-					.listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-					.listRowSeparator(.hidden)
-					.listRowBackground(Color.clear)
-				}
+				collectionsRows
 			}
 		}
 		.listStyle(PlainListStyle())
 		.scrollContentBackground(.hidden)
 		.background(colorScheme == .dark ? Color.black : Color.white)
 		.safeAreaInset(edge: .bottom, spacing: 0) {
-			// Spacer for the bottom bar - prevents content from being hidden
 			Color.clear
 				.frame(height: 80)
+		}
+	}
+	
+	private var emptyStateView: some View {
+		VStack {
+			Spacer()
+			Text("No Collections")
+				.font(.headline)
+				.foregroundColor(.gray)
+			Text("Create some collections first")
+				.font(.subheadline)
+				.foregroundColor(.gray)
+			Spacer()
+		}
+		.frame(maxWidth: .infinity)
+		.listRowInsets(EdgeInsets())
+		.listRowSeparator(.hidden)
+		.listRowBackground(Color.clear)
+	}
+	
+	private var collectionsRows: some View {
+		ForEach(allCollections, id: \.id) { collection in
+			collectionRow(collection: collection)
+		}
+	}
+	
+	private func collectionRow(collection: CollectionData) -> some View {
+		HStack(alignment: .center, spacing: 12) {
+			// Selection circle - FIXED position from left, always visible
+			selectionButton(collection: collection)
+				.frame(width: 40, height: 40)
+				.buttonStyle(PlainButtonStyle())
+				.fixedSize(horizontal: true, vertical: false)
+			
+			// Collection row - flexible width with navigation
+			NavigationLink(destination: CYInsideCollectionView(collection: collection).environmentObject(authService)) {
+				CollectionRowDesign(
+					collection: collection,
+					isFollowing: false,
+					hasRequested: false,
+					isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
+					isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
+					onFollowTapped: {},
+					onActionTapped: {},
+					onProfileTapped: {}
+				)
+				.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+			}
+			.buttonStyle(PlainButtonStyle())
+		}
+		.padding(.vertical, 4)
+		.listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+		.listRowSeparator(.hidden)
+		.listRowBackground(Color.clear)
+	}
+	
+	private func selectionButton(collection: CollectionData) -> some View {
+		Button(action: {
+			toggleCollectionSelection(collection)
+		}) {
+			ZStack {
+				Circle()
+					.stroke(colorScheme == .dark ? Color.white : Color.black, lineWidth: 2)
+					.frame(width: 24, height: 24)
+				
+				if selectedCollections.contains(collection.id) {
+					if let index = customOrder.firstIndex(of: collection.id) {
+						Text("\(index + 1)")
+							.foregroundColor(colorScheme == .dark ? .white : .black)
+							.font(.system(size: 12, weight: .bold))
+					}
+				}
+			}
 		}
 	}
 	
@@ -717,11 +737,9 @@ struct CustomizeCollectionsView: View {
 		let collectionId = collection.id
 		
 		if selectedCollections.contains(collectionId) {
-			// Remove from selection
 			selectedCollections.remove(collectionId)
 			customOrder.removeAll { $0 == collectionId }
 		} else {
-			// Add to selection with next number in sequence
 			selectedCollections.insert(collectionId)
 			customOrder.append(collectionId)
 		}
