@@ -1,5 +1,6 @@
 import SwiftUI
 import FirebaseAuth
+import FirebaseFirestore
 
 struct CYInsideCollectionView: View {
 	@Environment(\.dismiss) var dismiss
