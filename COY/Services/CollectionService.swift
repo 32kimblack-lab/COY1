@@ -161,28 +161,33 @@ final class CollectionService {
 				let snapshot = try await db.collection("collections")
 					.whereField("ownerId", isEqualTo: userId)
 					.getDocuments()
-			
-			return snapshot.documents.compactMap { doc in
-				let data = doc.data()
-				return CollectionData(
-					id: doc.documentID,
-					name: data["name"] as? String ?? "",
-					description: data["description"] as? String ?? "",
-					type: data["type"] as? String ?? "Individual",
-					isPublic: data["isPublic"] as? Bool ?? false,
-					ownerId: data["ownerId"] as? String ?? userId,
-					ownerName: data["ownerName"] as? String ?? "",
-					owners: data["owners"] as? [String] ?? [userId],
-					imageURL: data["imageURL"] as? String,
-					invitedUsers: data["invitedUsers"] as? [String] ?? [],
-					members: data["members"] as? [String] ?? [userId],
-					memberCount: data["memberCount"] as? Int ?? 1,
-					followers: data["followers"] as? [String] ?? [],
-					followerCount: data["followerCount"] as? Int ?? 0,
-					allowedUsers: data["allowedUsers"] as? [String] ?? [],
-					deniedUsers: data["deniedUsers"] as? [String] ?? [],
-					createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
-				)
+				
+				return snapshot.documents.compactMap { doc in
+					let data = doc.data()
+					return CollectionData(
+						id: doc.documentID,
+						name: data["name"] as? String ?? "",
+						description: data["description"] as? String ?? "",
+						type: data["type"] as? String ?? "Individual",
+						isPublic: data["isPublic"] as? Bool ?? false,
+						ownerId: data["ownerId"] as? String ?? userId,
+						ownerName: data["ownerName"] as? String ?? "",
+						owners: data["owners"] as? [String] ?? [userId],
+						imageURL: data["imageURL"] as? String,
+						invitedUsers: data["invitedUsers"] as? [String] ?? [],
+						members: data["members"] as? [String] ?? [userId],
+						memberCount: data["memberCount"] as? Int ?? 1,
+						followers: data["followers"] as? [String] ?? [],
+						followerCount: data["followerCount"] as? Int ?? 0,
+						allowedUsers: data["allowedUsers"] as? [String] ?? [],
+						deniedUsers: data["deniedUsers"] as? [String] ?? [],
+						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+					)
+				}
+			} catch {
+				// If Firebase also fails, return empty array
+				print("❌ Firebase getUserCollections also failed: \(error.localizedDescription)")
+				return []
 			}
 		}
 	}
