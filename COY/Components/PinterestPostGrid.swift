@@ -66,6 +66,7 @@ struct PinterestPostCard: View {
 	
 	@State private var imageHeight: CGFloat = 200
 	@State private var showStar: Bool = false
+	@State private var showPostDetail: Bool = false
 	@Environment(\.colorScheme) var colorScheme
 	
 	var body: some View {
@@ -75,6 +76,9 @@ struct PinterestPostCard: View {
 				.frame(width: width)
 				.clipped()
 				.cornerRadius(12)
+				.onTapGesture {
+					showPostDetail = true
+				}
 			
 			// Post Info - under the media
 			VStack(alignment: .leading, spacing: 4) {
@@ -112,6 +116,9 @@ struct PinterestPostCard: View {
 		}
 		.onAppear {
 			checkStarVisibility()
+		}
+		.sheet(isPresented: $showPostDetail) {
+			CYPostDetailView(post: post, collection: collection)
 		}
 	}
 	
