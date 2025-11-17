@@ -123,7 +123,8 @@ struct PinterestPostCard: View {
 		if post.mediaItems.count > 1 {
 			// Multiple media items - show swipeable carousel
 			TabView {
-				ForEach(Array(post.mediaItems.enumerated()), id: \.offset) { index, mediaItem in
+				ForEach(0..<post.mediaItems.count, id: \.self) { index in
+					let mediaItem = post.mediaItems[index]
 					if mediaItem.isVideo {
 						videoPlayerView(mediaItem: mediaItem)
 					} else {
