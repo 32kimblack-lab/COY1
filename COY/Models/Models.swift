@@ -32,7 +32,8 @@ struct CollectionPost: Identifiable {
 	var authorId: String
 	var authorName: String
 	var createdAt: Date
-	var firstMediaItem: MediaItem?
+	var firstMediaItem: MediaItem? // For backward compatibility
+	var mediaItems: [MediaItem] // All media items for swipeable carousel
 }
 
 struct MediaItem {

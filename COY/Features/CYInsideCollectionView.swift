@@ -327,17 +327,35 @@ struct CYInsideCollectionView: View {
 				let loadedPosts = snapshot.documents.compactMap { doc -> CollectionPost? in
 					let data = doc.data()
 					
-					// Parse firstMediaItem
-					var mediaItem: MediaItem?
-					if let firstMediaData = data["firstMediaItem"] as? [String: Any] {
-						mediaItem = MediaItem(
+					// Parse all mediaItems
+					var allMediaItems: [MediaItem] = []
+					
+					// First, try to get all mediaItems array
+					if let mediaItemsArray = data["mediaItems"] as? [[String: Any]] {
+						allMediaItems = mediaItemsArray.compactMap { mediaData in
+							MediaItem(
+								imageURL: mediaData["imageURL"] as? String,
+								thumbnailURL: mediaData["thumbnailURL"] as? String,
+								videoURL: mediaData["videoURL"] as? String,
+								videoDuration: mediaData["videoDuration"] as? Double,
+								isVideo: mediaData["isVideo"] as? Bool ?? false
+							)
+						}
+					}
+					
+					// Fallback to firstMediaItem if mediaItems array is empty
+					if allMediaItems.isEmpty, let firstMediaData = data["firstMediaItem"] as? [String: Any] {
+						let firstItem = MediaItem(
 							imageURL: firstMediaData["imageURL"] as? String,
 							thumbnailURL: firstMediaData["thumbnailURL"] as? String,
 							videoURL: firstMediaData["videoURL"] as? String,
 							videoDuration: firstMediaData["videoDuration"] as? Double,
 							isVideo: firstMediaData["isVideo"] as? Bool ?? false
 						)
+						allMediaItems = [firstItem]
 					}
+					
+					let firstMediaItem = allMediaItems.first
 					
 					return CollectionPost(
 						id: doc.documentID,
@@ -346,7 +364,8 @@ struct CYInsideCollectionView: View {
 						authorId: data["authorId"] as? String ?? "",
 						authorName: data["authorName"] as? String ?? "",
 						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
-						firstMediaItem: mediaItem
+						firstMediaItem: firstMediaItem,
+						mediaItems: allMediaItems
 					)
 				}
 				// Sort by createdAt descending (newest first)
@@ -409,17 +428,35 @@ struct CYInsideCollectionView: View {
 				let loadedPosts = documents.compactMap { doc -> CollectionPost? in
 					let data = doc.data()
 					
-					// Parse firstMediaItem
-					var mediaItem: MediaItem?
-					if let firstMediaData = data["firstMediaItem"] as? [String: Any] {
-						mediaItem = MediaItem(
+					// Parse all mediaItems
+					var allMediaItems: [MediaItem] = []
+					
+					// First, try to get all mediaItems array
+					if let mediaItemsArray = data["mediaItems"] as? [[String: Any]] {
+						allMediaItems = mediaItemsArray.compactMap { mediaData in
+							MediaItem(
+								imageURL: mediaData["imageURL"] as? String,
+								thumbnailURL: mediaData["thumbnailURL"] as? String,
+								videoURL: mediaData["videoURL"] as? String,
+								videoDuration: mediaData["videoDuration"] as? Double,
+								isVideo: mediaData["isVideo"] as? Bool ?? false
+							)
+						}
+					}
+					
+					// Fallback to firstMediaItem if mediaItems array is empty
+					if allMediaItems.isEmpty, let firstMediaData = data["firstMediaItem"] as? [String: Any] {
+						let firstItem = MediaItem(
 							imageURL: firstMediaData["imageURL"] as? String,
 							thumbnailURL: firstMediaData["thumbnailURL"] as? String,
 							videoURL: firstMediaData["videoURL"] as? String,
 							videoDuration: firstMediaData["videoDuration"] as? Double,
 							isVideo: firstMediaData["isVideo"] as? Bool ?? false
 						)
+						allMediaItems = [firstItem]
 					}
+					
+					let firstMediaItem = allMediaItems.first
 					
 					return CollectionPost(
 						id: doc.documentID,
@@ -428,7 +465,8 @@ struct CYInsideCollectionView: View {
 						authorId: data["authorId"] as? String ?? "",
 						authorName: data["authorName"] as? String ?? "",
 						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
-						firstMediaItem: mediaItem
+						firstMediaItem: firstMediaItem,
+						mediaItems: allMediaItems
 					)
 				}
 				.sorted { $0.createdAt > $1.createdAt }

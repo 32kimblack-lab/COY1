@@ -120,7 +120,35 @@ struct PinterestPostCard: View {
 	// MARK: - Media Content View
 	@ViewBuilder
 	private var mediaContentView: some View {
-		if let mediaItem = post.firstMediaItem {
+		if post.mediaItems.count > 1 {
+			// Multiple media items - show swipeable carousel
+			TabView {
+				ForEach(Array(post.mediaItems.enumerated()), id: \.offset) { index, mediaItem in
+					if mediaItem.isVideo {
+						videoPlayerView(mediaItem: mediaItem)
+					} else {
+						imageView(mediaItem: mediaItem)
+					}
+				}
+			}
+			.tabViewStyle(.page)
+			.frame(height: imageHeight)
+			.overlay(
+				// Page indicator dots
+				VStack {
+					Spacer()
+					HStack(spacing: 4) {
+						ForEach(0..<post.mediaItems.count, id: \.self) { index in
+							Circle()
+								.fill(Color.white.opacity(0.6))
+								.frame(width: 6, height: 6)
+						}
+					}
+					.padding(.bottom, 8)
+				}
+			)
+		} else if let mediaItem = post.firstMediaItem ?? post.mediaItems.first {
+			// Single media item
 			if mediaItem.isVideo {
 				// Video Player
 				videoPlayerView(mediaItem: mediaItem)
