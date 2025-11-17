@@ -1,0 +1,846 @@
+import SwiftUI
+import FirebaseFirestore
+import FirebaseAuth
+
+struct ProfileView: View {
+	@EnvironmentObject var authService: AuthService
+	@State private var userData: [String: Any]?
+	@State private var isLoadingUserData = false
+	@State private var hasLoadedUserDataOnce = false
+	@State private var refreshID = UUID()
+	@State private var showSortMenu = false
+	@State private var sortOption = "Newest to Oldest"
+	@State private var profileRefreshTrigger = UUID()
+	@State private var isUpdatingProfile = false
+	@State private var isCustomizing = false
+	@State private var selectedCollections: Set<String> = []
+	@State private var customOrder: [String] = []
+	@State private var allCollections: [CollectionData] = []
+	@State private var userListener: ListenerRegistration?
+	@State private var collectionsListener: ListenerRegistration?
+	@Environment(\.colorScheme) var colorScheme
+	
+	var body: some View {
+		NavigationStack {
+			ZStack {
+				(colorScheme == .dark ? Color.black : Color.white)
+					.ignoresSafeArea()
+				
+				VStack(spacing: 0) {
+					// Fixed Profile Header (doesn't scroll) - Always show
+					profileHeaderSection(safeAreaTop: 0)
+						.id("\(profileRefreshTrigger)-\(userData?["profileImageURL"] as? String ?? "")-\(userData?["backgroundImageURL"] as? String ?? "")")
+					
+					// Collections Section (List handles its own scrolling)
+					if isCustomizing {
+						CustomizeCollectionsView(
+							allCollections: $allCollections,
+							selectedCollections: $selectedCollections,
+							customOrder: $customOrder
+						)
+						.padding(.top, -20)
+					} else {
+						UserCollectionsView(sortOption: sortOption)
+							.padding(.top, -20)
+					}
+				}
+			}
+			.navigationBarTitleDisplayMode(.inline)
+			.toolbarBackground(.hidden, for: .navigationBar)
+			.toolbarColorScheme(.dark, for: .navigationBar)
+			.toolbar(isCustomizing ? .hidden : .automatic, for: .tabBar)
+			.onAppear {
+				loadSortPreference()
+				
+				// Always force fresh load from backend when view appears
+				// This ensures we show the latest data, especially after editing
+				if !hasLoadedUserDataOnce {
+					loadUserDataFromBackend()
+				} else {
+					// Even if we've loaded before, do a quick refresh to ensure we have latest data
+					// This handles the case where user edits profile and comes back
+					Task {
+						// Use cached data immediately for instant display
+						if let cyUser = CYServiceManager.shared.currentUser {
+							await MainActor.run {
+								self.userData = [
+									"profileImageURL": cyUser.profileImageURL,
+									"backgroundImageURL": cyUser.backgroundImageURL,
+									"name": cyUser.name,
+									"username": cyUser.username,
+									"email": "",
+									"birthDay": "",
+									"birthMonth": "",
+									"birthYear": "",
+									"collectionSortPreference": cyUser.collectionSortPreference ?? "Newest to Oldest",
+									"customCollectionOrder": cyUser.customCollectionOrder ?? []
+								]
+								self.profileRefreshTrigger = UUID()
+							}
+						}
+						
+						// Then refresh in background to ensure we have latest data
+						loadUserDataFromBackend()
+					}
+				}
+			}
+			.onDisappear {
+				// Clean up listeners when view disappears
+				userListener?.remove()
+				collectionsListener?.remove()
+			}
+			.refreshable {
+				// Force refresh user data and collections
+				loadUserDataFromBackend()
+			}
+			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { notification in
+				// Update data in real-time
+				if let userInfo = notification.userInfo,
+				   let updatedData = userInfo["updatedData"] as? [String: Any] {
+					print("📢 ProfileView: Received ProfileUpdated notification")
+					print("   - Updated data: \(updatedData)")
+					
+					// Clear caches to force fresh load
+					if let userId = authService.user?.uid {
+						UserService.shared.clearUserCache(userId: userId)
+					}
+					
+					// Update local userData immediately with the new values
+					if self.userData == nil {
+						self.userData = updatedData
+					} else {
+						// Merge updated data
+						for (key, value) in updatedData {
+							self.userData?[key] = value
+						}
+					}
+					
+					// Force refresh from backend to get latest data including images
+					// This ensures we have the complete, verified data from the backend
+					loadUserDataFromBackend()
+					
+					// Trigger UI refresh with new IDs for images
+					self.profileRefreshTrigger = UUID()
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { _ in
+				// Refresh handled by collections view
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { _ in
+				// Refresh handled by collections view
+			}
+			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToProfile"))) { _ in
+				// Navigate back to profile view when collection editing is complete
+				// This will be handled by the navigation system automatically
+				// The notification ensures the profile view refreshes its data
+			}
+			.overlay {
+				sortMenuOverlay
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionOrderUpdated"))) { _ in
+				// Reload sort preference to reflect the change (without reloading collections)
+				// Collections will automatically re-sort via sortedCollections computed property
+				loadSortPreference()
+			}
+			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionCreated"))) { _ in
+				// If we're in customize mode, reload collections to include the new one
+				if isCustomizing {
+					loadCollectionsForCustomization()
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionRestored"))) { notification in
+				// Immediately reload collections when a collection is restored
+				print("🔄 ProfileView: Collection restored, refreshing collections immediately")
+				// Reload collections to show the restored collection
+				loadCollectionsForCustomization()
+				// Also trigger a refresh of the main collections view
+				NotificationCenter.default.post(
+					name: NSNotification.Name("UserCollectionsUpdated"),
+					object: nil
+				)
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionUpdated"))) { _ in
+				// Refresh collections when collection is updated
+				print("🔄 ProfileView: Collection updated, refreshing collections")
+				loadCollectionsForCustomization()
+			}
+			.overlay(
+				Group {
+					if isCustomizing {
+						VStack {
+							Spacer()
+							HStack {
+								Button("Clear") {
+									// Clear all selections and exit customize mode
+									selectedCollections.removeAll()
+									customOrder.removeAll()
+									isCustomizing = false
+									// Reset sort option to previous (not Customize)
+									if sortOption == "Customize" {
+										sortOption = "Newest to Oldest"
+									}
+								}
+								.foregroundColor(.white)
+								.padding(.horizontal, 20)
+								.padding(.vertical, 10)
+								.background(Color.gray.opacity(0.3))
+								.cornerRadius(8)
+								
+								Spacer()
+								
+								Text("\(selectedCollections.count) collection\(selectedCollections.count == 1 ? "" : "s") selected")
+									.foregroundColor(.white)
+									.font(.system(size: 14))
+								
+								Spacer()
+								
+								Button("Done") {
+									saveCustomOrder()
+								}
+								.foregroundColor(.black)
+								.padding(.horizontal, 20)
+								.padding(.vertical, 10)
+								.background(Color.white)
+								.cornerRadius(8)
+							}
+							.padding(.horizontal, 20)
+							.padding(.vertical, 15)
+							.background(Color(red: 0.2, green: 0.2, blue: 0.2))
+						}
+					}
+				}
+			)
+		}
+	}
+	
+	@ViewBuilder
+	private var sortMenuOverlay: some View {
+		Group {
+			if showSortMenu {
+				ZStack(alignment: .topLeading) {
+					Color.black.opacity(0.01)
+						.ignoresSafeArea()
+						.onTapGesture { withAnimation { showSortMenu = false } }
+					
+					VStack(alignment: .leading, spacing: 0) {
+						Button(action: {
+							Task {
+								await updateSortPreference("Newest to Oldest")
+							}
+							withAnimation { showSortMenu = false }
+						}) {
+							HStack {
+								Text("Newest to Oldest")
+									.font(.caption)
+									.foregroundColor(sortOption == "Newest to Oldest" ? .blue : (colorScheme == .dark ? .white : .black))
+								Spacer()
+								if sortOption == "Newest to Oldest" {
+									Image(systemName: "checkmark")
+										.font(.caption)
+										.foregroundColor(.blue)
+								}
+							}
+							.padding(.horizontal, 12)
+							.padding(.vertical, 8)
+						}
+						
+						Divider()
+						
+						Button(action: {
+							Task {
+								await updateSortPreference("Oldest to Newest")
+							}
+							withAnimation { showSortMenu = false }
+						}) {
+							HStack {
+								Text("Oldest to Newest")
+									.font(.caption)
+									.foregroundColor(sortOption == "Oldest to Newest" ? .blue : (colorScheme == .dark ? .white : .black))
+								Spacer()
+								if sortOption == "Oldest to Newest" {
+									Image(systemName: "checkmark")
+										.font(.caption)
+										.foregroundColor(.blue)
+								}
+							}
+							.padding(.horizontal, 12)
+							.padding(.vertical, 8)
+						}
+						
+						Divider()
+						
+						Button(action: {
+							Task {
+								await updateSortPreference("Alphabetical")
+							}
+							withAnimation { showSortMenu = false }
+						}) {
+							HStack {
+								Text("Alphabetical (A-Z)")
+									.font(.caption)
+									.foregroundColor(sortOption == "Alphabetical" ? .blue : (colorScheme == .dark ? .white : .black))
+								Spacer()
+								if sortOption == "Alphabetical" {
+									Image(systemName: "checkmark")
+										.font(.caption)
+										.foregroundColor(.blue)
+								}
+							}
+							.padding(.horizontal, 12)
+							.padding(.vertical, 8)
+						}
+						
+						Divider()
+						
+						Button(action: {
+							// Enter customization mode
+							withAnimation { showSortMenu = false }
+							isCustomizing = true
+							selectedCollections.removeAll()
+							customOrder.removeAll()
+							// Always reload fresh collections when entering customize mode
+							// This ensures newly created collections are included
+							loadCollectionsForCustomization()
+						}) {
+							HStack {
+								Text("Customize")
+									.font(.caption)
+									.foregroundColor(sortOption == "Customize" ? .blue : (colorScheme == .dark ? .white : .black))
+								Spacer()
+								if sortOption == "Customize" {
+									Image(systemName: "checkmark")
+										.font(.caption)
+										.foregroundColor(.blue)
+								}
+							}
+							.padding(.horizontal, 12)
+							.padding(.vertical, 8)
+						}
+					}
+					.frame(maxWidth: 160)
+					.padding(.horizontal, 2)
+					.padding(.vertical, 2)
+					.background(
+						RoundedRectangle(cornerRadius: 8)
+							.fill(Color(.systemBackground))
+							.shadow(radius: 2)
+					)
+					.padding(.top, 80)
+					.padding(.leading, 16)
+				}
+			}
+		}
+	}
+	
+	private func profileHeaderSection(safeAreaTop: CGFloat) -> some View {
+		ZStack(alignment: .topLeading) {
+			// Background Image Area - Always reserve 105 points height, whether image exists or not
+			// This ensures layout stays consistent with or without background image
+			ZStack {
+				// Always reserve the space
+				Color.clear
+					.frame(height: 105)
+					.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+					.ignoresSafeArea(edges: .top)
+				
+				// Only show background image if it exists
+				if let backgroundImageURL = userData?["backgroundImageURL"] as? String, !backgroundImageURL.isEmpty {
+					CachedBackgroundImageView(
+						url: backgroundImageURL,
+						height: 105
+					)
+					.aspectRatio(contentMode: .fill)
+					.frame(height: 105)
+					.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+					.clipped()
+					.cornerRadius(0)
+					.ignoresSafeArea(edges: .top)
+					.id(backgroundImageURL)
+				}
+			}
+			
+			// Top Buttons Row - Vertically centered on background (at 52.5 points from top of background)
+			VStack {
+				Spacer()
+				HStack {
+					// Left Buttons (List + Plus)
+					HStack(spacing: 16) {
+						Button(action: {
+							showSortMenu.toggle()
+						}) {
+							CircleButton(systemName: "list.bullet", colorScheme: colorScheme)
+						}
+						NavigationLink(destination: CYBuildCollectionDesign().environmentObject(authService)) {
+							CircleButton(systemName: "plus", colorScheme: colorScheme)
+						}
+					}
+					Spacer()
+					// Right Buttons (Pencil + Gear)
+					HStack(spacing: 16) {
+						NavigationLink(destination: EditProfileDesign().environmentObject(authService)) {
+							CircleButton(systemName: "pencil", colorScheme: colorScheme)
+						}
+						.id(refreshID)
+						NavigationLink(destination: CYSettingsView().environmentObject(authService)) {
+							CircleButton(systemName: "gearshape.fill", colorScheme: colorScheme)
+						}
+					}
+				}
+				.padding(.horizontal, 16)
+				Spacer()
+			}
+			.frame(height: 105) // Match background height
+			
+			// Profile Image - Half on background, half below
+			// Background height is 105, profile image is 70, so center at 105 (half of image = 35 above, 35 below)
+			Group {
+				if let userData = userData {
+					if let profileImageURL = userData["profileImageURL"] as? String, !profileImageURL.isEmpty {
+						CachedProfileImageView(
+							url: profileImageURL,
+							size: 70
+						)
+						.aspectRatio(contentMode: .fill)
+						.frame(width: 70, height: 70)
+						.clipShape(Circle())
+						.id(profileImageURL) // Force refresh when URL changes
+					} else {
+						DefaultProfileImageView(size: 70)
+					}
+				} else {
+					// Show default placeholder (no loading spinner)
+					DefaultProfileImageView(size: 70)
+				}
+			}
+			.offset(y: 105 - 35) // Center at bottom edge of background (105) - half image height (35) = 70
+			.frame(maxWidth: .infinity, alignment: .center)
+			
+			// Username + Name - Below profile image, centered
+			// Position is fixed regardless of background image presence
+			VStack(spacing: 4) {
+				if let userData = userData {
+					Text(userData["username"] as? String ?? "Username")
+						.font(.headline)
+						.foregroundColor(colorScheme == .dark ? .white : .black)
+					Text(userData["name"] as? String ?? "Name")
+						.font(.subheadline)
+						.foregroundColor(colorScheme == .dark ? .white : .black)
+				} else {
+					// Show loading placeholders
+					Rectangle()
+						.fill(Color.gray.opacity(0.3))
+						.frame(width: 100, height: 20)
+						.cornerRadius(4)
+					Rectangle()
+						.fill(Color.gray.opacity(0.3))
+						.frame(width: 80, height: 16)
+						.cornerRadius(4)
+				}
+			}
+			.frame(maxWidth: .infinity)
+			.offset(y: 105 + 35 + 8) // Below background (105) + half profile image (35) + spacing (8)
+		}
+		.frame(height: 105 + 35 + 60) // Background (105) + half profile image (35) + username/name section (60)
+		.ignoresSafeArea(edges: .top)
+	}
+	
+	private func loadSortPreference() {
+		Task {
+			sortOption = CYServiceManager.shared.getCollectionSortPreference()
+		}
+	}
+	
+	private func updateSortPreference(_ newSortOption: String) async {
+		do {
+			try await CYServiceManager.shared.updateCollectionSortPreference(newSortOption)
+			sortOption = newSortOption
+		} catch {
+			// Silent fail - user can try again
+		}
+	}
+	
+	// MARK: - Custom Organization Functions
+	private func loadCollectionsForCustomization() {
+		Task {
+			guard let userId = authService.user?.uid else { return }
+			
+			do {
+				// Load current user to get their custom order
+				try await CYServiceManager.shared.loadCurrentUser()
+				
+				// Always fetch fresh collections from backend (don't use cache)
+				// This ensures newly created collections are included
+				let userCollections = try await CollectionService.shared.getUserCollections(userId: userId, forceFresh: true)
+				
+				// Get custom order
+				let customCollectionOrder = CYServiceManager.shared.getCustomCollectionOrder()
+				
+				// Sort collections by custom order if available
+				var sortedCollections: [CollectionData]
+				if customCollectionOrder.isEmpty {
+					// No custom order, use creation date (newest first)
+					sortedCollections = userCollections.sorted { $0.createdAt > $1.createdAt }
+				} else {
+					// Sort by custom order
+					sortedCollections = userCollections.sorted { (a, b) -> Bool in
+						let indexA = customCollectionOrder.firstIndex(of: a.id) ?? Int.max
+						let indexB = customCollectionOrder.firstIndex(of: b.id) ?? Int.max
+						
+						if indexA == Int.max && indexB == Int.max {
+							// Both not in custom order, sort by creation date (newest first)
+							return a.createdAt > b.createdAt
+						}
+						return indexA < indexB
+					}
+				}
+				
+				await MainActor.run {
+					self.allCollections = sortedCollections
+				}
+			} catch {
+				// Silent fail - collections will load on next refresh
+			}
+		}
+	}
+	
+	private func saveCustomOrder() {
+		guard let userId = authService.user?.uid else {
+			return
+		}
+		
+		Task {
+			do {
+				// Update local state via CYServiceManager (updates local cache)
+				try await CYServiceManager.shared.updateCustomCollectionOrder(customOrder)
+				try await CYServiceManager.shared.updateCollectionSortPreference("Customize")
+				
+				await MainActor.run {
+					sortOption = "Customize"
+					isCustomizing = false
+					selectedCollections.removeAll()
+					
+					// Don't clear cache or reload - UserCollectionsView will use sortedCollections computed property
+					// which automatically respects the new custom order from CYServiceManager
+					// This prevents collections from moving around
+					
+					// Only post notification to update sort preference (don't force reload)
+					NotificationCenter.default.post(name: Notification.Name("CollectionOrderUpdated"), object: nil)
+				}
+			} catch {
+				// Silent fail - user can try again
+			}
+		}
+	}
+	
+	// MARK: - Load User Data from Backend
+	
+	private func loadUserDataFromBackend() {
+		guard let userId = authService.user?.uid else {
+			return
+		}
+		
+		// Don't load if already loading
+		guard !isLoadingUserData else {
+			return
+		}
+		
+		isLoadingUserData = true
+		Task {
+			do {
+				// Clear cache to force fresh data from backend
+				UserService.shared.clearUserCache(userId: userId)
+				
+				// Load current user data via CYServiceManager (has all the fields we need)
+				// This fetches fresh data from backend API
+				try await CYServiceManager.shared.loadCurrentUser()
+				
+				if let cyUser = CYServiceManager.shared.currentUser {
+					// Also fetch birth info from UserService (also from backend)
+					let user = try await UserService.shared.getUser(userId: userId)
+					
+					await MainActor.run {
+						if let user = user {
+							// Use data from backend (has latest image URLs)
+							self.userData = [
+								"profileImageURL": user.profileImageURL ?? "",
+								"backgroundImageURL": user.backgroundImageURL ?? "",
+								"name": user.name,
+								"username": user.username,
+								"email": user.email,
+								"birthDay": user.birthDay,
+								"birthMonth": user.birthMonth,
+								"birthYear": user.birthYear,
+								"collectionSortPreference": cyUser.collectionSortPreference ?? "Newest to Oldest",
+								"customCollectionOrder": cyUser.customCollectionOrder
+							]
+							print("✅ ProfileView: Loaded fresh user data from backend")
+							print("   - Profile URL: \(user.profileImageURL ?? "nil")")
+							print("   - Background URL: \(user.backgroundImageURL ?? "nil")")
+							print("   - Name: \(user.name)")
+							print("   - Username: \(user.username)")
+						} else {
+							// Fallback to just CYUser data if UserService fails
+							self.userData = [
+								"profileImageURL": cyUser.profileImageURL,
+								"backgroundImageURL": cyUser.backgroundImageURL,
+								"name": cyUser.name,
+								"username": cyUser.username,
+								"email": "",
+								"birthDay": "",
+								"birthMonth": "",
+								"birthYear": "",
+								"collectionSortPreference": cyUser.collectionSortPreference ?? "Newest to Oldest",
+								"customCollectionOrder": cyUser.customCollectionOrder
+							]
+							print("✅ ProfileView: Loaded CYUser data (fallback)")
+						}
+						
+						// Force UI refresh with new trigger ID
+						self.profileRefreshTrigger = UUID()
+						
+						print("🔄 ProfileView: UI refreshed with trigger ID including URLs")
+					}
+				} else {
+					await MainActor.run {
+						self.isLoadingUserData = false
+						self.hasLoadedUserDataOnce = true
+					}
+				}
+				
+				await MainActor.run {
+					self.isLoadingUserData = false
+					self.hasLoadedUserDataOnce = true
+				}
+			} catch {
+				print("❌ ProfileView: Error loading user data: \(error)")
+				await MainActor.run {
+					self.isLoadingUserData = false
+					self.hasLoadedUserDataOnce = true
+				}
+			}
+		}
+	}
+}
+
+struct CircleButton: View {
+	let systemName: String
+	let colorScheme: ColorScheme
+	
+	var body: some View {
+		ZStack {
+			// Darker, more transparent background
+			Circle()
+				.fill(Color.gray.opacity(0.4)) // Darker gray with more opacity
+				.frame(width: 36, height: 36)
+			Image(systemName: systemName)
+				.foregroundColor(colorScheme == .dark ? .white : .black)
+				.font(.system(size: 16, weight: .medium))
+		}
+	}
+}
+
+// MARK: - Customize Collections View
+struct CustomizeCollectionsView: View {
+	@Binding var allCollections: [CollectionData]
+	@Binding var selectedCollections: Set<String>
+	@Binding var customOrder: [String]
+	@Environment(\.colorScheme) var colorScheme
+	
+	var body: some View {
+		List {
+			if allCollections.isEmpty {
+				VStack {
+					Spacer()
+					Text("No Collections")
+						.font(.headline)
+						.foregroundColor(.gray)
+					Text("Create some collections first")
+						.font(.subheadline)
+						.foregroundColor(.gray)
+					Spacer()
+				}
+				.frame(maxWidth: .infinity)
+				.listRowInsets(EdgeInsets())
+				.listRowSeparator(.hidden)
+				.listRowBackground(Color.clear)
+			} else {
+				ForEach(allCollections, id: \.id) { collection in
+					HStack(alignment: .center, spacing: 12) {
+						// Selection circle - FIXED position from left, always visible
+						Button(action: {
+							toggleCollectionSelection(collection)
+						}) {
+							ZStack {
+								Circle()
+									.stroke(colorScheme == .dark ? Color.white : Color.black, lineWidth: 2)
+									.frame(width: 24, height: 24)
+								
+								if selectedCollections.contains(collection.id) {
+									if let index = customOrder.firstIndex(of: collection.id) {
+										Text("\(index + 1)")
+											.foregroundColor(colorScheme == .dark ? .white : .black)
+											.font(.system(size: 12, weight: .bold))
+									}
+								}
+							}
+						}
+						.frame(width: 40, height: 40)
+						.buttonStyle(PlainButtonStyle())
+						.fixedSize(horizontal: true, vertical: false)
+						
+						// Collection row - flexible width
+						CollectionRowDesign(
+							collection: collection,
+							isFollowing: false,
+							hasRequested: false,
+							isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
+							isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
+							onFollowTapped: {},
+							onActionTapped: {},
+							onProfileTapped: {}
+						)
+						.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+						.allowsHitTesting(false)
+					}
+					.padding(.vertical, 4)
+					.listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+					.listRowSeparator(.hidden)
+					.listRowBackground(Color.clear)
+				}
+			}
+		}
+		.listStyle(PlainListStyle())
+		.scrollContentBackground(.hidden)
+		.background(colorScheme == .dark ? Color.black : Color.white)
+		.safeAreaInset(edge: .bottom, spacing: 0) {
+			// Spacer for the bottom bar - prevents content from being hidden
+			Color.clear
+				.frame(height: 80)
+		}
+	}
+	
+	private func toggleCollectionSelection(_ collection: CollectionData) {
+		let collectionId = collection.id
+		
+		if selectedCollections.contains(collectionId) {
+			// Remove from selection
+			selectedCollections.remove(collectionId)
+			customOrder.removeAll { $0 == collectionId }
+		} else {
+			// Add to selection with next number in sequence
+			selectedCollections.insert(collectionId)
+			customOrder.append(collectionId)
+		}
+	}
+}
+
+// MARK: - User Collections View
+struct UserCollectionsView: View {
+	let sortOption: String
+	@EnvironmentObject var authService: AuthService
+	@State private var userCollections: [CollectionData] = []
+	@State private var isLoading = false
+	@Environment(\.colorScheme) var colorScheme
+	
+	var sortedCollections: [CollectionData] {
+		let collections = userCollections
+		switch sortOption {
+		case "Oldest to Newest":
+			return collections.sorted { $0.createdAt < $1.createdAt }
+		case "Alphabetical":
+			return collections.sorted { $0.name < $1.name }
+		case "Customize":
+			let customOrder = CYServiceManager.shared.getCustomCollectionOrder()
+			if customOrder.isEmpty {
+				return collections.sorted { $0.createdAt > $1.createdAt }
+			}
+			return collections.sorted { (a, b) -> Bool in
+				let indexA = customOrder.firstIndex(of: a.id) ?? Int.max
+				let indexB = customOrder.firstIndex(of: b.id) ?? Int.max
+				if indexA == Int.max && indexB == Int.max {
+					return a.createdAt > b.createdAt
+				}
+				return indexA < indexB
+			}
+		default: // "Newest to Oldest"
+			return collections.sorted { $0.createdAt > $1.createdAt }
+		}
+	}
+	
+	var body: some View {
+		List {
+			if isLoading {
+				ProgressView()
+					.frame(maxWidth: .infinity)
+					.padding()
+			} else if sortedCollections.isEmpty {
+				VStack {
+					Spacer()
+					Text("No Collections")
+						.font(.headline)
+						.foregroundColor(.gray)
+					Text("Create your first collection")
+						.font(.subheadline)
+						.foregroundColor(.gray)
+					Spacer()
+				}
+				.frame(maxWidth: .infinity)
+				.listRowInsets(EdgeInsets())
+				.listRowSeparator(.hidden)
+				.listRowBackground(Color.clear)
+			} else {
+				ForEach(sortedCollections) { collection in
+					CollectionRowDesign(
+						collection: collection,
+						isFollowing: false,
+						hasRequested: false,
+						isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
+						isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
+						onFollowTapped: {},
+						onActionTapped: {},
+						onProfileTapped: {}
+					)
+					.padding(.horizontal)
+					.padding(.bottom, 12)
+					.listRowInsets(EdgeInsets())
+					.listRowSeparator(.hidden)
+					.listRowBackground(Color.clear)
+				}
+			}
+		}
+		.listStyle(PlainListStyle())
+		.scrollContentBackground(.hidden)
+		.background(colorScheme == .dark ? Color.black : Color.white)
+		.onAppear {
+			loadCollections()
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("UserCollectionsUpdated"))) { _ in
+			loadCollections()
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionCreated"))) { _ in
+			loadCollections()
+		}
+	}
+	
+	private func loadCollections() {
+		guard authService.user?.uid != nil else { return }
+		isLoading = true
+		Task {
+			do {
+				guard let userId = authService.user?.uid else { return }
+				let collections = try await CollectionService.shared.getUserCollections(userId: userId, forceFresh: true)
+				await MainActor.run {
+					self.userCollections = collections
+					self.isLoading = false
+				}
+			} catch {
+				print("Error loading collections: \(error)")
+				await MainActor.run {
+					self.isLoading = false
+				}
+			}
+		}
+	}
+}
+
+
