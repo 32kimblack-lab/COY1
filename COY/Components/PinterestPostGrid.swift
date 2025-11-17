@@ -300,7 +300,16 @@ struct PinterestPostCard: View {
 					videoURL: nil,
 					videoDuration: nil,
 					isVideo: false
-				)
+				),
+				mediaItems: [
+					MediaItem(
+						imageURL: "https://example.com/image1.jpg",
+						thumbnailURL: nil,
+						videoURL: nil,
+						videoDuration: nil,
+						isVideo: false
+					)
+				]
 			),
 			CollectionPost(
 				id: "2",
@@ -315,7 +324,16 @@ struct PinterestPostCard: View {
 					videoURL: nil,
 					videoDuration: nil,
 					isVideo: false
-				)
+				),
+				mediaItems: [
+					MediaItem(
+						imageURL: "https://example.com/image2.jpg",
+						thumbnailURL: nil,
+						videoURL: nil,
+						videoDuration: nil,
+						isVideo: false
+					)
+				]
 			)
 		],
 		collection: nil,

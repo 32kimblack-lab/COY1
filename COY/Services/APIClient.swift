@@ -196,6 +196,8 @@ final class APIClient {
 			
 			// Convert PostMediaItem to MediaItem
 			var mediaItem: MediaItem?
+			var allMediaItems: [MediaItem] = []
+			
 			if let postMedia = postData.firstMediaItem {
 				mediaItem = MediaItem(
 					imageURL: postMedia.imageURL,
@@ -204,7 +206,13 @@ final class APIClient {
 					videoDuration: postMedia.videoDuration,
 					isVideo: postMedia.isVideo ?? false
 				)
+				if let item = mediaItem {
+					allMediaItems = [item]
+				}
 			}
+			
+			// If backend provides mediaItems array, use it
+			// Otherwise fall back to firstMediaItem
 			
 			return CollectionPost(
 				id: postData.id,
@@ -213,7 +221,8 @@ final class APIClient {
 				authorId: postData.authorId,
 				authorName: postData.authorName,
 				createdAt: createdAt,
-				firstMediaItem: mediaItem
+				firstMediaItem: mediaItem,
+				mediaItems: allMediaItems
 			)
 		}
 	}

@@ -569,7 +569,7 @@ struct ProfileView: View {
 							"birthMonth": user.birthMonth,
 							"birthYear": user.birthYear,
 							"collectionSortPreference": cyUser?.collectionSortPreference ?? "Newest to Oldest",
-							"customCollectionOrder": cyUser?.customCollectionOrder ?? []
+							"customCollectionOrder": cyUser?.customCollectionOrder ?? [String]()
 						]
 						print("✅ ProfileView: Loaded fresh user data from Firebase (source of truth)")
 						print("   - Profile URL: \(user.profileImageURL ?? "nil")")
@@ -589,7 +589,7 @@ struct ProfileView: View {
 								"birthMonth": "",
 								"birthYear": "",
 								"collectionSortPreference": cyUser.collectionSortPreference ?? "Newest to Oldest",
-								"customCollectionOrder": cyUser.customCollectionOrder ?? []
+								"customCollectionOrder": cyUser.customCollectionOrder
 							]
 							print("✅ ProfileView: Loaded CYUser data (fallback)")
 						}

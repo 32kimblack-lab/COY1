@@ -93,6 +93,22 @@ final class CollectionService {
 		
 		guard let data = doc.data() else { return nil }
 		
+		// Parse mediaItems
+		var allMediaItems: [MediaItem] = []
+		if let mediaItemsArray = data["mediaItems"] as? [[String: Any]] {
+			allMediaItems = mediaItemsArray.compactMap { mediaData in
+				MediaItem(
+					imageURL: mediaData["imageURL"] as? String,
+					thumbnailURL: mediaData["thumbnailURL"] as? String,
+					videoURL: mediaData["videoURL"] as? String,
+					videoDuration: mediaData["videoDuration"] as? Double,
+					isVideo: mediaData["isVideo"] as? Bool ?? false
+				)
+			}
+		}
+		
+		let firstMediaItem = allMediaItems.first
+		
 		return CollectionPost(
 			id: doc.documentID,
 			title: data["title"] as? String ?? "",
@@ -100,7 +116,8 @@ final class CollectionService {
 			authorId: data["authorId"] as? String ?? "",
 			authorName: data["authorName"] as? String ?? "",
 			createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
-			firstMediaItem: nil
+			firstMediaItem: firstMediaItem,
+			mediaItems: allMediaItems
 		)
 	}
 	
