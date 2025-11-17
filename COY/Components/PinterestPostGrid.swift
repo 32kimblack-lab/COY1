@@ -140,20 +140,6 @@ struct PinterestPostCard: View {
 			}
 			.tabViewStyle(.page)
 			.frame(height: imageHeight)
-			.overlay(
-				// Page indicator dots
-				VStack {
-					Spacer()
-					HStack(spacing: 4) {
-						ForEach(0..<post.mediaItems.count, id: \.self) { index in
-							Circle()
-								.fill(Color.white.opacity(0.6))
-								.frame(width: 6, height: 6)
-						}
-					}
-					.padding(.bottom, 8)
-				}
-			)
 		} else if let mediaItem = post.firstMediaItem ?? post.mediaItems.first {
 			// Single media item
 			if mediaItem.isVideo {
