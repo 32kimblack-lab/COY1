@@ -70,21 +70,33 @@ struct PinterestPostCard: View {
 	
 	var body: some View {
 		VStack(alignment: .leading, spacing: 8) {
-			// Media Content
+			// Media Content - no card styling, just the media
 			mediaContentView
 				.frame(width: width)
 				.clipped()
 				.cornerRadius(12)
 			
-			// Post Info
-			VStack(alignment: .leading, spacing: 6) {
-				// Username
-				if !post.authorName.isEmpty {
-					Text("@\(post.authorName)")
-						.font(.caption)
-						.fontWeight(.medium)
-						.foregroundColor(.primary)
-						.lineLimit(1)
+			// Post Info - under the media
+			VStack(alignment: .leading, spacing: 4) {
+				// Username and Star in same row
+				HStack(alignment: .center, spacing: 6) {
+					// Username
+					if !post.authorName.isEmpty {
+						Text("@\(post.authorName)")
+							.font(.caption)
+							.fontWeight(.medium)
+							.foregroundColor(.primary)
+							.lineLimit(1)
+					}
+					
+					Spacer()
+					
+					// Star Icon (only for members if individual collection)
+					if shouldShowStar {
+						Image(systemName: "star.fill")
+							.font(.caption2)
+							.foregroundColor(.yellow)
+					}
 				}
 				
 				// Caption
@@ -95,23 +107,9 @@ struct PinterestPostCard: View {
 						.lineLimit(2)
 						.multilineTextAlignment(.leading)
 				}
-				
-				// Star Icon (only for members if individual collection)
-				if shouldShowStar {
-					HStack {
-						Spacer()
-						Image(systemName: "star.fill")
-							.font(.caption)
-							.foregroundColor(.yellow)
-					}
-				}
 			}
-			.padding(.horizontal, 4)
-			.padding(.bottom, 4)
+			.padding(.horizontal, 0)
 		}
-		.background(colorScheme == .dark ? Color(white: 0.1) : Color.white)
-		.cornerRadius(12)
-		.shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
 		.onAppear {
 			checkStarVisibility()
 		}
