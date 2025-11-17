@@ -7,9 +7,9 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "mongoose": "^7.5.0",
+    "mongoose": "^8.0.0",
     "firebase-admin": "^12.0.0",
-    "aws-sdk": "^2.1454.0",
+    "aws-sdk": "^2.1500.0",
     "multer": "^1.4.5-lts.1",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
@@ -20,5 +20,10 @@
   },
   "engines": {
     "node": "18.x"
+  },
+  "overrides": {
+    "glob": "^10.0.0",
+    "rimraf": "^5.0.0",
+    "inflight": "npm:@isaacs/inflight@^1.0.6"
   }
 }
