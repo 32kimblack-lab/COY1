@@ -146,19 +146,23 @@ final class APIClient {
 			let key = "media\(index)"
 			if let image = item.image,
 			   let imageData = image.jpegData(compressionQuality: 0.8) {
-				formData[key] = key
+				// Don't add key to formData - it's only in mediaDataDict
 				mediaDataDict[key] = imageData
+				print("📸 Added image \(key), size: \(imageData.count) bytes")
 			} else if let videoURL = item.videoURL,
 					  let videoData = try? Data(contentsOf: videoURL) {
-				formData[key] = key
+				// Don't add key to formData - it's only in mediaDataDict
 				mediaDataDict[key] = videoData
 				videoKeys.insert(key) // Mark as video
 				// Add video duration if available
 				if let duration = item.videoDuration {
 					formData["\(key)_duration"] = String(duration)
 				}
+				print("🎥 Added video \(key), size: \(videoData.count) bytes, duration: \(item.videoDuration ?? 0)")
 			}
 		}
+		
+		print("📊 Total media items to upload: \(mediaDataDict.count)")
 		
 		request.httpBody = try createMultipartBody(formData: formData, media: mediaDataDict, videoKeys: videoKeys)
 		request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")

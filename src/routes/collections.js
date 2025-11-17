@@ -78,17 +78,34 @@ router.post('/', verifyToken, upload.single('image'), async (req, res) => {
 });
 
 // Create a post in a collection
-router.post('/:collectionId/posts', verifyToken, upload.fields([
-  { name: 'media0', maxCount: 1 },
-  { name: 'media1', maxCount: 1 },
-  { name: 'media2', maxCount: 1 },
-  { name: 'media3', maxCount: 1 },
-  { name: 'media4', maxCount: 1 }
-]), async (req, res) => {
+router.post('/:collectionId/posts', verifyToken, (req, res, next) => {
+  // Handle multer errors
+  upload.fields([
+    { name: 'media0', maxCount: 1 },
+    { name: 'media1', maxCount: 1 },
+    { name: 'media2', maxCount: 1 },
+    { name: 'media3', maxCount: 1 },
+    { name: 'media4', maxCount: 1 }
+  ])(req, res, (err) => {
+    if (err) {
+      console.error('❌ Multer error:', err);
+      return res.status(400).json({ error: 'File upload error: ' + err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
     const { collectionId } = req.params;
     const userId = req.userId; // From verifyToken middleware
     const body = req.body;
+
+    console.log('📝 Create post request:', {
+      collectionId,
+      userId,
+      bodyKeys: Object.keys(body),
+      filesKeys: req.files ? Object.keys(req.files) : 'no files',
+      filesCount: req.files ? Object.keys(req.files).length : 0
+    });
 
     // Verify collection exists and user has access
     const collection = await Collection.findById(collectionId);
@@ -131,6 +148,11 @@ router.post('/:collectionId/posts', verifyToken, upload.fields([
     const mediaItems = [];
     const mediaFiles = req.files || {};
     
+    console.log('📁 Processing media files:', {
+      filesObject: mediaFiles,
+      fileKeys: Object.keys(mediaFiles)
+    });
+    
     // Sort media files by key (media0, media1, etc.)
     const sortedKeys = Object.keys(mediaFiles).sort((a, b) => {
       const numA = parseInt(a.replace('media', ''));
@@ -143,6 +165,12 @@ router.post('/:collectionId/posts', verifyToken, upload.fields([
       if (fileArray && fileArray.length > 0) {
         const file = fileArray[0];
         const isVideo = file.mimetype && file.mimetype.startsWith('video/');
+        
+        console.log(`📸 Processing ${key}:`, {
+          mimetype: file.mimetype,
+          size: file.size,
+          isVideo
+        });
         
         try {
           // Upload to S3
@@ -157,15 +185,23 @@ router.post('/:collectionId/posts', verifyToken, upload.fields([
           };
           
           mediaItems.push(mediaItem);
+          console.log(`✅ Uploaded ${key} to S3: ${mediaURL}`);
         } catch (error) {
-          console.error(`Error uploading media ${key}:`, error);
+          console.error(`❌ Error uploading media ${key}:`, error);
           // Continue with other media items
         }
       }
     }
 
     if (mediaItems.length === 0) {
-      return res.status(400).json({ error: 'At least one media item is required' });
+      console.error('❌ No media items found. Files object:', req.files);
+      return res.status(400).json({ 
+        error: 'At least one media item is required',
+        debug: {
+          filesReceived: req.files ? Object.keys(req.files).length : 0,
+          bodyKeys: Object.keys(body)
+        }
+      });
     }
 
     // Create post data
