@@ -164,8 +164,15 @@ final class APIClient {
 		
 		print("📊 Total media items to upload: \(mediaDataDict.count)")
 		
+		// Validate we have at least one media item
+		guard !mediaDataDict.isEmpty else {
+			throw NSError(domain: "APIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "No media items to upload"])
+		}
+		
 		request.httpBody = try createMultipartBody(formData: formData, media: mediaDataDict, videoKeys: videoKeys)
 		request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+		
+		print("📦 Request body size: \(request.httpBody?.count ?? 0) bytes")
 		
 		let (data, response) = try await URLSession.shared.data(for: request)
 		try validateResponse(response)
