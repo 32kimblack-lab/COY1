@@ -19,7 +19,7 @@
     "@vercel/node": "^3.0.0"
   },
   "engines": {
-    "node": "18.x"
+    "node": "22.x"
   },
   "overrides": {
     "glob": "^10.3.0",
