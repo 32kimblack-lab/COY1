@@ -69,7 +69,8 @@ try {
   app.use('/api/users', userRoutes);
   console.log('✅ User routes loaded');
 } catch (error) {
-  console.log('⚠️ User routes not found (optional)');
+  console.error('❌ User routes failed to load:', error.message);
+  console.error('Error stack:', error.stack);
 }
 
 try {
@@ -77,7 +78,8 @@ try {
   app.use('/api/collections', collectionRoutes);
   console.log('✅ Collection routes loaded');
 } catch (error) {
-  console.log('⚠️ Collection routes not found (optional)');
+  console.error('❌ Collection routes failed to load:', error.message);
+  console.error('Error stack:', error.stack);
 }
 
 try {
