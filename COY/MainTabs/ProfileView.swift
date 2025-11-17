@@ -680,19 +680,21 @@ struct CustomizeCollectionsView: View {
 						.buttonStyle(PlainButtonStyle())
 						.fixedSize(horizontal: true, vertical: false)
 						
-						// Collection row - flexible width
-						CollectionRowDesign(
-							collection: collection,
-							isFollowing: false,
-							hasRequested: false,
-							isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
-							isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
-							onFollowTapped: {},
-							onActionTapped: {},
-							onProfileTapped: {}
-						)
-						.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-						.allowsHitTesting(false)
+						// Collection row - flexible width with navigation
+						NavigationLink(destination: CYInsideCollectionView(collection: collection).environmentObject(authService)) {
+							CollectionRowDesign(
+								collection: collection,
+								isFollowing: false,
+								hasRequested: false,
+								isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
+								isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
+								onFollowTapped: {},
+								onActionTapped: {},
+								onProfileTapped: {}
+							)
+							.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+						}
+						.buttonStyle(PlainButtonStyle())
 					}
 					.padding(.vertical, 4)
 					.listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -782,18 +784,21 @@ struct UserCollectionsView: View {
 				.listRowBackground(Color.clear)
 			} else {
 				ForEach(sortedCollections) { collection in
-					CollectionRowDesign(
-						collection: collection,
-						isFollowing: false,
-						hasRequested: false,
-						isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
-						isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
-						onFollowTapped: {},
-						onActionTapped: {},
-						onProfileTapped: {}
-					)
-					.padding(.horizontal)
-					.padding(.bottom, 12)
+					NavigationLink(destination: CYInsideCollectionView(collection: collection).environmentObject(authService)) {
+						CollectionRowDesign(
+							collection: collection,
+							isFollowing: false,
+							hasRequested: false,
+							isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
+							isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
+							onFollowTapped: {},
+							onActionTapped: {},
+							onProfileTapped: {}
+						)
+						.padding(.horizontal)
+						.padding(.bottom, 12)
+					}
+					.buttonStyle(PlainButtonStyle())
 					.listRowInsets(EdgeInsets())
 					.listRowSeparator(.hidden)
 					.listRowBackground(Color.clear)
