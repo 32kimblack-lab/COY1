@@ -809,10 +809,19 @@ struct CYInsideCollectionView: View {
 				collectionId: collection.id,
 				userId: currentUserId
 			)
-			// Reload collection to get updated member status
-			loadCollectionData()
+			print("✅ CYInsideCollectionView: User left collection successfully")
+			
+			// Dismiss the view after leaving (user is no longer a member)
+			await MainActor.run {
+				dismiss()
+			}
 		} catch {
-			print("Error leaving collection: \(error)")
+			print("❌ CYInsideCollectionView: Error leaving collection: \(error)")
+			// Show error alert
+			await MainActor.run {
+				deleteErrorMessage = error.localizedDescription
+				showDeleteError = true
+			}
 		}
 	}
 	
