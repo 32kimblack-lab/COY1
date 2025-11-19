@@ -436,12 +436,13 @@ final class APIClient {
 		
 		var body: [String: Any] = [:]
 		
-		// CRITICAL FIX: Only include non-empty strings, convert empty strings to nil
-		if let nameValue = name, !nameValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+		// CRITICAL FIX: Always send name and description if provided (even if empty)
+		// Backend needs these fields to update them properly (matches edit profile pattern)
+		if let nameValue = name {
 			body["name"] = nameValue.trimmingCharacters(in: .whitespacesAndNewlines)
 		}
 		
-		if let descriptionValue = description, !descriptionValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+		if let descriptionValue = description {
 			body["description"] = descriptionValue.trimmingCharacters(in: .whitespacesAndNewlines)
 		}
 		

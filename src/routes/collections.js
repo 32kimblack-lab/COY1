@@ -850,14 +850,23 @@ router.put('/:collectionId', verifyToken, upload.fields([
     await collection.save();
     console.log(`✅ Updated collection in MongoDB: ${collectionId}`);
 
-    // Update Firebase with additional fields (allowedUsers, deniedUsers, admins, members)
-    // This is similar to how edit profile handles additional data
+    // CRITICAL FIX: Update Firebase with ALL fields (name, description, isPublic, imageURL, etc.)
+    // This ensures Firebase has the latest data and matches edit profile pattern
     try {
       // Firebase Admin is already initialized at the top of the file
       const db = admin.firestore();
       const firebaseCollectionRef = db.collection('collections').doc(collectionId);
       
       const firebaseUpdate = {};
+      
+      // CRITICAL: Always update basic fields in Firebase (name, description, isPublic, imageURL)
+      // These are the fields that users edit, so they MUST be in Firebase
+      firebaseUpdate.name = updateData.name;
+      firebaseUpdate.description = updateData.description || '';
+      firebaseUpdate.isPublic = updateData.isPublic;
+      if (updateData.imageURL !== undefined) {
+        firebaseUpdate.imageURL = updateData.imageURL;
+      }
       
       // Handle allowedUsers (for private collections)
       // CRITICAL: Always save allowedUsers if provided, even if empty array (clears access)
@@ -884,11 +893,14 @@ router.put('/:collectionId', verifyToken, upload.fields([
         firebaseUpdate.admins = Array.isArray(body.admins) ? body.admins : [];
       }
 
-      // Only update Firebase if there are changes
-      if (Object.keys(firebaseUpdate).length > 0) {
-        await firebaseCollectionRef.update(firebaseUpdate);
-        console.log(`✅ Updated collection in Firebase: ${collectionId}`);
-      }
+      // CRITICAL: Use set with merge: true to ensure collection exists in Firebase
+      // This handles cases where collection exists in MongoDB but not in Firebase
+      await firebaseCollectionRef.set(firebaseUpdate, { merge: true });
+      console.log(`✅ Updated collection in Firebase: ${collectionId}`);
+      console.log(`   - Name: ${firebaseUpdate.name}`);
+      console.log(`   - Description: ${firebaseUpdate.description}`);
+      console.log(`   - isPublic: ${firebaseUpdate.isPublic}`);
+      console.log(`   - imageURL: ${firebaseUpdate.imageURL || 'null'}`);
     } catch (error) {
       console.error('Error updating Firebase (non-critical):', error);
       // Continue even if Firebase update fails - matches edit profile pattern

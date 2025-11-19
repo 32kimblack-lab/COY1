@@ -443,50 +443,8 @@ final class CollectionService {
 			}
 		}
 		
-		// CRITICAL FIX: Save to Firebase FIRST (source of truth) - MATCHES EDIT PROFILE PATTERN
-		// This ensures Firebase listeners see changes immediately
-		let db = Firestore.firestore()
-		let collectionRef = db.collection("collections").document(collectionId)
-		
-		var firestoreUpdate: [String: Any] = [:]
-		
-		// Update name if provided
-		if let name = name {
-			firestoreUpdate["name"] = name
-		}
-		
-		// Update description if provided
-		if let description = description {
-			firestoreUpdate["description"] = description
-		}
-		
-		// Update imageURL if provided
-		if let imageURL = finalImageURL {
-			firestoreUpdate["imageURL"] = imageURL
-		}
-		
-		// Update isPublic if provided
-		if let isPublic = isPublic {
-			firestoreUpdate["isPublic"] = isPublic
-		}
-		
-		// Update allowedUsers if provided
-		if let allowedUsers = allowedUsers {
-			firestoreUpdate["allowedUsers"] = allowedUsers
-		}
-		
-		// Update deniedUsers if provided
-		if let deniedUsers = deniedUsers {
-			firestoreUpdate["deniedUsers"] = deniedUsers
-		}
-		
-		// Save to Firebase FIRST (source of truth) - like edit profile
-		if !firestoreUpdate.isEmpty {
-			try await collectionRef.updateData(firestoreUpdate)
-			print("✅ CollectionService: Collection updated in Firebase Firestore (source of truth)")
-		}
-		
-		// Sync to backend API (like edit profile syncs after Firebase)
+		// CRITICAL FIX: Use backend API FIRST (source of truth) - matches edit profile pattern
+		// Backend will update both MongoDB and Firebase, ensuring consistency
 		do {
 			let _ = try await apiClient.updateCollection(
 				collectionId: collectionId,
@@ -498,10 +456,51 @@ final class CollectionService {
 				allowedUsers: allowedUsers,  // Send array even if empty
 				deniedUsers: deniedUsers  // Send array even if empty
 			)
-			print("✅ CollectionService: Collection synced to backend API")
+			print("✅ CollectionService: Collection updated via backend API (source of truth)")
 		} catch {
-			// Log error but don't fail - Firebase is source of truth (like edit profile)
-			print("⚠️ Failed to sync to backend (Firebase is source of truth): \(error.localizedDescription)")
+			print("⚠️ CollectionService: Backend API failed, falling back to Firebase: \(error)")
+			
+			// Fallback to Firebase if backend fails
+			let db = Firestore.firestore()
+			let collectionRef = db.collection("collections").document(collectionId)
+			
+			var firestoreUpdate: [String: Any] = [:]
+			
+			// Update name if provided
+			if let name = name {
+				firestoreUpdate["name"] = name
+			}
+			
+			// Update description if provided
+			if let description = description {
+				firestoreUpdate["description"] = description
+			}
+			
+			// Update imageURL if provided
+			if let imageURL = finalImageURL {
+				firestoreUpdate["imageURL"] = imageURL
+			}
+			
+			// Update isPublic if provided
+			if let isPublic = isPublic {
+				firestoreUpdate["isPublic"] = isPublic
+			}
+			
+			// Update allowedUsers if provided
+			if let allowedUsers = allowedUsers {
+				firestoreUpdate["allowedUsers"] = allowedUsers
+			}
+			
+			// Update deniedUsers if provided
+			if let deniedUsers = deniedUsers {
+				firestoreUpdate["deniedUsers"] = deniedUsers
+			}
+			
+			// CRITICAL: Use set with merge: true to handle collections that don't exist in Firestore
+			if !firestoreUpdate.isEmpty {
+				try await collectionRef.setData(firestoreUpdate, merge: true)
+				print("✅ CollectionService: Collection updated in Firebase Firestore (fallback)")
+			}
 		}
 		
 		// Clear collection cache to force fresh load (like edit profile clears cache)
