@@ -437,7 +437,10 @@ struct CYEditCollectionView: View {
 			// Always send description (even if empty - user might want to clear it)
 			let descriptionToSend: String? = trimmedDescription
 			
-			// Update collection with all fields
+			// CRITICAL FIX: Clear cache BEFORE update (like edit profile does)
+			CYInsideCollectionCache.shared.clearCache(for: collection.id)
+			
+			// Update collection with all fields (saves to Firebase first, then syncs to backend)
 			try await CollectionService.shared.updateCollection(
 				collectionId: collection.id,
 				name: nameToSend,
@@ -447,68 +450,53 @@ struct CYEditCollectionView: View {
 				isPublic: isPublicValue
 			)
 			
-			// CRITICAL: Reload collection from backend to verify update was saved
+			// CRITICAL: Reload collection from Firebase to verify update was saved (like edit profile)
 			print("🔍 Verifying collection update was saved...")
-			if let updatedCollection = try? await CollectionService.shared.getCollection(collectionId: collection.id) {
-				print("✅ Verified update - Name: \(updatedCollection.name), Image URL: \(updatedCollection.imageURL ?? "nil")")
-			} else {
-				print("⚠️ Could not verify collection update - collection may not have been saved")
+			let verifiedCollection = try await CollectionService.shared.getCollection(collectionId: collection.id)
+			guard let verifiedCollection = verifiedCollection else {
+				throw NSError(domain: "CollectionUpdateError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to verify collection update"])
 			}
 			
-			// If we uploaded an image, send the imageURL to backend separately
-			if let imageURL = uploadedImageURL {
-				do {
-					let apiClient = APIClient.shared
-					_ = try await apiClient.updateCollection(
-						collectionId: collection.id,
-						imageURL: imageURL,
-						isPublic: nil // Don't change visibility
-					)
-					print("✅ CYEditCollectionView: Image URL sent to backend: \(imageURL)")
-				} catch {
-					print("⚠️ CYEditCollectionView: Could not send imageURL to backend: \(error)")
-				}
-			}
-			
-			// Clear cache for this collection
-			CYInsideCollectionCache.shared.clearCache(for: collection.id)
+			print("✅ Verified update - Name: \(verifiedCollection.name), Image URL: \(verifiedCollection.imageURL ?? "nil")")
 			
 			// Clear image cache for old collection image
 			if let oldImageURL = collection.imageURL, !oldImageURL.isEmpty {
 				ImageCache.shared.removeImage(for: oldImageURL)
 			}
 			
-			// Pre-cache the new image
+			// Pre-cache the new image (like edit profile pre-caches images)
 			if let uploadedURL = uploadedImageURL, let uploadedImage = imageToUpload {
 				ImageCache.shared.setImage(uploadedImage, for: uploadedURL)
+				print("💾 Pre-cached new collection image: \(uploadedURL)")
 			}
 			
-			// Post comprehensive notifications for real-time UI updates everywhere in the app
+			// Prepare notification data with verified data from Firebase (like edit profile)
+			var immediateUpdateData: [String: Any] = [
+				"collectionId": collection.id,
+				"name": verifiedCollection.name,
+				"description": verifiedCollection.description ?? ""
+			]
+			
+			// Use verified URLs from Firebase (these are the actual saved URLs)
+			if let imageURL = verifiedCollection.imageURL, !imageURL.isEmpty {
+				immediateUpdateData["imageURL"] = imageURL
+			}
+			
+			if shouldUpdateVisibility {
+				immediateUpdateData["isPublic"] = verifiedCollection.isPublic
+			}
+			
+			// Post comprehensive notifications for real-time UI updates everywhere (like edit profile)
 			await MainActor.run {
 				if let uploadedURL = uploadedImageURL {
 					self.updatedCollectionImageURL = uploadedURL
 				}
 				
-				// Build comprehensive update data with ALL changes
-				var updateData: [String: Any] = [
-					"collectionId": collection.id,
-					"name": collectionName.trimmingCharacters(in: .whitespacesAndNewlines),
-					"description": description.trimmingCharacters(in: .whitespacesAndNewlines)
-				]
-				
-				if let uploadedURL = uploadedImageURL {
-					updateData["imageURL"] = uploadedURL
-				}
-				
-				if shouldUpdateVisibility {
-					updateData["isPublic"] = isPublic
-				}
-				
-				// Post CollectionUpdated notification with all updated data
+				// Post CollectionUpdated notification with verified data
 				NotificationCenter.default.post(
 					name: NSNotification.Name("CollectionUpdated"),
 					object: collection.id,
-					userInfo: ["updatedData": updateData]
+					userInfo: ["updatedData": immediateUpdateData]
 				)
 				
 				// Post ProfileUpdated to refresh profile views (collections list)
@@ -519,32 +507,33 @@ struct CYEditCollectionView: View {
 				)
 				
 				// Post CollectionImageUpdated for image-specific updates
-				if uploadedImageURL != nil {
+				if let imageURL = verifiedCollection.imageURL, !imageURL.isEmpty {
 					NotificationCenter.default.post(
 						name: NSNotification.Name("CollectionImageUpdated"),
 						object: collection.id,
-						userInfo: ["imageURL": uploadedImageURL!]
+						userInfo: ["imageURL": imageURL]
 					)
 				}
 				
 				// Post CollectionNameUpdated for name changes
-				if !collectionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+				if !verifiedCollection.name.isEmpty {
 					NotificationCenter.default.post(
 						name: NSNotification.Name("CollectionNameUpdated"),
 						object: collection.id,
-						userInfo: ["name": collectionName.trimmingCharacters(in: .whitespacesAndNewlines)]
+						userInfo: ["name": verifiedCollection.name]
 					)
 				}
 				
 				print("📢 CYEditCollectionView: Posted comprehensive collection update notifications")
 				print("   - Collection ID: \(collection.id)")
-				print("   - Updated data: \(updateData)")
+				print("   - Name: \(immediateUpdateData["name"] as? String ?? "nil")")
+				print("   - Image URL: \(immediateUpdateData["imageURL"] as? String ?? "nil")")
 				
 				isUploading = false
 				isSaving = false
 			}
 			
-			// Small delay before dismiss
+			// Small delay before dismiss (like edit profile)
 			try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
 			
 			await MainActor.run {

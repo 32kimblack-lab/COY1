@@ -427,22 +427,8 @@ final class CollectionService {
 			}
 		}
 		
-		// CRITICAL FIX: Save to backend API first (source of truth)
-		let updatedCollection = try await apiClient.updateCollection(
-			collectionId: collectionId,
-			name: name,
-			description: description,
-			image: nil, // Don't send image data - we use Firebase Storage URLs
-			imageURL: finalImageURL, // Send Firebase Storage URL to backend
-			isPublic: isPublic,
-			allowedUsers: allowedUsers,  // Send array even if empty
-			deniedUsers: deniedUsers  // Send array even if empty
-		)
-		
-		print("✅ CollectionService: Collection updated in backend API")
-		
-		// CRITICAL FIX: Also save to Firebase Firestore for real-time updates
-		// This ensures Firebase listeners see the changes immediately
+		// CRITICAL FIX: Save to Firebase FIRST (source of truth) - MATCHES EDIT PROFILE PATTERN
+		// This ensures Firebase listeners see changes immediately
 		let db = Firestore.firestore()
 		let collectionRef = db.collection("collections").document(collectionId)
 		
@@ -478,13 +464,37 @@ final class CollectionService {
 			firestoreUpdate["deniedUsers"] = deniedUsers
 		}
 		
-		// Only update Firebase if there are changes
+		// Save to Firebase FIRST (source of truth) - like edit profile
 		if !firestoreUpdate.isEmpty {
 			try await collectionRef.updateData(firestoreUpdate)
-			print("✅ CollectionService: Collection updated in Firebase Firestore for real-time sync")
+			print("✅ CollectionService: Collection updated in Firebase Firestore (source of truth)")
 		}
 		
-		// Post comprehensive notification for immediate UI updates
+		// Sync to backend API (like edit profile syncs after Firebase)
+		do {
+			let _ = try await apiClient.updateCollection(
+				collectionId: collectionId,
+				name: name,
+				description: description,
+				image: nil, // Don't send image data - we use Firebase Storage URLs
+				imageURL: finalImageURL, // Send Firebase Storage URL to backend
+				isPublic: isPublic,
+				allowedUsers: allowedUsers,  // Send array even if empty
+				deniedUsers: deniedUsers  // Send array even if empty
+			)
+			print("✅ CollectionService: Collection synced to backend API")
+		} catch {
+			// Log error but don't fail - Firebase is source of truth (like edit profile)
+			print("⚠️ Failed to sync to backend (Firebase is source of truth): \(error.localizedDescription)")
+		}
+		
+		// Clear collection cache to force fresh load (like edit profile clears cache)
+		// Note: CollectionService doesn't have a cache like UserService, but we can clear ImageCache
+		if let oldImageURL = imageURL, !oldImageURL.isEmpty {
+			ImageCache.shared.removeImage(for: oldImageURL)
+		}
+		
+		// Post comprehensive notification for immediate UI updates (like edit profile)
 		await MainActor.run {
 			var updateData: [String: Any] = [
 				"collectionId": collectionId

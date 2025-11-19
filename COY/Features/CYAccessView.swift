@@ -407,20 +407,32 @@ struct CYAccessView: View {
 				)
 			}
 			
-			// CRITICAL FIX: Post comprehensive notifications for real-time updates everywhere
+			// CRITICAL FIX: Verify update was saved (like edit profile)
+			print("🔍 Verifying access changes were saved...")
+			let verifiedCollection = try await CollectionService.shared.getCollection(collectionId: collection.id)
+			guard let verifiedCollection = verifiedCollection else {
+				throw NSError(domain: "AccessUpdateError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to verify access update"])
+			}
+			
+			let verifiedAllowedUsers = verifiedCollection.allowedUsers
+			let verifiedDeniedUsers = verifiedCollection.deniedUsers
+			
+			print("✅ Verified access update - Allowed: \(verifiedAllowedUsers.count), Denied: \(verifiedDeniedUsers.count)")
+			
+			// CRITICAL FIX: Post comprehensive notifications with verified data (like edit profile)
 			await MainActor.run {
-				// Build update data with access changes
+				// Build update data with verified access changes from Firebase
 				var updateData: [String: Any] = [
 					"collectionId": collection.id
 				]
 				
 				if isPrivateCollection {
-					updateData["allowedUsers"] = allowedUsersArray
+					updateData["allowedUsers"] = verifiedAllowedUsers
 				} else {
-					updateData["deniedUsers"] = deniedUsersArray
+					updateData["deniedUsers"] = verifiedDeniedUsers
 				}
 				
-				// Post CollectionUpdated with access data
+				// Post CollectionUpdated with verified access data
 				NotificationCenter.default.post(
 					name: NSNotification.Name("CollectionUpdated"),
 					object: collection.id,
@@ -436,7 +448,7 @@ struct CYAccessView: View {
 				
 				print("📢 CYAccessView: Posted comprehensive collection update notifications")
 				print("   - Collection ID: \(collection.id)")
-				print("   - Updated access: \(isPrivateCollection ? "allowedUsers" : "deniedUsers") = \(isPrivateCollection ? allowedUsersArray.count : deniedUsersArray.count) users")
+				print("   - Verified access: \(isPrivateCollection ? "allowedUsers" : "deniedUsers") = \(isPrivateCollection ? verifiedAllowedUsers.count : verifiedDeniedUsers.count) users")
 				
 				dismiss()
 			}
