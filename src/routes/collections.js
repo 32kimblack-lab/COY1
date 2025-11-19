@@ -161,15 +161,41 @@ router.get('/discover/collections', verifyToken, async (req, res) => {
 
     console.log(`📊 Found ${collections.length} collections, filtered to ${filteredCollections.length} (excluding user's own collections)`);
 
-    // Also fetch imageURLs from Firebase if missing in MongoDB
-    // Firebase Admin is already initialized at the top of the file
-    const firestore = admin.firestore();
+    // CRITICAL FIX: Initialize Firebase Admin if not already initialized
+    // This ensures Firebase is ready before we try to use it
+    let firestore = null;
+    try {
+      if (!admin.apps.length) {
+        if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+          const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+          admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+          });
+        } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
+          admin.initializeApp({
+            credential: admin.credential.cert({
+              projectId: process.env.FIREBASE_PROJECT_ID,
+              privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+              clientEmail: process.env.FIREBASE_CLIENT_EMAIL
+            })
+          });
+        } else {
+          admin.initializeApp();
+        }
+      }
+      firestore = admin.firestore();
+      console.log('✅ Firebase Admin initialized for discover endpoint');
+    } catch (firebaseError) {
+      console.error('⚠️ Firebase Admin initialization failed (non-critical):', firebaseError);
+      // Continue without Firebase - we'll just use MongoDB data
+    }
     
+    // Map collections with optional Firebase imageURL enhancement
     const collectionsWithImages = await Promise.all(filteredCollections.map(async (c) => {
       let imageURL = c.imageURL;
       
-      // If no imageURL in MongoDB, try to get it from Firebase
-      if (!imageURL) {
+      // If no imageURL in MongoDB and Firebase is available, try to get it from Firebase
+      if (!imageURL && firestore) {
         try {
           const firebaseCollection = await firestore.collection('collections').doc(c._id.toString()).get();
           if (firebaseCollection.exists) {
@@ -179,6 +205,7 @@ router.get('/discover/collections', verifyToken, async (req, res) => {
           }
         } catch (error) {
           console.error(`Error fetching imageURL from Firebase for collection ${c._id}:`, error);
+          // Continue without Firebase imageURL
         }
       }
       
