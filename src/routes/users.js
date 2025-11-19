@@ -83,12 +83,20 @@ router.put('/:userId', verifyToken, upload.fields([
     // Update user fields
     const updateData = {
       uid: userId,
-      name: body.name || user?.name || '',
-      username: body.username || user?.username || '',
-      email: body.email || user?.email || '',
-      birthMonth: body.birthMonth || user?.birthMonth || null,
-      birthDay: body.birthDay || user?.birthDay || null,
-      birthYear: body.birthYear || user?.birthYear || null
+      name: body.name !== undefined ? body.name : (user?.name || ''),
+      username: body.username !== undefined ? body.username : (user?.username || ''),
+      email: body.email !== undefined ? body.email : (user?.email || ''),
+      birthMonth: body.birthMonth !== undefined ? body.birthMonth : (user?.birthMonth || null),
+      birthDay: body.birthDay !== undefined ? body.birthDay : (user?.birthDay || null),
+      birthYear: body.birthYear !== undefined ? body.birthYear : (user?.birthYear || null),
+      // CRITICAL FIX: Save collectionSortPreference and customCollectionOrder
+      collectionSortPreference: body.collectionSortPreference !== undefined ? body.collectionSortPreference : (user?.collectionSortPreference || null),
+      customCollectionOrder: body.customCollectionOrder !== undefined ? (Array.isArray(body.customCollectionOrder) ? body.customCollectionOrder : []) : (user?.customCollectionOrder || []),
+      // Also handle other fields that might be updated
+      blockedUsers: body.blockedUsers !== undefined ? (Array.isArray(body.blockedUsers) ? body.blockedUsers : []) : (user?.blockedUsers || []),
+      blockedCollectionIds: body.blockedCollectionIds !== undefined ? (Array.isArray(body.blockedCollectionIds) ? body.blockedCollectionIds : []) : (user?.blockedCollectionIds || []),
+      hiddenPostIds: body.hiddenPostIds !== undefined ? (Array.isArray(body.hiddenPostIds) ? body.hiddenPostIds : []) : (user?.hiddenPostIds || []),
+      starredPostIds: body.starredPostIds !== undefined ? (Array.isArray(body.starredPostIds) ? body.starredPostIds : []) : (user?.starredPostIds || [])
     };
 
     // Handle profile image upload
@@ -173,6 +181,38 @@ router.get('/:userId/collections', verifyToken, async (req, res) => {
     })));
   } catch (error) {
     console.error('Get user collections error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get user by username (public endpoint for login - uses Admin SDK to bypass Firestore rules)
+router.get('/username/:username', async (req, res) => {
+  try {
+    const { username } = req.params;
+    const admin = require('firebase-admin');
+    const db = admin.firestore();
+    
+    // Use Admin SDK to query Firestore (bypasses security rules)
+    const snapshot = await db.collection('users')
+      .where('username', '==', username.toLowerCase())
+      .limit(1)
+      .get();
+    
+    if (snapshot.empty) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const doc = snapshot.docs[0];
+    const data = doc.data();
+    
+    // Only return email and userId (needed for login)
+    res.json({
+      userId: doc.id,
+      email: data.email || '',
+      username: data.username || ''
+    });
+  } catch (error) {
+    console.error('Get user by username error:', error);
     res.status(500).json({ error: error.message });
   }
 });

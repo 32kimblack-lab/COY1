@@ -81,7 +81,7 @@ router.post('/', verifyToken, upload.single('image'), async (req, res) => {
 // DISCOVER/SEARCH ROUTES - MUST BE BEFORE ALL PARAMETERIZED ROUTES
 // ==========================================
 
-// Search collections - returns all public collections and collections user has access to
+// Search collections - returns public collections that user is NOT owner/member of
 router.get('/discover/collections', verifyToken, async (req, res) => {
   try {
     console.log('🔍 Search collections endpoint hit');
@@ -89,16 +89,13 @@ router.get('/discover/collections', verifyToken, async (req, res) => {
     const { query } = req.query; // Optional search query
     console.log('Search query:', query, 'UserId:', userId);
 
-    // Find all collections that the user can see:
-    // 1. Public collections (isPublic === true)
-    // 2. Collections where user is owner
-    // 3. Collections where user is a member
+    // Find public collections that user is NOT:
+    // 1. The owner of (ownerId !== userId)
+    // 2. A member of (members does not contain userId)
     let collectionsQuery = {
-      $or: [
-        { isPublic: true },
-        { ownerId: userId },
-        { members: userId }
-      ]
+      isPublic: true,
+      ownerId: { $ne: userId }, // Not the owner
+      members: { $nin: [userId] } // Not in members array
     };
 
     // If search query provided, filter by name or description
@@ -107,11 +104,9 @@ router.get('/discover/collections', verifyToken, async (req, res) => {
       collectionsQuery = {
         $and: [
           {
-            $or: [
-              { isPublic: true },
-              { ownerId: userId },
-              { members: userId }
-            ]
+            isPublic: true,
+            ownerId: { $ne: userId },
+            members: { $nin: [userId] }
           },
           {
             $or: [
@@ -127,26 +122,59 @@ router.get('/discover/collections', verifyToken, async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(100); // Limit results
 
-    res.json(collections.map(c => ({
-      id: c._id.toString(),
-      name: c.name,
-      description: c.description || '',
-      type: c.type,
-      isPublic: c.isPublic || false,
-      ownerId: c.ownerId,
-      ownerName: c.ownerName || '',
-      imageURL: c.imageURL || null,
-      members: c.members || [],
-      memberCount: c.memberCount || c.members?.length || 0,
-      createdAt: c.createdAt ? c.createdAt.toISOString() : new Date().toISOString()
-    })));
+    // Filter out collections where user is owner or member (client-side safety check)
+    const filteredCollections = collections.filter(c => {
+      const isOwner = c.ownerId === userId;
+      const isMember = c.members && c.members.includes(userId);
+      return !isOwner && !isMember;
+    });
+
+    console.log(`📊 Found ${collections.length} collections, filtered to ${filteredCollections.length} (excluding user's own collections)`);
+
+    // Also fetch imageURLs from Firebase if missing in MongoDB
+    const admin = require('firebase-admin');
+    const firestore = admin.firestore();
+    
+    const collectionsWithImages = await Promise.all(filteredCollections.map(async (c) => {
+      let imageURL = c.imageURL;
+      
+      // If no imageURL in MongoDB, try to get it from Firebase
+      if (!imageURL) {
+        try {
+          const firebaseCollection = await firestore.collection('collections').doc(c._id.toString()).get();
+          if (firebaseCollection.exists) {
+            const firebaseData = firebaseCollection.data();
+            imageURL = firebaseData?.imageURL || null;
+            console.log(`📸 Fetched imageURL from Firebase for collection ${c.name}: ${imageURL ? 'found' : 'not found'}`);
+          }
+        } catch (error) {
+          console.error(`Error fetching imageURL from Firebase for collection ${c._id}:`, error);
+        }
+      }
+      
+      return {
+        id: c._id.toString(),
+        name: c.name,
+        description: c.description || '',
+        type: c.type,
+        isPublic: c.isPublic || false,
+        ownerId: c.ownerId,
+        ownerName: c.ownerName || '',
+        imageURL: imageURL || null,
+        members: c.members || [],
+        memberCount: c.memberCount || c.members?.length || 0,
+        createdAt: c.createdAt ? c.createdAt.toISOString() : new Date().toISOString()
+      };
+    }));
+
+    res.json(collectionsWithImages);
   } catch (error) {
     console.error('Search collections error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Search posts - returns posts from all accessible collections
+// Search posts - returns posts from all accessible collections (queries Firebase directly - source of truth)
 router.get('/discover/posts', verifyToken, async (req, res) => {
   try {
     console.log('🔍 Search posts endpoint hit');
@@ -154,7 +182,11 @@ router.get('/discover/posts', verifyToken, async (req, res) => {
     const { query } = req.query; // Optional search query
     console.log('Search query:', query, 'UserId:', userId);
 
-    // First, find all collections the user can access
+    // Use Firebase Admin to query Firebase directly (source of truth)
+    const admin = require('firebase-admin');
+    const db = admin.firestore();
+
+    // First, find all collections the user can access (from MongoDB or Firebase)
     const accessibleCollections = await Collection.find({
       $or: [
         { isPublic: true },
@@ -169,52 +201,187 @@ router.get('/discover/posts', verifyToken, async (req, res) => {
       return res.json({ posts: [] });
     }
 
-    // Build posts query
-    let postsQuery = {
-      collectionId: { $in: accessibleCollectionIds }
-    };
+    console.log(`📦 Fetching posts from Firebase for ${accessibleCollectionIds.length} accessible collections`);
 
-    // If search query provided, filter by title/caption
+    // Fetch posts from Firebase for all accessible collections
+    const allPosts = [];
+    
+    // Fetch posts in parallel for all collections
+    const postPromises = accessibleCollectionIds.map(async (collectionId) => {
+      try {
+        let postsSnapshot = await db.collection('posts')
+          .where('collectionId', '==', collectionId)
+          .get();
+        
+        // If no posts found, try fetching all and filtering
+        if (postsSnapshot.docs.length === 0) {
+          const allPostsSnapshot = await db.collection('posts').get();
+          const matchingPosts = allPostsSnapshot.docs.filter(doc => {
+            const data = doc.data();
+            const postCollectionId = data.collectionId || '';
+            return postCollectionId === collectionId || 
+                   postCollectionId.toString() === collectionId.toString() ||
+                   postCollectionId.trim() === collectionId.trim();
+          });
+          postsSnapshot = { docs: matchingPosts };
+        }
+        
+        return postsSnapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            data: data
+          };
+        });
+      } catch (error) {
+        console.error(`Error fetching posts for collection ${collectionId}:`, error);
+        return [];
+      }
+    });
+
+    const postsArrays = await Promise.all(postPromises);
+    const flatPosts = postsArrays.flat();
+
+    console.log(`✅ Found ${flatPosts.length} posts from Firebase`);
+
+    // Filter posts by search query if provided
+    let filteredPosts = flatPosts;
     if (query && query.trim()) {
-      const searchRegex = new RegExp(query.trim(), 'i');
-      postsQuery = {
-        $and: [
-          { collectionId: { $in: accessibleCollectionIds } },
-          {
-            $or: [
-              { title: searchRegex },
-              { caption: searchRegex }
-            ]
-          }
-        ]
-      };
+      const searchQuery = query.trim().toLowerCase();
+      filteredPosts = flatPosts.filter(post => {
+        const title = (post.data.title || '').toLowerCase();
+        const caption = (post.data.caption || '').toLowerCase();
+        return title.includes(searchQuery) || caption.includes(searchQuery);
+      });
+      console.log(`🔍 Filtered to ${filteredPosts.length} posts matching query: "${query}"`);
     }
 
-    const posts = await Post.find(postsQuery)
-      .sort({ createdAt: -1 })
-      .limit(100); // Limit results
+    // Sort by createdAt descending (newest first)
+    filteredPosts.sort((a, b) => {
+      const dateA = a.data.createdAt?.toDate ? a.data.createdAt.toDate() : new Date(a.data.createdAt || 0);
+      const dateB = b.data.createdAt?.toDate ? b.data.createdAt.toDate() : new Date(b.data.createdAt || 0);
+      return dateB - dateA; // Descending order
+    });
 
-    res.json({ posts: posts.map(p => ({
-      id: p._id.toString(),
-      title: p.title || p.caption || '',
-      collectionId: p.collectionId,
-      authorId: p.authorId,
-      authorName: p.authorName || '',
-      createdAt: p.createdAt ? p.createdAt.toISOString() : new Date().toISOString(),
-      firstMediaItem: p.firstMediaItem || null,
-      mediaItems: p.mediaItems || [],
-      caption: p.caption || '',
-      allowDownload: p.allowDownload || false,
-      allowReplies: p.allowReplies !== false, // Default to true
-      taggedUsers: p.taggedUsers || []
-    })) });
+    // Limit results
+    const limitedPosts = filteredPosts.slice(0, 100);
+
+    // Map to response format
+    const postsResponse = limitedPosts.map(p => {
+      const data = p.data;
+      
+      // Parse mediaItems
+      let mediaItems = [];
+      if (data.mediaItems && Array.isArray(data.mediaItems)) {
+        mediaItems = data.mediaItems;
+      } else if (data.firstMediaItem) {
+        mediaItems = [data.firstMediaItem];
+      }
+
+      return {
+        id: p.id,
+        title: data.title || data.caption || '',
+        collectionId: data.collectionId || '',
+        authorId: data.authorId || '',
+        authorName: data.authorName || '',
+        createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : (data.createdAt ? new Date(data.createdAt).toISOString() : new Date().toISOString()),
+        firstMediaItem: mediaItems[0] || null,
+        mediaItems: mediaItems,
+        caption: data.caption || '',
+        allowDownload: data.allowDownload || false,
+        allowReplies: data.allowReplies !== false,
+        taggedUsers: data.taggedUsers || []
+      };
+    });
+
+    console.log(`📊 Returning ${postsResponse.length} posts to client`);
+    res.json({ posts: postsResponse });
   } catch (error) {
     console.error('Search posts error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Create a post in a collection
+// Create a post in a collection with Firebase Storage URLs (no S3 upload needed)
+router.post('/:collectionId/posts/urls', verifyToken, async (req, res) => {
+  try {
+    const { collectionId } = req.params;
+    const userId = req.userId;
+    const body = req.body;
+
+    // Verify collection exists and user has access
+    const collection = await Collection.findById(collectionId);
+    if (!collection) {
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+
+    const hasAccess = 
+      collection.ownerId === userId ||
+      collection.members?.includes(userId) ||
+      collection.isPublic === true;
+
+    if (!hasAccess) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Get author name
+    let authorName = body.authorName || 'Unknown';
+    try {
+      const User = require('../models/User');
+      const user = await User.findOne({ uid: userId });
+      if (user && user.name) {
+        authorName = user.name;
+      }
+    } catch (error) {
+      console.error('Error fetching author name:', error);
+    }
+
+    // Parse tagged users
+    let taggedUsers = [];
+    if (body.taggedUsers) {
+      if (Array.isArray(body.taggedUsers)) {
+        taggedUsers = body.taggedUsers;
+      } else if (typeof body.taggedUsers === 'string') {
+        taggedUsers = body.taggedUsers.split(',').map(u => u.trim()).filter(u => u);
+      }
+    }
+
+    // Use Firebase Storage URLs directly (no S3 upload needed)
+    const mediaItems = body.mediaItems || [];
+    
+    if (mediaItems.length === 0) {
+      return res.status(400).json({ error: 'At least one media item is required' });
+    }
+
+    // Create post data with Firebase Storage URLs
+    const postData = {
+      title: body.caption || '',
+      caption: body.caption || '',
+      collectionId: collectionId,
+      authorId: userId,
+      authorName: authorName,
+      firstMediaItem: mediaItems[0], // First media item for preview
+      allowDownload: body.allowDownload === true || body.allowDownload === 'true',
+      allowReplies: body.allowReplies !== false && body.allowReplies !== 'false', // Default to true
+      taggedUsers: taggedUsers,
+      mediaItems: mediaItems // All media items with Firebase Storage URLs
+    };
+
+    // Create post in MongoDB
+    const post = await Post.create(postData);
+
+    res.json({
+      postId: post._id.toString(),
+      collectionId: post.collectionId,
+      mediaURLs: mediaItems.map(m => m.imageURL || m.videoURL).filter(Boolean)
+    });
+  } catch (error) {
+    console.error('Create post with URLs error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create a post in a collection (with file upload to S3 - kept for backward compatibility)
 router.post('/:collectionId/posts', verifyToken, (req, res, next) => {
   // Handle multer errors
   upload.fields([
@@ -370,7 +537,7 @@ router.post('/:collectionId/posts', verifyToken, (req, res, next) => {
   }
 });
 
-// Get collection posts
+// Get collection posts (queries Firebase directly - source of truth)
 router.get('/:collectionId/posts', verifyToken, async (req, res) => {
   try {
     const { collectionId } = req.params;
@@ -391,24 +558,484 @@ router.get('/:collectionId/posts', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    // Get posts
-    const posts = await Post.find({ collectionId })
-      .sort({ createdAt: -1 });
+    // Query Firebase directly (source of truth)
+    const admin = require('firebase-admin');
+    const db = admin.firestore();
+    
+    console.log(`📡 Fetching posts from Firebase for collection: ${collectionId}`);
+    
+    // Try querying with the collectionId as-is
+    let postsSnapshot = await db.collection('posts')
+      .where('collectionId', '==', collectionId)
+      .get();
+    
+    console.log(`🔍 Found ${postsSnapshot.docs.length} posts with exact collectionId match: ${collectionId}`);
+    
+    // If no posts found, try querying all posts and filter client-side (in case collectionId format differs)
+    if (postsSnapshot.docs.length === 0) {
+      console.log(`⚠️ No posts found with exact match, trying to fetch all posts and filter...`);
+      const allPostsSnapshot = await db.collection('posts').get();
+      console.log(`📦 Total posts in Firebase: ${allPostsSnapshot.docs.length}`);
+      
+      // Log sample collectionIds to debug
+      if (allPostsSnapshot.docs.length > 0) {
+        const samplePost = allPostsSnapshot.docs[0].data();
+        console.log(`📋 Sample post collectionId format: "${samplePost.collectionId}" (type: ${typeof samplePost.collectionId})`);
+        console.log(`📋 Looking for collectionId: "${collectionId}" (type: ${typeof collectionId})`);
+      }
+      
+      // Filter posts that match this collectionId (case-insensitive, handle different formats)
+      const matchingPosts = allPostsSnapshot.docs.filter(doc => {
+        const data = doc.data();
+        const postCollectionId = data.collectionId || '';
+        // Try exact match, string comparison, and trimmed comparison
+        const matches = postCollectionId === collectionId || 
+               postCollectionId.toString() === collectionId.toString() ||
+               postCollectionId.trim() === collectionId.trim();
+        
+        if (matches) {
+          console.log(`✅ Matched post ${doc.id} with collectionId: "${postCollectionId}"`);
+        }
+        
+        return matches;
+      });
+      
+      console.log(`✅ Found ${matchingPosts.length} posts after filtering for collection: ${collectionId}`);
+      postsSnapshot = {
+        docs: matchingPosts
+      };
+    }
 
-    res.json({ posts: posts.map(p => ({
-      id: p._id.toString(),
-      title: p.title || p.caption || '',
-      collectionId: p.collectionId,
-      authorId: p.authorId,
-      authorName: p.authorName || '',
-      createdAt: p.createdAt ? p.createdAt.toISOString() : new Date().toISOString(),
-      firstMediaItem: p.firstMediaItem || null,
-      caption: p.caption || '',
-      allowDownload: p.allowDownload || false,
-      allowReplies: p.allowReplies !== false, // Default to true
-      taggedUsers: p.taggedUsers || []
-    })) });
+    const posts = postsSnapshot.docs.map(doc => {
+      const data = doc.data();
+      
+      // Parse mediaItems
+      let mediaItems = [];
+      if (data.mediaItems && Array.isArray(data.mediaItems)) {
+        mediaItems = data.mediaItems;
+      } else if (data.firstMediaItem) {
+        mediaItems = [data.firstMediaItem];
+      }
+
+      return {
+        id: doc.id,
+        title: data.title || data.caption || '',
+        collectionId: data.collectionId || collectionId,
+        authorId: data.authorId || '',
+        authorName: data.authorName || '',
+        createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : (data.createdAt ? new Date(data.createdAt).toISOString() : new Date().toISOString()),
+        firstMediaItem: mediaItems[0] || null,
+        mediaItems: mediaItems,
+        caption: data.caption || '',
+        allowDownload: data.allowDownload || false,
+        allowReplies: data.allowReplies !== false,
+        taggedUsers: data.taggedUsers || []
+      };
+    });
+
+    // Sort by createdAt descending (newest first)
+    posts.sort((a, b) => {
+      const dateA = new Date(a.createdAt);
+      const dateB = new Date(b.createdAt);
+      return dateB - dateA; // Descending order
+    });
+
+    console.log(`✅ Decoded ${posts.length} posts for collection: ${collectionId}`);
+    res.json({ posts });
   } catch (error) {
+    console.error('Get collection posts error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get a single collection by ID
+router.get('/:collectionId', verifyToken, async (req, res) => {
+  try {
+    const { collectionId } = req.params;
+    const userId = req.userId; // From verifyToken middleware
+
+    console.log(`📦 GET /api/collections/${collectionId} - User: ${userId}`);
+
+    // Find collection in MongoDB
+    const collection = await Collection.findById(collectionId);
+    
+    if (!collection) {
+      console.log(`❌ Collection not found in MongoDB: ${collectionId}`);
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+
+    // Verify user has access
+    const hasAccess = 
+      collection.ownerId === userId ||
+      collection.members?.includes(userId) ||
+      collection.isPublic === true;
+
+    if (!hasAccess) {
+      console.log(`❌ Access denied for user ${userId} to collection ${collectionId}`);
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Try to get additional data from Firebase (admins, allowedUsers, deniedUsers)
+    let admins = [];
+    let allowedUsers = [];
+    let deniedUsers = [];
+    
+    try {
+      const admin = require('firebase-admin');
+      const db = admin.firestore();
+      const firebaseCollection = await db.collection('collections').doc(collectionId).get();
+      
+      if (firebaseCollection.exists) {
+        const firebaseData = firebaseCollection.data();
+        admins = firebaseData?.admins || [];
+        allowedUsers = firebaseData?.allowedUsers || [];
+        deniedUsers = firebaseData?.deniedUsers || [];
+        console.log(`✅ Fetched additional data from Firebase: ${admins.length} admins, ${allowedUsers.length} allowed, ${deniedUsers.length} denied`);
+      }
+    } catch (error) {
+      console.error('Error fetching Firebase data (non-critical):', error);
+      // Continue without Firebase data
+    }
+
+    res.json({
+      id: collection._id.toString(),
+      name: collection.name,
+      description: collection.description || '',
+      type: collection.type,
+      isPublic: collection.isPublic || false,
+      ownerId: collection.ownerId,
+      ownerName: collection.ownerName || '',
+      imageURL: collection.imageURL || null,
+      members: collection.members || [],
+      admins: admins,
+      allowedUsers: allowedUsers,
+      deniedUsers: deniedUsers,
+      memberCount: collection.memberCount || collection.members?.length || 0,
+      createdAt: collection.createdAt ? collection.createdAt.toISOString() : new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Get collection error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update a collection (matches edit profile pattern)
+router.put('/:collectionId', verifyToken, upload.fields([
+  { name: 'image', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const { collectionId } = req.params;
+    const userId = req.userId; // From verifyToken middleware
+    const body = req.body;
+
+    console.log(`📝 PUT /api/collections/${collectionId} - User: ${userId}`);
+    console.log(`📝 Request body keys:`, Object.keys(body));
+
+    // Find collection in MongoDB
+    let collection = await Collection.findById(collectionId);
+    
+    if (!collection) {
+      console.log(`❌ Collection not found: ${collectionId}`);
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+
+    // Verify user is owner or admin
+    let isAdmin = false;
+    try {
+      const admin = require('firebase-admin');
+      const db = admin.firestore();
+      const firebaseCollection = await db.collection('collections').doc(collectionId).get();
+      
+      if (firebaseCollection.exists) {
+        const firebaseData = firebaseCollection.data();
+        const admins = firebaseData?.admins || [];
+        isAdmin = admins.includes(userId);
+      }
+    } catch (error) {
+      console.error('Error checking admin status (non-critical):', error);
+    }
+
+    const isOwner = collection.ownerId === userId;
+    
+    if (!isOwner && !isAdmin) {
+      console.log(`❌ Access denied: User ${userId} is not owner or admin of collection ${collectionId}`);
+      return res.status(403).json({ error: 'Forbidden: Only owner or admins can update collection' });
+    }
+
+    // Build update data - matches edit profile pattern (only update if provided, preserve existing if not)
+    const updateData = {
+      name: body.name !== undefined ? (body.name.trim() || '') : (collection.name || ''),
+      description: body.description !== undefined ? (body.description.trim() || '') : (collection.description || ''),
+      isPublic: body.isPublic !== undefined ? (body.isPublic === 'true' || body.isPublic === true) : (collection.isPublic || false)
+    };
+
+    // Handle collection image upload (matches edit profile pattern)
+    if (req.files && req.files.image && req.files.image[0]) {
+      try {
+        const file = req.files.image[0];
+        const imageURL = await uploadToS3(file.buffer, 'collections', file.mimetype);
+        updateData.imageURL = imageURL;
+        console.log(`✅ Uploaded collection image to S3: ${imageURL}`);
+      } catch (error) {
+        console.error('Collection image upload error:', error);
+        // Continue without image if upload fails
+      }
+    } else if (body.imageURL !== undefined) {
+      // Allow setting imageURL directly (for Firebase Storage URLs) - matches edit profile pattern
+      updateData.imageURL = body.imageURL || null;
+    } else {
+      // Preserve existing imageURL if not provided
+      updateData.imageURL = collection.imageURL || null;
+    }
+
+    // Update collection in MongoDB (matches edit profile pattern)
+    Object.assign(collection, updateData);
+    await collection.save();
+    console.log(`✅ Updated collection in MongoDB: ${collectionId}`);
+
+    // Update Firebase with additional fields (allowedUsers, deniedUsers, admins, members)
+    // This is similar to how edit profile handles additional data
+    try {
+      const admin = require('firebase-admin');
+      const db = admin.firestore();
+      const firebaseCollectionRef = db.collection('collections').doc(collectionId);
+      
+      const firebaseUpdate = {};
+      
+      // Handle allowedUsers (for private collections)
+      // CRITICAL: Always save allowedUsers if provided, even if empty array (clears access)
+      if (body.allowedUsers !== undefined) {
+        firebaseUpdate.allowedUsers = Array.isArray(body.allowedUsers) ? body.allowedUsers : [];
+        console.log(`📝 Updating allowedUsers: ${firebaseUpdate.allowedUsers.length} users`);
+      }
+      
+      // Handle deniedUsers (for public collections)
+      // CRITICAL: Always save deniedUsers if provided, even if empty array (clears restrictions)
+      if (body.deniedUsers !== undefined) {
+        firebaseUpdate.deniedUsers = Array.isArray(body.deniedUsers) ? body.deniedUsers : [];
+        console.log(`📝 Updating deniedUsers: ${firebaseUpdate.deniedUsers.length} users`);
+      }
+      
+      // Handle members array
+      if (body.members !== undefined) {
+        firebaseUpdate.members = Array.isArray(body.members) ? body.members : [];
+        firebaseUpdate.memberCount = firebaseUpdate.members.length;
+      }
+      
+      // Handle admins array
+      if (body.admins !== undefined) {
+        firebaseUpdate.admins = Array.isArray(body.admins) ? body.admins : [];
+      }
+
+      // Only update Firebase if there are changes
+      if (Object.keys(firebaseUpdate).length > 0) {
+        await firebaseCollectionRef.update(firebaseUpdate);
+        console.log(`✅ Updated collection in Firebase: ${collectionId}`);
+      }
+    } catch (error) {
+      console.error('Error updating Firebase (non-critical):', error);
+      // Continue even if Firebase update fails - matches edit profile pattern
+    }
+
+    // Get updated collection data (matches edit profile pattern)
+    const updatedCollection = await Collection.findById(collectionId);
+    
+    // Get Firebase data for response (admins, allowedUsers, deniedUsers)
+    let admins = [];
+    let allowedUsers = [];
+    let deniedUsers = [];
+    
+    try {
+      const admin = require('firebase-admin');
+      const db = admin.firestore();
+      const firebaseCollection = await db.collection('collections').doc(collectionId).get();
+      
+      if (firebaseCollection.exists) {
+        const firebaseData = firebaseCollection.data();
+        admins = firebaseData?.admins || [];
+        allowedUsers = firebaseData?.allowedUsers || [];
+        deniedUsers = firebaseData?.deniedUsers || [];
+      }
+    } catch (error) {
+      console.error('Error fetching Firebase data for response (non-critical):', error);
+    }
+
+    // Return complete collection data (matches edit profile response pattern)
+    res.json({
+      id: updatedCollection._id.toString(),
+      name: updatedCollection.name || '',
+      description: updatedCollection.description || '',
+      type: updatedCollection.type || 'Individual',
+      isPublic: updatedCollection.isPublic || false,
+      ownerId: updatedCollection.ownerId,
+      ownerName: updatedCollection.ownerName || '',
+      imageURL: updatedCollection.imageURL || null,
+      members: updatedCollection.members || [],
+      admins: admins,
+      allowedUsers: allowedUsers,
+      deniedUsers: deniedUsers,
+      memberCount: updatedCollection.memberCount || updatedCollection.members?.length || 0,
+      createdAt: updatedCollection.createdAt ? updatedCollection.createdAt.toISOString() : new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Update collection error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Promote a member to admin (only Owner can do this)
+router.post('/:collectionId/members/:memberId/promote', verifyToken, async (req, res) => {
+  try {
+    const { collectionId, memberId } = req.params;
+    const userId = req.userId; // From verifyToken middleware
+
+    console.log(`👤 POST /api/collections/${collectionId}/members/${memberId}/promote - User: ${userId}`);
+
+    // Find collection in MongoDB
+    const collection = await Collection.findById(collectionId);
+    
+    if (!collection) {
+      console.log(`❌ Collection not found: ${collectionId}`);
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+
+    // Verify user is owner (only owner can promote to admin)
+    if (collection.ownerId !== userId) {
+      console.log(`❌ Access denied: User ${userId} is not owner of collection ${collectionId}`);
+      return res.status(403).json({ error: 'Forbidden: Only owner can promote members to admin' });
+    }
+
+    // Verify member exists in collection
+    if (!collection.members?.includes(memberId)) {
+      console.log(`❌ Member ${memberId} is not a member of collection ${collectionId}`);
+      return res.status(400).json({ error: 'User is not a member of this collection' });
+    }
+
+    // Update Firebase with admin status
+    try {
+      const firebaseAdmin = require('firebase-admin');
+      const db = firebaseAdmin.firestore();
+      const firebaseCollectionRef = db.collection('collections').doc(collectionId);
+      
+      // Get current admins
+      const firebaseCollection = await firebaseCollectionRef.get();
+      const currentAdmins = firebaseCollection.exists 
+        ? (firebaseCollection.data()?.admins || [])
+        : [];
+      
+      // Add to admins if not already an admin
+      if (!currentAdmins.includes(memberId)) {
+        await firebaseCollectionRef.update({
+          admins: firebaseAdmin.firestore.FieldValue.arrayUnion(memberId)
+        });
+        console.log(`✅ Added ${memberId} to admins array in Firebase`);
+      } else {
+        console.log(`⚠️ User ${memberId} is already an admin`);
+      }
+    } catch (error) {
+      console.error('Error updating Firebase (non-critical):', error);
+      // Continue even if Firebase update fails
+    }
+
+    res.json({ 
+      success: true,
+      message: 'Member promoted to admin successfully',
+      collectionId,
+      memberId
+    });
+  } catch (error) {
+    console.error('Promote member to admin error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Remove a member from collection (Owner and Admins can do this)
+router.delete('/:collectionId/members/:memberId', verifyToken, async (req, res) => {
+  try {
+    const { collectionId, memberId } = req.params;
+    const userId = req.userId; // From verifyToken middleware
+
+    console.log(`🗑️ DELETE /api/collections/${collectionId}/members/${memberId} - User: ${userId}`);
+
+    // Find collection in MongoDB
+    const collection = await Collection.findById(collectionId);
+    
+    if (!collection) {
+      console.log(`❌ Collection not found: ${collectionId}`);
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+
+    // Verify user is owner or admin
+    let isAdmin = false;
+    try {
+      const admin = require('firebase-admin');
+      const db = admin.firestore();
+      const firebaseCollection = await db.collection('collections').doc(collectionId).get();
+      
+      if (firebaseCollection.exists) {
+        const firebaseData = firebaseCollection.data();
+        const admins = firebaseData?.admins || [];
+        isAdmin = admins.includes(userId);
+      }
+    } catch (error) {
+      console.error('Error checking admin status (non-critical):', error);
+    }
+
+    const isOwner = collection.ownerId === userId;
+    
+    if (!isOwner && !isAdmin) {
+      console.log(`❌ Access denied: User ${userId} is not owner or admin of collection ${collectionId}`);
+      return res.status(403).json({ error: 'Forbidden: Only owner or admins can remove members' });
+    }
+
+    // Prevent owner from removing themselves
+    if (memberId === collection.ownerId) {
+      console.log(`❌ Cannot remove owner from collection`);
+      return res.status(400).json({ error: 'Cannot remove the owner from the collection' });
+    }
+
+    // Verify member exists in collection
+    if (!collection.members?.includes(memberId)) {
+      console.log(`❌ Member ${memberId} is not a member of collection ${collectionId}`);
+      return res.status(400).json({ error: 'User is not a member of this collection' });
+    }
+
+    // Update MongoDB - remove from members array and decrement memberCount
+    try {
+      collection.members = collection.members.filter(id => id !== memberId);
+      collection.memberCount = Math.max(0, (collection.memberCount || collection.members.length) - 1);
+      await collection.save();
+      console.log(`✅ Removed ${memberId} from members in MongoDB`);
+    } catch (error) {
+      console.error('Error updating MongoDB (non-critical):', error);
+      // Continue even if MongoDB update fails
+    }
+
+    // Update Firebase - remove from members, admins, and decrement memberCount
+    try {
+      const firebaseAdmin = require('firebase-admin');
+      const db = firebaseAdmin.firestore();
+      const firebaseCollectionRef = db.collection('collections').doc(collectionId);
+      
+      await firebaseCollectionRef.update({
+        members: firebaseAdmin.firestore.FieldValue.arrayRemove(memberId),
+        admins: firebaseAdmin.firestore.FieldValue.arrayRemove(memberId),
+        memberCount: firebaseAdmin.firestore.FieldValue.increment(-1)
+      });
+      console.log(`✅ Removed ${memberId} from members and admins in Firebase`);
+    } catch (error) {
+      console.error('Error updating Firebase (non-critical):', error);
+      // Continue even if Firebase update fails
+    }
+
+    res.json({ 
+      success: true,
+      message: 'Member removed from collection successfully',
+      collectionId,
+      memberId
+    });
+  } catch (error) {
+    console.error('Remove member error:', error);
     res.status(500).json({ error: error.message });
   }
 });
