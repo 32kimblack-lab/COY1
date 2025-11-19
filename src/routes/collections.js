@@ -1282,6 +1282,173 @@ router.delete('/:collectionId/members/:memberId', verifyToken, async (req, res) 
   }
 });
 
+// Restore deleted collection
+router.post('/:collectionId/restore', verifyToken, async (req, res) => {
+  try {
+    const { collectionId } = req.params;
+    const userId = req.userId; // From verifyToken middleware
+
+    console.log(`🔄 POST /api/collections/${collectionId}/restore - User: ${userId}`);
+
+    // Find collection in MongoDB
+    const collection = await Collection.findById(collectionId);
+    
+    if (!collection) {
+      console.log(`❌ Collection not found: ${collectionId}`);
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+
+    // Verify user is owner
+    if (collection.ownerId !== userId) {
+      console.log(`❌ Access denied: User ${userId} is not owner of collection ${collectionId}`);
+      return res.status(403).json({ error: 'Forbidden: Only owner can restore collection' });
+    }
+
+    // Check if still within 15-day window
+    if (collection.deletedAt) {
+      const daysSinceDeletion = (Date.now() - collection.deletedAt.getTime()) / (1000 * 60 * 60 * 24);
+      if (daysSinceDeletion > 15) {
+        return res.status(400).json({ error: 'Collection cannot be restored after 15 days' });
+      }
+    }
+
+    // Restore collection - remove deletedAt
+    collection.isDeleted = false;
+    collection.deletedAt = null;
+
+    // CRITICAL: Restore collection in Firebase - move from deleted_collections back to main collections
+    try {
+      // Firebase Admin is already initialized at the top of the file
+      const db = admin.firestore();
+      const ownerId = collection.ownerId;
+      
+      // Get deleted collection data from deleted_collections subcollection
+      const deletedRef = db.collection('users').doc(ownerId).collection('deleted_collections').doc(collectionId);
+      const deletedDoc = await deletedRef.get();
+      
+      if (deletedDoc.exists) {
+        const deletedData = deletedDoc.data();
+        
+        // Remove deletedAt and isDeleted fields
+        const restoredData = { ...deletedData };
+        delete restoredData.deletedAt;
+        delete restoredData.isDeleted;
+        
+        // Restore to main collections
+        const collectionRef = db.collection('collections').doc(collectionId);
+        await collectionRef.set(restoredData);
+        console.log(`✅ Collection restored to main collections in Firebase`);
+        
+        // Remove from deleted_collections
+        await deletedRef.delete();
+        console.log(`✅ Collection removed from deleted_collections in Firebase`);
+      } else {
+        // If not in deleted_collections, just update the main collection
+        const collectionRef = db.collection('collections').doc(collectionId);
+        await collectionRef.update({
+          deletedAt: admin.firestore.FieldValue.delete(),
+          isDeleted: admin.firestore.FieldValue.delete()
+        });
+        console.log(`✅ Removed deletedAt from collection in Firebase`);
+      }
+    } catch (error) {
+      console.error('Error restoring in Firebase:', error);
+      // Continue even if Firebase update fails - MongoDB update will still happen
+    }
+
+    // Save to MongoDB
+    await collection.save();
+    console.log(`✅ Collection restored in MongoDB`);
+
+    // Return restored collection
+    res.json({
+      success: true,
+      message: 'Collection restored successfully',
+      collectionId,
+      collection: {
+        id: collection._id.toString(),
+        name: collection.name,
+        description: collection.description || '',
+        type: collection.type,
+        isPublic: collection.isPublic || false,
+        ownerId: collection.ownerId,
+        imageURL: collection.imageURL || null
+      }
+    });
+  } catch (error) {
+    console.error('Restore collection error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Permanently delete collection (manual or auto after 15 days)
+router.post('/:collectionId/permanently-delete', verifyToken, async (req, res) => {
+  try {
+    const { collectionId } = req.params;
+    const userId = req.userId; // From verifyToken middleware
+
+    console.log(`🗑️ POST /api/collections/${collectionId}/permanently-delete - User: ${userId}`);
+
+    // Find collection in MongoDB
+    const collection = await Collection.findById(collectionId);
+    
+    if (!collection) {
+      console.log(`❌ Collection not found: ${collectionId}`);
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+
+    // Verify user is owner
+    if (collection.ownerId !== userId) {
+      console.log(`❌ Access denied: User ${userId} is not owner of collection ${collectionId}`);
+      return res.status(403).json({ error: 'Forbidden: Only owner can permanently delete collection' });
+    }
+
+    const ownerId = collection.ownerId;
+
+    // Delete all posts in the collection
+    try {
+      const Post = require('../models/Post');
+      await Post.deleteMany({ collectionId });
+      console.log(`🗑️ Deleted all posts for collection ${collectionId}`);
+    } catch (error) {
+      console.error('Error deleting posts (non-critical):', error);
+      // Continue even if post deletion fails
+    }
+
+    // Delete collection from MongoDB
+    await Collection.findByIdAndDelete(collectionId);
+    console.log(`✅ Collection deleted from MongoDB`);
+
+    // CRITICAL: Delete collection from Firebase deleted_collections subcollection
+    try {
+      // Firebase Admin is already initialized at the top of the file
+      const db = admin.firestore();
+      
+      // Delete from deleted_collections subcollection
+      const deletedRef = db.collection('users').doc(ownerId).collection('deleted_collections').doc(collectionId);
+      await deletedRef.delete();
+      console.log(`✅ Collection deleted from deleted_collections in Firebase`);
+      
+      // Also delete from main collections if it exists there
+      const collectionRef = db.collection('collections').doc(collectionId);
+      await collectionRef.delete();
+      console.log(`✅ Collection deleted from main collections in Firebase`);
+    } catch (error) {
+      console.error('Error deleting from Firebase (non-critical):', error);
+      // Continue even if Firebase deletion fails
+    }
+
+    res.json({ 
+      success: true,
+      message: 'Collection permanently deleted',
+      collectionId
+    });
+  } catch (error) {
+    console.error('Permanently delete collection error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;
 
 

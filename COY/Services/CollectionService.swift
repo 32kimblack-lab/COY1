@@ -332,25 +332,39 @@ final class CollectionService {
 	}
 	
 	func recoverCollection(collectionId: String, ownerId: String) async throws {
-		let db = Firestore.firestore()
-		let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
+		print("🔄 CollectionService: Starting restore for collection: \(collectionId)")
 		
-		// Get deleted collection data
-		let deletedDoc = try await deletedRef.getDocument()
-		guard var collectionData = deletedDoc.data() else {
-			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Deleted collection not found"])
+		// CRITICAL FIX: Use backend API first (source of truth)
+		// Backend handles restore in Firebase and MongoDB
+		do {
+			try await apiClient.restoreCollection(collectionId: collectionId)
+			print("✅ CollectionService: Collection restored via backend API")
+		} catch {
+			print("⚠️ CollectionService: Backend API failed, falling back to Firestore: \(error)")
+			
+			// Fallback to Firestore if backend fails
+			let db = Firestore.firestore()
+			let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
+			
+			// Get deleted collection data
+			let deletedDoc = try await deletedRef.getDocument()
+			guard var collectionData = deletedDoc.data() else {
+				throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Deleted collection not found"])
+			}
+			
+			// Remove deleted fields
+			collectionData.removeValue(forKey: "deletedAt")
+			collectionData.removeValue(forKey: "isDeleted")
+			
+			// Restore to main collections
+			let collectionRef = db.collection("collections").document(collectionId)
+			try await collectionRef.setData(collectionData)
+			
+			// Remove from deleted_collections
+			try await deletedRef.delete()
+			
+			print("✅ CollectionService: Collection restored via Firestore fallback")
 		}
-		
-		// Remove deleted fields
-		collectionData.removeValue(forKey: "deletedAt")
-		collectionData.removeValue(forKey: "isDeleted")
-		
-		// Restore to main collections
-		let collectionRef = db.collection("collections").document(collectionId)
-		try await collectionRef.setData(collectionData)
-		
-		// Remove from deleted_collections
-		try await deletedRef.delete()
 		
 		// Post notification so collection appears immediately in UI
 		await MainActor.run {
@@ -359,15 +373,43 @@ final class CollectionService {
 				object: collectionId,
 				userInfo: ["ownerId": ownerId]
 			)
+			print("📢 CollectionService: Posted CollectionRestored notification")
 		}
+		
+		print("✅ CollectionService: Restore completed successfully for collection: \(collectionId)")
 	}
 	
 	func permanentlyDeleteCollection(collectionId: String, ownerId: String) async throws {
-		let db = Firestore.firestore()
-		let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
+		print("🗑️ CollectionService: Starting permanent delete for collection: \(collectionId)")
 		
-		// Permanently delete
-		try await deletedRef.delete()
+		// CRITICAL FIX: Use backend API first (source of truth)
+		// Backend handles permanent delete in Firebase and MongoDB, including all posts
+		do {
+			try await apiClient.permanentlyDeleteCollection(collectionId: collectionId)
+			print("✅ CollectionService: Collection permanently deleted via backend API")
+		} catch {
+			print("⚠️ CollectionService: Backend API failed, falling back to Firestore: \(error)")
+			
+			// Fallback to Firestore if backend fails
+			let db = Firestore.firestore()
+			let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
+			
+			// Permanently delete
+			try await deletedRef.delete()
+			print("✅ CollectionService: Collection permanently deleted via Firestore fallback")
+		}
+		
+		// Post notification so collection disappears from deleted collections view
+		await MainActor.run {
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionDeleted"),
+				object: collectionId,
+				userInfo: ["permanent": true]
+			)
+			print("📢 CollectionService: Posted CollectionDeleted notification (permanent)")
+		}
+		
+		print("✅ CollectionService: Permanent delete completed successfully for collection: \(collectionId)")
 	}
 	
 	func getDeletedCollections(ownerId: String) async throws -> [(CollectionData, Date)] {

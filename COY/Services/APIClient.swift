@@ -724,6 +724,24 @@ final class APIClient {
 		try validateResponse(response, data: data)
 		print("✅ APIClient: Left collection successfully")
 	}
+	
+	/// Restore deleted collection
+	func restoreCollection(collectionId: String) async throws {
+		print("🔄 APIClient: Restoring collection \(collectionId)")
+		let request = try await createRequest(endpoint: "/collections/\(collectionId)/restore", method: "POST")
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response, data: data)
+		print("✅ APIClient: Collection restored successfully")
+	}
+	
+	/// Permanently delete collection (manual or auto after 15 days)
+	func permanentlyDeleteCollection(collectionId: String) async throws {
+		print("🗑️ APIClient: Permanently deleting collection \(collectionId)")
+		let request = try await createRequest(endpoint: "/collections/\(collectionId)/permanently-delete", method: "POST")
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response, data: data)
+		print("✅ APIClient: Collection permanently deleted successfully")
+	}
 }
 
 // MARK: - Response Models
