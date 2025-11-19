@@ -7,6 +7,36 @@ const Post = require('../models/Post');
 const { verifyToken } = require('../middleware/auth');
 const { uploadToS3 } = require('../utils/s3Upload');
 
+// CRITICAL FIX: Initialize Firebase Admin before any route uses it
+const admin = require('firebase-admin');
+if (!admin.apps.length) {
+  try {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+      console.log('✅ Firebase Admin initialized from FIREBASE_SERVICE_ACCOUNT');
+    } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
+      admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId: process.env.FIREBASE_PROJECT_ID,
+          privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL
+        })
+      });
+      console.log('✅ Firebase Admin initialized from environment variables');
+    } else {
+      // Try default initialization (uses GOOGLE_APPLICATION_CREDENTIALS or default credentials)
+      admin.initializeApp();
+      console.log('✅ Firebase Admin initialized with default credentials');
+    }
+  } catch (error) {
+    console.error('❌ Failed to initialize Firebase Admin in collections.js:', error);
+    // Continue anyway - routes will handle errors gracefully
+  }
+}
+
 // Configure multer for memory storage (for Vercel serverless)
 // Increase file size limits - Vercel has a 4.5MB limit, but we can try to handle larger files
 const upload = multer({ 
@@ -132,7 +162,7 @@ router.get('/discover/collections', verifyToken, async (req, res) => {
     console.log(`📊 Found ${collections.length} collections, filtered to ${filteredCollections.length} (excluding user's own collections)`);
 
     // Also fetch imageURLs from Firebase if missing in MongoDB
-    const admin = require('firebase-admin');
+    // Firebase Admin is already initialized at the top of the file
     const firestore = admin.firestore();
     
     const collectionsWithImages = await Promise.all(filteredCollections.map(async (c) => {
@@ -183,7 +213,7 @@ router.get('/discover/posts', verifyToken, async (req, res) => {
     console.log('Search query:', query, 'UserId:', userId);
 
     // Use Firebase Admin to query Firebase directly (source of truth)
-    const admin = require('firebase-admin');
+    // Firebase Admin is already initialized at the top of the file
     const db = admin.firestore();
 
     // First, find all collections the user can access (from MongoDB or Firebase)
@@ -559,7 +589,7 @@ router.get('/:collectionId/posts', verifyToken, async (req, res) => {
     }
 
     // Query Firebase directly (source of truth)
-    const admin = require('firebase-admin');
+    // Firebase Admin is already initialized at the top of the file
     const db = admin.firestore();
     
     console.log(`📡 Fetching posts from Firebase for collection: ${collectionId}`);
@@ -681,7 +711,7 @@ router.get('/:collectionId', verifyToken, async (req, res) => {
     let deniedUsers = [];
     
     try {
-      const admin = require('firebase-admin');
+      // Firebase Admin is already initialized at the top of the file
       const db = admin.firestore();
       const firebaseCollection = await db.collection('collections').doc(collectionId).get();
       
@@ -742,7 +772,7 @@ router.put('/:collectionId', verifyToken, upload.fields([
     // Verify user is owner or admin
     let isAdmin = false;
     try {
-      const admin = require('firebase-admin');
+      // Firebase Admin is already initialized at the top of the file
       const db = admin.firestore();
       const firebaseCollection = await db.collection('collections').doc(collectionId).get();
       
@@ -796,7 +826,7 @@ router.put('/:collectionId', verifyToken, upload.fields([
     // Update Firebase with additional fields (allowedUsers, deniedUsers, admins, members)
     // This is similar to how edit profile handles additional data
     try {
-      const admin = require('firebase-admin');
+      // Firebase Admin is already initialized at the top of the file
       const db = admin.firestore();
       const firebaseCollectionRef = db.collection('collections').doc(collectionId);
       
@@ -846,7 +876,7 @@ router.put('/:collectionId', verifyToken, upload.fields([
     let deniedUsers = [];
     
     try {
-      const admin = require('firebase-admin');
+      // Firebase Admin is already initialized at the top of the file
       const db = admin.firestore();
       const firebaseCollection = await db.collection('collections').doc(collectionId).get();
       
@@ -913,8 +943,8 @@ router.post('/:collectionId/members/:memberId/promote', verifyToken, async (req,
 
     // Update Firebase with admin status
     try {
-      const firebaseAdmin = require('firebase-admin');
-      const db = firebaseAdmin.firestore();
+      // Firebase Admin is already initialized at the top of the file
+      const db = admin.firestore();
       const firebaseCollectionRef = db.collection('collections').doc(collectionId);
       
       // Get current admins
@@ -926,7 +956,7 @@ router.post('/:collectionId/members/:memberId/promote', verifyToken, async (req,
       // Add to admins if not already an admin
       if (!currentAdmins.includes(memberId)) {
         await firebaseCollectionRef.update({
-          admins: firebaseAdmin.firestore.FieldValue.arrayUnion(memberId)
+          admins: admin.firestore.FieldValue.arrayUnion(memberId)
         });
         console.log(`✅ Added ${memberId} to admins array in Firebase`);
       } else {
@@ -968,7 +998,7 @@ router.delete('/:collectionId/members/:memberId', verifyToken, async (req, res) 
     // Verify user is owner or admin
     let isAdmin = false;
     try {
-      const admin = require('firebase-admin');
+      // Firebase Admin is already initialized at the top of the file
       const db = admin.firestore();
       const firebaseCollection = await db.collection('collections').doc(collectionId).get();
       
@@ -1013,14 +1043,14 @@ router.delete('/:collectionId/members/:memberId', verifyToken, async (req, res) 
 
     // Update Firebase - remove from members, admins, and decrement memberCount
     try {
-      const firebaseAdmin = require('firebase-admin');
-      const db = firebaseAdmin.firestore();
+      // Firebase Admin is already initialized at the top of the file
+      const db = admin.firestore();
       const firebaseCollectionRef = db.collection('collections').doc(collectionId);
       
       await firebaseCollectionRef.update({
-        members: firebaseAdmin.firestore.FieldValue.arrayRemove(memberId),
-        admins: firebaseAdmin.firestore.FieldValue.arrayRemove(memberId),
-        memberCount: firebaseAdmin.firestore.FieldValue.increment(-1)
+        members: admin.firestore.FieldValue.arrayRemove(memberId),
+        admins: admin.firestore.FieldValue.arrayRemove(memberId),
+        memberCount: admin.firestore.FieldValue.increment(-1)
       });
       console.log(`✅ Removed ${memberId} from members and admins in Firebase`);
     } catch (error) {
