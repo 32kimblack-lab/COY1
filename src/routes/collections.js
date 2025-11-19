@@ -1041,13 +1041,16 @@ router.delete('/:collectionId', verifyToken, async (req, res) => {
       if (firebaseCollection.exists) {
         const collectionData = firebaseCollection.data();
         
-        // Add deletedAt timestamp
-        collectionData.deletedAt = admin.firestore.FieldValue.serverTimestamp();
-        collectionData.isDeleted = true;
+        // Add deletedAt timestamp and isDeleted flag
+        const deletedData = {
+          ...collectionData,
+          deletedAt: admin.firestore.FieldValue.serverTimestamp(),
+          isDeleted: true
+        };
         
         // Move to deleted_collections subcollection
         const deletedRef = db.collection('users').doc(ownerId).collection('deleted_collections').doc(collectionId);
-        await deletedRef.setData(collectionData);
+        await deletedRef.set(deletedData);
         console.log(`✅ Collection moved to deleted_collections in Firebase`);
         
         // Remove from main collections
@@ -1068,13 +1071,13 @@ router.delete('/:collectionId', verifyToken, async (req, res) => {
           admins: collection.admins || [],
           allowedUsers: collection.allowedUsers || [],
           deniedUsers: collection.deniedUsers || [],
-          createdAt: collection.createdAt || admin.firestore.Timestamp.now(),
+          createdAt: collection.createdAt ? admin.firestore.Timestamp.fromDate(collection.createdAt) : admin.firestore.Timestamp.now(),
           deletedAt: admin.firestore.FieldValue.serverTimestamp(),
           isDeleted: true
         };
         
         const deletedRef = db.collection('users').doc(ownerId).collection('deleted_collections').doc(collectionId);
-        await deletedRef.setData(collectionData);
+        await deletedRef.set(collectionData);
         console.log(`✅ Collection moved to deleted_collections in Firebase (created from MongoDB)`);
       }
     } catch (error) {
