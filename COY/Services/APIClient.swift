@@ -55,7 +55,7 @@ final class APIClient {
 		request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 		
 		let (data, response) = try await URLSession.shared.data(for: request)
-		try validateResponse(response)
+		try validateResponse(response, data: data)
 		return try JSONDecoder().decode(UserResponse.self, from: data)
 	}
 	
@@ -63,7 +63,7 @@ final class APIClient {
 	func getUser(userId: String) async throws -> UserResponse {
 		let request = try await createRequest(endpoint: "/users/\(userId)", method: "GET")
 		let (data, response) = try await URLSession.shared.data(for: request)
-		try validateResponse(response)
+		try validateResponse(response, data: data)
 		return try JSONDecoder().decode(UserResponse.self, from: data)
 	}
 	
@@ -103,7 +103,7 @@ final class APIClient {
 		request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 		
 		let (data, response) = try await URLSession.shared.data(for: request)
-		try validateResponse(response)
+		try validateResponse(response, data: data)
 		return try JSONDecoder().decode(CollectionResponse.self, from: data)
 	}
 	
@@ -111,7 +111,7 @@ final class APIClient {
 	func getUserCollections(userId: String) async throws -> [CollectionResponse] {
 		let request = try await createRequest(endpoint: "/users/\(userId)/collections", method: "GET")
 		let (data, response) = try await URLSession.shared.data(for: request)
-		try validateResponse(response)
+		try validateResponse(response, data: data)
 		return try JSONDecoder().decode([CollectionResponse].self, from: data)
 	}
 	
@@ -175,17 +175,82 @@ final class APIClient {
 		print("📦 Request body size: \(request.httpBody?.count ?? 0) bytes")
 		
 		let (data, response) = try await URLSession.shared.data(for: request)
-		try validateResponse(response)
+		try validateResponse(response, data: data)
+		return try JSONDecoder().decode(PostResponse.self, from: data)
+	}
+	
+	/// Create a post with Firebase Storage URLs (no file upload needed)
+	func createPostWithURLs(
+		collectionId: String,
+		caption: String?,
+		mediaURLs: [MediaItem],
+		taggedUsers: [String]?,
+		allowDownload: Bool,
+		allowReplies: Bool
+	) async throws -> PostResponse {
+		var request = try await createRequest(endpoint: "/collections/\(collectionId)/posts/urls", method: "POST")
+		
+		var body: [String: Any] = [
+			"allowDownload": allowDownload,
+			"allowReplies": allowReplies
+		]
+		
+		if let caption = caption, !caption.isEmpty {
+			body["caption"] = caption
+		}
+		
+		if let taggedUsers = taggedUsers, !taggedUsers.isEmpty {
+			body["taggedUsers"] = taggedUsers
+		}
+		
+		// Convert MediaItem array to the format backend expects
+		body["mediaItems"] = mediaURLs.map { item in
+			var mediaDict: [String: Any] = [
+				"isVideo": item.isVideo
+			]
+			if let imageURL = item.imageURL {
+				mediaDict["imageURL"] = imageURL
+			}
+			if let thumbnailURL = item.thumbnailURL {
+				mediaDict["thumbnailURL"] = thumbnailURL
+			}
+			if let videoURL = item.videoURL {
+				mediaDict["videoURL"] = videoURL
+			}
+			if let duration = item.videoDuration {
+				mediaDict["videoDuration"] = duration
+			}
+			return mediaDict
+		}
+		
+		request.httpBody = try JSONSerialization.data(withJSONObject: body)
+		request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+		
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response, data: data)
 		return try JSONDecoder().decode(PostResponse.self, from: data)
 	}
 	
 	/// Get posts for a collection
 	func getCollectionPosts(collectionId: String) async throws -> [CollectionPost] {
+		print("📡 Fetching posts for collection: \(collectionId)")
 		let request = try await createRequest(endpoint: "/collections/\(collectionId)/posts", method: "GET")
 		let (data, response) = try await URLSession.shared.data(for: request)
-		try validateResponse(response)
+		
+		// Log response for debugging
+		if let httpResponse = response as? HTTPURLResponse {
+			print("📡 Get collection posts response: \(httpResponse.statusCode) for collection: \(collectionId)")
+			if httpResponse.statusCode != 200 {
+				if let errorData = String(data: data, encoding: .utf8) {
+					print("❌ Error response: \(errorData)")
+				}
+			}
+		}
+		
+		try validateResponse(response, data: data)
 		
 		let postsResponse = try JSONDecoder().decode(PostsResponse.self, from: data)
+		print("✅ Decoded \(postsResponse.posts.count) posts for collection: \(collectionId)")
 		
 		// Convert PostData to CollectionPost
 		return postsResponse.posts.map { postData in
@@ -198,7 +263,19 @@ final class APIClient {
 			var mediaItem: MediaItem?
 			var allMediaItems: [MediaItem] = []
 			
-			if let postMedia = postData.firstMediaItem {
+			// Use mediaItems array if available, otherwise fall back to firstMediaItem
+			if let mediaItemsArray = postData.mediaItems, !mediaItemsArray.isEmpty {
+				allMediaItems = mediaItemsArray.map { postMedia in
+					MediaItem(
+						imageURL: postMedia.imageURL,
+						thumbnailURL: postMedia.thumbnailURL,
+						videoURL: postMedia.videoURL,
+						videoDuration: postMedia.videoDuration,
+						isVideo: postMedia.isVideo ?? false
+					)
+				}
+				mediaItem = allMediaItems.first
+			} else if let postMedia = postData.firstMediaItem {
 				mediaItem = MediaItem(
 					imageURL: postMedia.imageURL,
 					thumbnailURL: postMedia.thumbnailURL,
@@ -211,9 +288,6 @@ final class APIClient {
 				}
 			}
 			
-			// If backend provides mediaItems array, use it
-			// Otherwise fall back to firstMediaItem
-			
 			return CollectionPost(
 				id: postData.id,
 				title: postData.title,
@@ -222,7 +296,9 @@ final class APIClient {
 				authorName: postData.authorName,
 				createdAt: createdAt,
 				firstMediaItem: mediaItem,
-				mediaItems: allMediaItems
+				mediaItems: allMediaItems,
+				isPinned: postData.isPinned ?? false,
+				caption: postData.caption
 			)
 		}
 	}
@@ -231,7 +307,7 @@ final class APIClient {
 	func getVisibleCollections() async throws -> [CollectionResponse] {
 		let request = try await createRequest(endpoint: "/collections/visible", method: "GET")
 		let (data, response) = try await URLSession.shared.data(for: request)
-		try validateResponse(response)
+		try validateResponse(response, data: data)
 		return try JSONDecoder().decode([CollectionResponse].self, from: data)
 	}
 	
@@ -256,7 +332,7 @@ final class APIClient {
 			}
 		}
 		
-		try validateResponse(response)
+		try validateResponse(response, data: data)
 		return try JSONDecoder().decode([CollectionResponse].self, from: data)
 	}
 	
@@ -281,7 +357,7 @@ final class APIClient {
 			}
 		}
 		
-		try validateResponse(response)
+		try validateResponse(response, data: data)
 		
 		let postsResponse = try JSONDecoder().decode(PostsResponse.self, from: data)
 		
@@ -338,7 +414,101 @@ final class APIClient {
 	func getCollection(collectionId: String) async throws -> CollectionResponse {
 		let request = try await createRequest(endpoint: "/collections/\(collectionId)", method: "GET")
 		let (data, response) = try await URLSession.shared.data(for: request)
-		try validateResponse(response)
+		try validateResponse(response, data: data)
+		return try JSONDecoder().decode(CollectionResponse.self, from: data)
+	}
+	
+	/// Update a collection
+	func updateCollection(
+		collectionId: String,
+		name: String? = nil,
+		description: String? = nil,
+		image: Data? = nil,
+		imageURL: String? = nil,
+		isPublic: Bool? = nil,
+		allowedUsers: [String]? = nil,
+		deniedUsers: [String]? = nil
+	) async throws -> CollectionResponse {
+		var files: [(data: Data, fieldName: String, fileName: String, mimeType: String)] = []
+		if let image = image {
+			files.append((image, "image", "collection.jpg", "image/jpeg"))
+		}
+		
+		var body: [String: Any] = [:]
+		
+		// CRITICAL FIX: Only include non-empty strings, convert empty strings to nil
+		if let nameValue = name, !nameValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+			body["name"] = nameValue.trimmingCharacters(in: .whitespacesAndNewlines)
+		}
+		
+		if let descriptionValue = description, !descriptionValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+			body["description"] = descriptionValue.trimmingCharacters(in: .whitespacesAndNewlines)
+		}
+		
+		// Include imageURL if provided (from Firebase Storage)
+		if let imageURL = imageURL, !imageURL.isEmpty {
+			body["imageURL"] = imageURL
+			print("🔧 APIClient.updateCollection: Including imageURL from Firebase Storage")
+		}
+		
+		// CRITICAL: Always include isPublic if it's provided (even if false)
+		if let isPublicValue = isPublic {
+			body["isPublic"] = isPublicValue  // Send as Bool directly
+			print("🔧 APIClient.updateCollection: Including isPublic=\(isPublicValue) (Bool)")
+		} else {
+			print("🔧 APIClient.updateCollection: isPublic is nil - not updating visibility")
+		}
+		
+		// CRITICAL FIX: Always send arrays if they're provided (even if empty)
+		// Backend expects arrays, not nil
+		if let allowedUsers = allowedUsers {
+			body["allowedUsers"] = allowedUsers  // Send even if empty array
+		}
+		
+		if let deniedUsers = deniedUsers {
+			body["deniedUsers"] = deniedUsers  // Send even if empty array
+		}
+		
+		print("🔧 APIClient.updateCollection: Full request body: \(body)")
+		
+		// CRITICAL: Ensure body is not empty or backend might reject
+		if body.isEmpty {
+			print("⚠️ APIClient.updateCollection: Body is empty - this might cause 400 error")
+			// Don't send empty body - return error or send a minimal update
+			throw NSError(domain: "APIClient", code: 400, userInfo: [NSLocalizedDescriptionKey: "No fields to update"])
+		}
+		
+		var request = try await createRequest(endpoint: "/collections/\(collectionId)", method: "PUT")
+		
+		if !files.isEmpty {
+			// Use multipart form data if we have files
+			var formData: [String: String] = [:]
+			for (key, value) in body {
+				if let stringValue = value as? String {
+					formData[key] = stringValue
+				} else if let boolValue = value as? Bool {
+					formData[key] = String(boolValue)
+				} else if let arrayValue = value as? [String] {
+					formData[key] = arrayValue.joined(separator: ",")
+				}
+			}
+			
+			var imageDataDict: [String: Data] = [:]
+			for file in files {
+				formData[file.fieldName] = file.fieldName
+				imageDataDict[file.fieldName] = file.data
+			}
+			
+			request.httpBody = try createMultipartBody(formData: formData, media: imageDataDict)
+			request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+		} else {
+			// Use JSON if no files
+			request.httpBody = try JSONSerialization.data(withJSONObject: body)
+			request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+		}
+		
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response, data: data)
 		return try JSONDecoder().decode(CollectionResponse.self, from: data)
 	}
 	
@@ -348,7 +518,8 @@ final class APIClient {
 		collectionSortPreference: String? = nil,
 		customCollectionOrder: [String]? = nil
 	) async throws -> UserResponse {
-		var request = try await createRequest(endpoint: "/users/\(userId)", method: "PATCH")
+		// Use PUT method as specified in backend requirements
+		var request = try await createRequest(endpoint: "/users/\(userId)", method: "PUT")
 		
 		var body: [String: Any] = [:]
 		if let sortPreference = collectionSortPreference {
@@ -358,11 +529,26 @@ final class APIClient {
 			body["customCollectionOrder"] = customOrder
 		}
 		
+		// Ensure body is not empty
+		guard !body.isEmpty else {
+			throw APIError.httpError(statusCode: 400, message: "No data to update")
+		}
+		
 		request.httpBody = try JSONSerialization.data(withJSONObject: body)
 		request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 		
+		print("📤 PUT /api/users/\(userId) with body: \(body)")
+		
 		let (data, response) = try await URLSession.shared.data(for: request)
-		try validateResponse(response)
+		
+		if let httpResponse = response as? HTTPURLResponse {
+			print("📥 Response status: \(httpResponse.statusCode)")
+			if httpResponse.statusCode == 404 {
+				throw APIError.httpError(statusCode: 404, message: "User not found in backend. User may need to be created first.")
+			}
+		}
+		
+		try validateResponse(response, data: data)
 		return try JSONDecoder().decode(UserResponse.self, from: data)
 	}
 	
@@ -379,6 +565,8 @@ final class APIClient {
 		// Add Firebase Auth token for authentication
 		if let idToken = try await getFirebaseAuthToken() {
 			request.setValue("Bearer \(idToken)", forHTTPHeaderField: "Authorization")
+		} else {
+			print("⚠️ No Firebase token available - request will fail authentication")
 		}
 		
 		return request
@@ -387,18 +575,28 @@ final class APIClient {
 	/// Get Firebase Auth ID token for backend authentication
 	private func getFirebaseAuthToken() async throws -> String? {
 		guard let user = Auth.auth().currentUser else {
+			print("⚠️ No authenticated user found")
 			return nil
 		}
-		return try await user.getIDToken()
+		
+		let token = try await user.getIDToken()
+		return token
 	}
 	
-	private func validateResponse(_ response: URLResponse) throws {
+	private func validateResponse(_ response: URLResponse, data: Data? = nil) throws {
 		guard let httpResponse = response as? HTTPURLResponse else {
 			throw APIError.invalidResponse
 		}
 		
 		guard (200...299).contains(httpResponse.statusCode) else {
-			throw APIError.httpError(statusCode: httpResponse.statusCode, message: "Request failed")
+			var errorMessage = "Request failed"
+			if let data = data, let errorString = String(data: data, encoding: .utf8) {
+				errorMessage = errorString
+				print("❌ Backend API Error (\(httpResponse.statusCode)): \(errorString)")
+			} else {
+				print("❌ Backend API Error (\(httpResponse.statusCode)): No error details available")
+			}
+			throw APIError.httpError(statusCode: httpResponse.statusCode, message: errorMessage)
 		}
 	}
 	
@@ -457,6 +655,56 @@ final class APIClient {
 		body.append("--\(boundary)--\r\n".data(using: .utf8)!)
 		return body
 	}
+	
+	// MARK: - Post Management Endpoints
+	
+	/// Delete a post
+	func deletePost(postId: String) async throws {
+		let request = try await createRequest(endpoint: "/posts/\(postId)", method: "DELETE")
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response, data: data)
+	}
+	
+	/// Toggle post pin status
+	func togglePostPin(postId: String, isPinned: Bool) async throws -> PostResponse {
+		var request = try await createRequest(endpoint: "/posts/\(postId)/pin", method: "PATCH")
+		
+		let body: [String: Any] = ["isPinned": isPinned]
+		request.httpBody = try JSONSerialization.data(withJSONObject: body)
+		request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+		
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response, data: data)
+		return try JSONDecoder().decode(PostResponse.self, from: data)
+	}
+	
+	/// Get notifications
+	func getNotifications() async throws -> [NotificationData] {
+		let request = try await createRequest(endpoint: "/notifications", method: "GET")
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response, data: data)
+		return try JSONDecoder().decode([NotificationData].self, from: data)
+	}
+	
+	// MARK: - Collection Member Management
+	
+	/// Promote a member to admin (only Owner can do this)
+	func promoteMemberToAdmin(collectionId: String, memberId: String) async throws {
+		print("👤 APIClient: Promoting member \(memberId) to admin in collection \(collectionId)")
+		let request = try await createRequest(endpoint: "/collections/\(collectionId)/members/\(memberId)/promote", method: "POST")
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response, data: data)
+		print("✅ APIClient: Member promoted successfully")
+	}
+	
+	/// Remove a member from collection (Owner and Admins can do this)
+	func removeMemberFromCollection(collectionId: String, memberId: String) async throws {
+		print("🗑️ APIClient: Removing member \(memberId) from collection \(collectionId)")
+		let request = try await createRequest(endpoint: "/collections/\(collectionId)/members/\(memberId)", method: "DELETE")
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response, data: data)
+		print("✅ APIClient: Member removed successfully")
+	}
 }
 
 // MARK: - Response Models
@@ -510,6 +758,10 @@ struct CollectionResponse: Codable {
 	let members: [String]
 	let memberCount: Int
 	let createdAt: String
+	let allowedUsers: [String]?
+	let deniedUsers: [String]?
+	let owners: [String]?
+	let admins: [String]? // Admins promoted by Owner
 }
 
 struct PostResponse: Codable {
@@ -536,6 +788,7 @@ struct PostData: Codable {
 	let allowDownload: Bool?
 	let allowReplies: Bool?
 	let taggedUsers: [String]?
+	let isPinned: Bool?
 }
 
 struct PostMediaItem: Codable {
@@ -544,6 +797,28 @@ struct PostMediaItem: Codable {
 	let videoURL: String?
 	let videoDuration: Double?
 	let isVideo: Bool?
+}
+
+// MARK: - Notification Models
+
+struct NotificationData: Codable {
+	let id: String
+	let type: NotificationType
+	let fromUserId: String
+	let toUserId: String
+	let collectionId: String?
+	let postId: String?
+	let message: String?
+	let createdAt: String
+	let isRead: Bool
+}
+
+enum NotificationType: String, Codable {
+	case collectionInvite = "collectionInvite"
+	case follow = "follow"
+	case postLike = "postLike"
+	case postComment = "postComment"
+	case collectionRequest = "collectionRequest"
 }
 
 // MARK: - API Errors
