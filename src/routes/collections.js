@@ -1006,6 +1006,173 @@ router.post('/:collectionId/members/:memberId/promote', verifyToken, async (req,
   }
 });
 
+// Delete a collection (soft delete - only owner can do this)
+router.delete('/:collectionId', verifyToken, async (req, res) => {
+  try {
+    const { collectionId } = req.params;
+    const userId = req.userId; // From verifyToken middleware
+
+    console.log(`🗑️ DELETE /api/collections/${collectionId} - User: ${userId}`);
+
+    // Find collection in MongoDB
+    const collection = await Collection.findById(collectionId);
+    
+    if (!collection) {
+      console.log(`❌ Collection not found: ${collectionId}`);
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+
+    // Verify user is owner
+    if (collection.ownerId !== userId) {
+      console.log(`❌ Access denied: User ${userId} is not owner of collection ${collectionId}`);
+      return res.status(403).json({ error: 'Forbidden: Only owner can delete collection' });
+    }
+
+    const ownerId = collection.ownerId;
+
+    // Soft delete: Move to deleted_collections in Firebase
+    try {
+      // Firebase Admin is already initialized at the top of the file
+      const db = admin.firestore();
+      
+      // Get collection data from Firebase
+      const firebaseCollection = await db.collection('collections').doc(collectionId).get();
+      
+      if (firebaseCollection.exists) {
+        const collectionData = firebaseCollection.data();
+        
+        // Add deletedAt timestamp
+        collectionData.deletedAt = admin.firestore.FieldValue.serverTimestamp();
+        collectionData.isDeleted = true;
+        
+        // Move to deleted_collections subcollection
+        const deletedRef = db.collection('users').doc(ownerId).collection('deleted_collections').doc(collectionId);
+        await deletedRef.setData(collectionData);
+        console.log(`✅ Collection moved to deleted_collections in Firebase`);
+        
+        // Remove from main collections
+        await firebaseCollection.ref.delete();
+        console.log(`✅ Collection removed from main collections in Firebase`);
+      } else {
+        // If not in Firebase, create it from MongoDB data
+        const collectionData = {
+          name: collection.name,
+          description: collection.description || '',
+          type: collection.type,
+          isPublic: collection.isPublic || false,
+          ownerId: collection.ownerId,
+          ownerName: collection.ownerName || '',
+          imageURL: collection.imageURL || null,
+          members: collection.members || [],
+          memberCount: collection.memberCount || 0,
+          admins: collection.admins || [],
+          allowedUsers: collection.allowedUsers || [],
+          deniedUsers: collection.deniedUsers || [],
+          createdAt: collection.createdAt || admin.firestore.Timestamp.now(),
+          deletedAt: admin.firestore.FieldValue.serverTimestamp(),
+          isDeleted: true
+        };
+        
+        const deletedRef = db.collection('users').doc(ownerId).collection('deleted_collections').doc(collectionId);
+        await deletedRef.setData(collectionData);
+        console.log(`✅ Collection moved to deleted_collections in Firebase (created from MongoDB)`);
+      }
+    } catch (error) {
+      console.error('Error soft deleting in Firebase:', error);
+      // Continue even if Firebase update fails - we'll still mark as deleted in MongoDB
+    }
+
+    // Mark as deleted in MongoDB (optional - Firebase is source of truth)
+    try {
+      collection.isDeleted = true;
+      collection.deletedAt = new Date();
+      await collection.save();
+      console.log(`✅ Collection marked as deleted in MongoDB`);
+    } catch (error) {
+      console.error('Error updating MongoDB (non-critical):', error);
+      // Continue even if MongoDB update fails
+    }
+
+    res.json({ 
+      success: true,
+      message: 'Collection deleted successfully',
+      collectionId,
+      ownerId
+    });
+  } catch (error) {
+    console.error('Delete collection error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Leave a collection (member/admin can leave, but not owner)
+router.post('/:collectionId/leave', verifyToken, async (req, res) => {
+  try {
+    const { collectionId } = req.params;
+    const userId = req.userId; // From verifyToken middleware
+
+    console.log(`👋 POST /api/collections/${collectionId}/leave - User: ${userId}`);
+
+    // Find collection in MongoDB
+    const collection = await Collection.findById(collectionId);
+    
+    if (!collection) {
+      console.log(`❌ Collection not found: ${collectionId}`);
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+
+    // Prevent owner from leaving (they should delete instead)
+    if (collection.ownerId === userId) {
+      console.log(`❌ Owner cannot leave collection - must delete instead`);
+      return res.status(400).json({ error: 'Owner cannot leave collection. Please delete it instead.' });
+    }
+
+    // Verify user is a member
+    if (!collection.members?.includes(userId)) {
+      console.log(`❌ User ${userId} is not a member of collection ${collectionId}`);
+      return res.status(400).json({ error: 'User is not a member of this collection' });
+    }
+
+    // Update MongoDB - remove from members array and decrement memberCount
+    try {
+      collection.members = collection.members.filter(id => id !== userId);
+      collection.memberCount = Math.max(0, (collection.memberCount || collection.members.length) - 1);
+      await collection.save();
+      console.log(`✅ Removed ${userId} from members in MongoDB`);
+    } catch (error) {
+      console.error('Error updating MongoDB (non-critical):', error);
+      // Continue even if MongoDB update fails
+    }
+
+    // Update Firebase - remove from members and admins, decrement memberCount
+    try {
+      // Firebase Admin is already initialized at the top of the file
+      const db = admin.firestore();
+      const firebaseCollectionRef = db.collection('collections').doc(collectionId);
+      
+      await firebaseCollectionRef.update({
+        members: admin.firestore.FieldValue.arrayRemove(userId),
+        admins: admin.firestore.FieldValue.arrayRemove(userId),
+        memberCount: admin.firestore.FieldValue.increment(-1)
+      });
+      console.log(`✅ Removed ${userId} from members and admins in Firebase`);
+    } catch (error) {
+      console.error('Error updating Firebase (non-critical):', error);
+      // Continue even if Firebase update fails
+    }
+
+    res.json({ 
+      success: true,
+      message: 'Left collection successfully',
+      collectionId,
+      userId
+    });
+  } catch (error) {
+    console.error('Leave collection error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Remove a member from collection (Owner and Admins can do this)
 router.delete('/:collectionId/members/:memberId', verifyToken, async (req, res) => {
   try {

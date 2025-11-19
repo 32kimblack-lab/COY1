@@ -270,71 +270,60 @@ final class CollectionService {
 	func softDeleteCollection(collectionId: String) async throws {
 		print("🗑️ CollectionService: Starting soft delete for collection: \(collectionId)")
 		
-		// CRITICAL FIX: Get ownerId from backend API first (source of truth)
-		// The collection might not have ownerId in Firestore if it was created via backend
-		var ownerId: String
+		// CRITICAL FIX: Use backend API first (source of truth)
+		// Backend handles soft delete in Firebase and MongoDB
 		do {
-			if let collection = try await getCollection(collectionId: collectionId) {
-				ownerId = collection.ownerId
-				print("✅ CollectionService: Found collection owner from backend: \(ownerId)")
-			} else {
-				// Fallback to Firestore if backend fails
-				let db = Firestore.firestore()
-				let collectionRef = db.collection("collections").document(collectionId)
-				let collectionDoc = try await collectionRef.getDocument()
-				guard let collectionData = collectionDoc.data(),
-					  let firestoreOwnerId = collectionData["ownerId"] as? String, !firestoreOwnerId.isEmpty else {
-					print("❌ CollectionService: Collection has no ownerId in backend or Firestore")
-					throw NSError(domain: "CollectionService", code: 400, userInfo: [NSLocalizedDescriptionKey: "Collection has no owner ID"])
-				}
-				ownerId = firestoreOwnerId
-				print("✅ CollectionService: Found collection owner from Firestore: \(ownerId)")
-			}
+			try await apiClient.deleteCollection(collectionId: collectionId)
+			print("✅ CollectionService: Collection deleted via backend API")
 		} catch {
-			// If backend fails, try Firestore
+			print("⚠️ CollectionService: Backend API failed, falling back to Firestore: \(error)")
+			
+			// Fallback to Firestore if backend fails
+			// Get ownerId from backend API first
+			var ownerId: String
+			do {
+				if let collection = try await getCollection(collectionId: collectionId) {
+					ownerId = collection.ownerId
+					print("✅ CollectionService: Found collection owner from backend: \(ownerId)")
+				} else {
+					throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
+				}
+			} catch {
+				throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
+			}
+			
 			let db = Firestore.firestore()
 			let collectionRef = db.collection("collections").document(collectionId)
+			
+			// Get collection data for soft delete
 			let collectionDoc = try await collectionRef.getDocument()
-			guard let collectionData = collectionDoc.data(),
-				  let firestoreOwnerId = collectionData["ownerId"] as? String, !firestoreOwnerId.isEmpty else {
-				print("❌ CollectionService: Collection has no ownerId")
-				throw NSError(domain: "CollectionService", code: 400, userInfo: [NSLocalizedDescriptionKey: "Collection has no owner ID"])
+			guard var collectionData = collectionDoc.data() else {
+				print("❌ CollectionService: Collection document not found: \(collectionId)")
+				throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
 			}
-			ownerId = firestoreOwnerId
-			print("✅ CollectionService: Found collection owner from Firestore fallback: \(ownerId)")
+			
+			// Add deletedAt timestamp
+			collectionData["deletedAt"] = Timestamp()
+			collectionData["isDeleted"] = true
+			
+			// Move to deleted_collections subcollection
+			let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
+			print("📝 CollectionService: Moving collection to deleted_collections subcollection...")
+			try await deletedRef.setData(collectionData)
+			print("✅ CollectionService: Collection moved to deleted_collections")
+			
+			// Remove from main collections
+			print("🗑️ CollectionService: Removing collection from main collections...")
+			try await collectionRef.delete()
+			print("✅ CollectionService: Collection removed from main collections")
 		}
-		
-		let db = Firestore.firestore()
-		let collectionRef = db.collection("collections").document(collectionId)
-		
-		// Get collection data for soft delete
-		let collectionDoc = try await collectionRef.getDocument()
-		guard var collectionData = collectionDoc.data() else {
-			print("❌ CollectionService: Collection document not found: \(collectionId)")
-			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
-		}
-		
-		// Add deletedAt timestamp
-		collectionData["deletedAt"] = Timestamp()
-		collectionData["isDeleted"] = true
-		
-		// Move to deleted_collections subcollection
-		let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
-		print("📝 CollectionService: Moving collection to deleted_collections subcollection...")
-		try await deletedRef.setData(collectionData)
-		print("✅ CollectionService: Collection moved to deleted_collections")
-		
-		// Remove from main collections
-		print("🗑️ CollectionService: Removing collection from main collections...")
-		try await collectionRef.delete()
-		print("✅ CollectionService: Collection removed from main collections")
 		
 		// Post notification so collection disappears immediately from UI
 		await MainActor.run {
 			NotificationCenter.default.post(
 				name: NSNotification.Name("CollectionDeleted"),
 				object: collectionId,
-				userInfo: ["ownerId": ownerId]
+				userInfo: ["ownerId": ""] // Backend will handle ownerId
 			)
 			print("📢 CollectionService: Posted CollectionDeleted notification")
 		}
@@ -648,30 +637,30 @@ final class CollectionService {
 	func leaveCollection(collectionId: String, userId: String) async throws {
 		print("👋 CollectionService: User \(userId) leaving collection \(collectionId)")
 		
-		let db = Firestore.firestore()
-		let collectionRef = db.collection("collections").document(collectionId)
-		
-		// CRITICAL FIX: Update Firebase FIRST (source of truth), then sync to backend
-		// Remove from members array
-		try await collectionRef.updateData([
-			"members": FieldValue.arrayRemove([userId]),
-			"memberCount": FieldValue.increment(Int64(-1))
-		])
-		
-		// Also remove from admins if they were an admin
-		try await collectionRef.updateData([
-			"admins": FieldValue.arrayRemove([userId])
-		])
-		
-		print("✅ CollectionService: User removed from Firebase")
-		
-		// Sync to backend API (non-critical - Firebase is source of truth)
+		// CRITICAL FIX: Use backend API first (source of truth)
+		// Backend handles leaving in Firebase and MongoDB
 		do {
-			try await apiClient.removeMemberFromCollection(collectionId: collectionId, memberId: userId)
-			print("✅ CollectionService: User left synced to backend API")
+			try await apiClient.leaveCollection(collectionId: collectionId)
+			print("✅ CollectionService: User left via backend API")
 		} catch {
-			// Log error but don't fail - Firebase is source of truth
-			print("⚠️ CollectionService: Backend sync failed (non-critical): \(error.localizedDescription)")
+			print("⚠️ CollectionService: Backend API failed, falling back to Firestore: \(error)")
+			
+			// Fallback to Firestore if backend fails
+			let db = Firestore.firestore()
+			let collectionRef = db.collection("collections").document(collectionId)
+			
+			// Remove from members array
+			try await collectionRef.updateData([
+				"members": FieldValue.arrayRemove([userId]),
+				"memberCount": FieldValue.increment(Int64(-1))
+			])
+			
+			// Also remove from admins if they were an admin
+			try await collectionRef.updateData([
+				"admins": FieldValue.arrayRemove([userId])
+			])
+			
+			print("✅ CollectionService: User left via Firestore fallback")
 		}
 		
 		// Post notification for real-time UI updates

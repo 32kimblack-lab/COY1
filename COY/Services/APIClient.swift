@@ -705,6 +705,24 @@ final class APIClient {
 		try validateResponse(response, data: data)
 		print("✅ APIClient: Member removed successfully")
 	}
+	
+	/// Delete a collection (soft delete - only owner can do this)
+	func deleteCollection(collectionId: String) async throws {
+		print("🗑️ APIClient: Deleting collection \(collectionId)")
+		let request = try await createRequest(endpoint: "/collections/\(collectionId)", method: "DELETE")
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response, data: data)
+		print("✅ APIClient: Collection deleted successfully")
+	}
+	
+	/// Leave a collection (member/admin can leave, but not owner)
+	func leaveCollection(collectionId: String) async throws {
+		print("👋 APIClient: Leaving collection \(collectionId)")
+		let request = try await createRequest(endpoint: "/collections/\(collectionId)/leave", method: "POST")
+		let (data, response) = try await URLSession.shared.data(for: request)
+		try validateResponse(response, data: data)
+		print("✅ APIClient: Left collection successfully")
+	}
 }
 
 // MARK: - Response Models
