@@ -820,11 +820,14 @@ router.put('/:collectionId', verifyToken, upload.fields([
     }
 
     // Build update data - matches edit profile pattern (only update if provided, preserve existing if not)
+    // CRITICAL: Always update if provided, even if empty string (user might want to clear description)
     const updateData = {
-      name: body.name !== undefined ? (body.name.trim() || '') : (collection.name || ''),
-      description: body.description !== undefined ? (body.description.trim() || '') : (collection.description || ''),
+      name: body.name !== undefined ? body.name.trim() : (collection.name || ''),
+      description: body.description !== undefined ? body.description.trim() : (collection.description || ''),
       isPublic: body.isPublic !== undefined ? (body.isPublic === 'true' || body.isPublic === true) : (collection.isPublic || false)
     };
+    
+    console.log(`📝 Update data: name="${updateData.name}", description="${updateData.description}", isPublic=${updateData.isPublic}`);
 
     // Handle collection image upload (matches edit profile pattern)
     if (req.files && req.files.image && req.files.image[0]) {
