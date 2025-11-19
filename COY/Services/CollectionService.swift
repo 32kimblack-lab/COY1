@@ -503,30 +503,54 @@ final class CollectionService {
 			}
 		}
 		
+		// CRITICAL: Reload collection from backend to get verified data (like edit profile)
+		print("🔍 Verifying collection update was saved...")
+		var verifiedCollection: CollectionData?
+		do {
+			verifiedCollection = try await getCollection(collectionId: collectionId)
+			if let verified = verifiedCollection {
+				print("✅ Verified update - Name: \(verified.name), Description: \(verified.description ?? "nil"), Image URL: \(verified.imageURL ?? "nil")")
+			}
+		} catch {
+			print("⚠️ Could not verify collection update: \(error)")
+		}
+		
 		// Clear collection cache to force fresh load (like edit profile clears cache)
-		// Note: CollectionService doesn't have a cache like UserService, but we can clear ImageCache
+		CYInsideCollectionCache.shared.clearCache(for: collectionId)
 		if let oldImageURL = imageURL, !oldImageURL.isEmpty {
 			ImageCache.shared.removeImage(for: oldImageURL)
 		}
 		
-		// Post comprehensive notification for immediate UI updates (like edit profile)
+		// Post comprehensive notification with verified data (like edit profile)
 		await MainActor.run {
 			var updateData: [String: Any] = [
 				"collectionId": collectionId
 			]
 			
-			if let name = name {
-				updateData["name"] = name
+			// Use verified data from backend if available, otherwise use what we sent
+			if let verified = verifiedCollection {
+				updateData["name"] = verified.name
+				updateData["description"] = verified.description ?? ""
+				if let imageURL = verified.imageURL {
+					updateData["imageURL"] = imageURL
+				}
+				updateData["isPublic"] = verified.isPublic
+			} else {
+				// Fallback to what we sent if verification failed
+				if let name = name {
+					updateData["name"] = name
+				}
+				if let description = description {
+					updateData["description"] = description
+				}
+				if let imageURL = finalImageURL {
+					updateData["imageURL"] = imageURL
+				}
+				if let isPublic = isPublic {
+					updateData["isPublic"] = isPublic
+				}
 			}
-			if let description = description {
-				updateData["description"] = description
-			}
-			if let imageURL = finalImageURL {
-				updateData["imageURL"] = imageURL
-			}
-			if let isPublic = isPublic {
-				updateData["isPublic"] = isPublic
-			}
+			
 			if let allowedUsers = allowedUsers {
 				updateData["allowedUsers"] = allowedUsers
 			}
@@ -547,7 +571,10 @@ final class CollectionService {
 				userInfo: ["updatedData": ["collectionId": collectionId]]
 			)
 			
-			print("📢 CollectionService: Posted CollectionUpdated notification with all changes")
+			print("📢 CollectionService: Posted CollectionUpdated notification with verified data")
+			print("   - Name: \(updateData["name"] as? String ?? "nil")")
+			print("   - Description: \(updateData["description"] as? String ?? "nil")")
+			print("   - Image URL: \(updateData["imageURL"] as? String ?? "nil")")
 		}
 	}
 	
