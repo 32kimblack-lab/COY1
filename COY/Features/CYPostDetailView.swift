@@ -21,6 +21,26 @@ struct CYPostDetailView: View {
 	private let screenWidth: CGFloat = UIScreen.main.bounds.width
 	private let maxHeight: CGFloat = UIScreen.main.bounds.height * 0.6
 	
+	// Calculate individual heights for each media item
+	private func calculateHeight(for mediaItem: MediaItem) -> CGFloat {
+		if mediaItem.isVideo {
+			// For videos, use a default aspect ratio (16:9) or from thumbnail
+			if let thumbnailURL = mediaItem.thumbnailURL,
+			   let aspectRatio = imageAspectRatios[thumbnailURL] {
+				return screenWidth / aspectRatio
+			} else {
+				return screenWidth * (9.0 / 16.0) // Default 16:9
+			}
+		} else if let imageURL = mediaItem.imageURL,
+				  let aspectRatio = imageAspectRatios[imageURL] {
+			// Use calculated aspect ratio
+			return screenWidth / aspectRatio
+		} else {
+			// Default aspect ratio for images (4:3)
+			return screenWidth * (3.0 / 4.0)
+		}
+	}
+	
 	// Calculate the tallest height from all media items
 	private var calculatedHeight: CGFloat {
 		if post.mediaItems.isEmpty {
@@ -31,25 +51,7 @@ struct CYPostDetailView: View {
 		var maxCalculatedHeight: CGFloat = 0
 		
 		for mediaItem in post.mediaItems {
-			let height: CGFloat
-			
-			if mediaItem.isVideo {
-				// For videos, use a default aspect ratio (16:9) or from thumbnail
-				if let thumbnailURL = mediaItem.thumbnailURL,
-				   let aspectRatio = imageAspectRatios[thumbnailURL] {
-					height = screenWidth / aspectRatio
-				} else {
-					height = screenWidth * (9.0 / 16.0) // Default 16:9
-				}
-			} else if let imageURL = mediaItem.imageURL,
-					  let aspectRatio = imageAspectRatios[imageURL] {
-				// Use calculated aspect ratio
-				height = screenWidth / aspectRatio
-			} else {
-				// Default aspect ratio for images (4:3)
-				height = screenWidth * (3.0 / 4.0)
-			}
-			
+			let height = calculateHeight(for: mediaItem)
 			maxCalculatedHeight = max(maxCalculatedHeight, height)
 		}
 		
@@ -57,17 +59,45 @@ struct CYPostDetailView: View {
 		return min(maxCalculatedHeight, maxHeight)
 	}
 	
+	// Check if media items have different heights
+	private var hasDifferentHeights: Bool {
+		// Single media item - no blur needed
+		if post.mediaItems.count <= 1 {
+			return false
+		}
+		
+		// Calculate heights for all items
+		var heights: [CGFloat] = []
+		for mediaItem in post.mediaItems {
+			heights.append(calculateHeight(for: mediaItem))
+		}
+		
+		// Check if any heights are different (with small tolerance for floating point)
+		let tolerance: CGFloat = 1.0
+		for i in 0..<heights.count {
+			for j in (i+1)..<heights.count {
+				if abs(heights[i] - heights[j]) > tolerance {
+					return true
+				}
+			}
+		}
+		
+		return false
+	}
+	
 	var body: some View {
 		NavigationStack {
 			ScrollView {
 				VStack(alignment: .leading, spacing: 0) {
-					// Media Carousel with blur background
+					// Media Carousel with blur background (only if multiple items with different heights)
 					if !post.mediaItems.isEmpty {
 						ZStack {
-							// Blur background
-							blurBackgroundView
-								.frame(width: screenWidth, height: calculatedHeight)
-								.clipped()
+							// Blur background - only show if multiple items with different heights
+							if hasDifferentHeights {
+								blurBackgroundView
+									.frame(width: screenWidth, height: calculatedHeight)
+									.clipped()
+							}
 							
 							// Media carousel on top
 							TabView(selection: $currentMediaIndex) {

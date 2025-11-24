@@ -120,6 +120,21 @@ struct PinterestPostCard: View {
 		"\(post.id)_\(post.mediaItems.first?.videoURL ?? "")"
 	}
 	
+	// Calculate individual heights for each media item
+	private func calculateHeight(for mediaItem: MediaItem) -> CGFloat {
+		if mediaItem.isVideo {
+			// For videos, use a default aspect ratio (16:9)
+			return width * (9.0 / 16.0)
+		} else if let imageURL = mediaItem.imageURL,
+				  let aspectRatio = imageAspectRatios[imageURL] {
+			// Use calculated aspect ratio
+			return width / aspectRatio
+		} else {
+			// Default aspect ratio for images (4:3)
+			return width * (3.0 / 4.0)
+		}
+	}
+	
 	// Calculate the tallest height from all media items
 	private var calculatedHeight: CGFloat {
 		if post.mediaItems.isEmpty {
@@ -130,34 +145,49 @@ struct PinterestPostCard: View {
 		var maxHeight: CGFloat = 200
 		
 		for mediaItem in post.mediaItems {
-			let height: CGFloat
-			
-			if mediaItem.isVideo {
-				// For videos, use a default aspect ratio (16:9)
-				height = width * (9.0 / 16.0)
-			} else if let imageURL = mediaItem.imageURL,
-					  let aspectRatio = imageAspectRatios[imageURL] {
-				// Use calculated aspect ratio
-				height = width / aspectRatio
-			} else {
-				// Default aspect ratio for images (4:3)
-				height = width * (3.0 / 4.0)
-			}
-			
+			let height = calculateHeight(for: mediaItem)
 			maxHeight = max(maxHeight, height)
 		}
 		
 		return maxHeight
 	}
 	
+	// Check if media items have different heights
+	private var hasDifferentHeights: Bool {
+		// Single media item - no blur needed
+		if post.mediaItems.count <= 1 {
+			return false
+		}
+		
+		// Calculate heights for all items
+		var heights: [CGFloat] = []
+		for mediaItem in post.mediaItems {
+			heights.append(calculateHeight(for: mediaItem))
+		}
+		
+		// Check if any heights are different (with small tolerance for floating point)
+		let tolerance: CGFloat = 1.0
+		for i in 0..<heights.count {
+			for j in (i+1)..<heights.count {
+				if abs(heights[i] - heights[j]) > tolerance {
+					return true
+				}
+			}
+		}
+		
+		return false
+	}
+	
 	var body: some View {
 		VStack(alignment: .leading, spacing: 8) {
-			// Media Content with blur background
+			// Media Content with blur background (only if multiple items with different heights)
 			ZStack {
-				// Blur background
-				blurBackgroundView
-					.frame(width: width, height: calculatedHeight)
-					.clipped()
+				// Blur background - only show if multiple items with different heights
+				if hasDifferentHeights {
+					blurBackgroundView
+						.frame(width: width, height: calculatedHeight)
+						.clipped()
+				}
 				
 				// Media content on top
 				mediaContentView
