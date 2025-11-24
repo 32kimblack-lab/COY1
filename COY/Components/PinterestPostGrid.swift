@@ -1,9 +1,7 @@
 import SwiftUI
 import SDWebImageSwiftUI
 import SDWebImage
-import AVKit
 import FirebaseAuth
-import Combine
 
 // MARK: - Pinterest Style Post Grid
 struct PinterestPostGrid: View {
@@ -13,7 +11,6 @@ struct PinterestPostGrid: View {
 	let currentUserId: String?
 	
 	@State private var postHeights: [String: CGFloat] = [:]
-	@StateObject private var scrollPosition = ScrollPositionTracker()
 	
 	private let columns = 2
 	private let spacing: CGFloat = 8
@@ -32,8 +29,7 @@ struct PinterestPostGrid: View {
 								collection: collection,
 								isIndividualCollection: isIndividualCollection,
 								currentUserId: currentUserId,
-								width: (UIScreen.main.bounds.width - (padding * 2) - spacing) / CGFloat(columns),
-								scrollPosition: scrollPosition
+								width: (UIScreen.main.bounds.width - (padding * 2) - spacing) / CGFloat(columns)
 							)
 						}
 						
@@ -44,8 +40,7 @@ struct PinterestPostGrid: View {
 								collection: collection,
 								isIndividualCollection: isIndividualCollection,
 								currentUserId: currentUserId,
-								width: (UIScreen.main.bounds.width - (padding * 2) - spacing) / CGFloat(columns),
-								scrollPosition: scrollPosition
+								width: (UIScreen.main.bounds.width - (padding * 2) - spacing) / CGFloat(columns)
 							)
 						} else {
 							// Empty space to maintain alignment
@@ -57,43 +52,7 @@ struct PinterestPostGrid: View {
 				}
 			}
 			.padding(.vertical, padding)
-			.background(GeometryReader { geometry in
-				Color.clear.preference(
-					key: ScrollOffsetPreferenceKey.self,
-					value: geometry.frame(in: .named("scroll")).minY
-				)
-			})
-			.onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
-				scrollPosition.scrollOffset = value
-			}
 		}
-		.coordinateSpace(name: "scroll")
-		.onDisappear {
-			VideoPlayerManager.shared.pauseAll()
-		}
-	}
-}
-
-// MARK: - Scroll Position Tracker
-@MainActor
-class ScrollPositionTracker: ObservableObject {
-	@Published var scrollOffset: CGFloat = 0
-	@Published var visibleCards: Set<String> = []
-}
-
-// MARK: - Scroll Offset Preference Key
-struct ScrollOffsetPreferenceKey: PreferenceKey {
-	static var defaultValue: CGFloat = 0
-	static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-		value = nextValue()
-	}
-}
-
-// MARK: - Card Frame Preference Key
-struct CardFramePreferenceKey: PreferenceKey {
-	static var defaultValue: CGRect = .zero
-	static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-		value = nextValue()
 	}
 }
 
@@ -104,21 +63,12 @@ struct PinterestPostCard: View {
 	let isIndividualCollection: Bool
 	let currentUserId: String?
 	let width: CGFloat
-	let scrollPosition: ScrollPositionTracker
 	
 	@State private var imageHeight: CGFloat = 200
 	@State private var showStar: Bool = false
 	@State private var showPostDetail: Bool = false
 	@State private var imageAspectRatios: [String: CGFloat] = [:]
-	@State private var cardFrame: CGRect = .zero
-	@State private var isVisible: Bool = false
-	@State private var elapsedTime: Double = 0.0
-	@State private var timeObserver: AnyCancellable?
 	@Environment(\.colorScheme) var colorScheme
-	
-	private var playerId: String {
-		"\(post.id)_\(post.mediaItems.first?.videoURL ?? "")"
-	}
 	
 	// Calculate individual heights for each media item
 	private func calculateHeight(for mediaItem: MediaItem) -> CGFloat {
@@ -200,16 +150,6 @@ struct PinterestPostCard: View {
 					.clipped()
 			}
 			.cornerRadius(12)
-			.background(GeometryReader { geometry in
-				Color.clear.preference(
-					key: CardFramePreferenceKey.self,
-					value: geometry.frame(in: .named("scroll"))
-				)
-			})
-			.onPreferenceChange(CardFramePreferenceKey.self) { frame in
-				cardFrame = frame
-				checkVisibility()
-			}
 			.onTapGesture {
 				showPostDetail = true
 			}
@@ -251,76 +191,12 @@ struct PinterestPostCard: View {
 		.onAppear {
 			checkStarVisibility()
 			calculateImageAspectRatios()
-			setupVideoPlayer()
-		}
-		.onChange(of: isVisible) { oldValue, newValue in
-			handleVisibilityChange(newValue)
-		}
-		.onDisappear {
-			// Clean up video player when card disappears
-			if post.mediaItems.contains(where: { $0.isVideo }) {
-				VideoPlayerManager.shared.pauseVideo(playerId: playerId)
-			}
-			timeObserver?.cancel()
 		}
 		.fullScreenCover(isPresented: $showPostDetail) {
 			CYPostDetailView(post: post, collection: collection)
 		}
 	}
 	
-	// MARK: - Visibility Detection
-	private func checkVisibility() {
-		guard cardFrame.height > 0 else { return }
-		
-		let screenHeight = UIScreen.main.bounds.height
-		let cardTop = cardFrame.minY
-		let cardBottom = cardFrame.maxY
-		let cardHeight = cardFrame.height
-		
-		// Calculate visible portion
-		let visibleTop = max(0, -cardTop)
-		let visibleBottom = max(0, cardBottom - screenHeight)
-		let visibleHeight = max(0, cardHeight - visibleTop - visibleBottom)
-		let visiblePercentage = cardHeight > 0 ? visibleHeight / cardHeight : 0
-		
-		// Video is considered visible if 70% or more is in view
-		let wasVisible = isVisible
-		isVisible = visiblePercentage >= 0.7 && cardTop < screenHeight && cardBottom > 0
-		
-		// Only trigger change if visibility actually changed
-		if wasVisible != isVisible {
-			handleVisibilityChange(isVisible)
-		}
-	}
-	
-	private func handleVisibilityChange(_ visible: Bool) {
-		guard post.mediaItems.contains(where: { $0.isVideo }) else { return }
-		
-		if visible {
-			// Play video when it becomes visible
-			VideoPlayerManager.shared.playVideo(playerId: playerId)
-		} else {
-			// Pause video when it goes out of view
-			VideoPlayerManager.shared.pauseVideo(playerId: playerId)
-		}
-	}
-	
-	private func setupVideoPlayer() {
-		guard let videoItem = post.mediaItems.first(where: { $0.isVideo }),
-			  let videoURL = videoItem.videoURL else {
-			return
-		}
-		
-		// Create player
-		_ = VideoPlayerManager.shared.getOrCreatePlayer(for: videoURL, postId: post.id)
-		
-		// Subscribe to elapsed time updates
-		timeObserver = VideoPlayerManager.shared.observeElapsedTime(for: playerId) { time in
-			Task { @MainActor in
-				elapsedTime = time
-			}
-		}
-	}
 	
 	// MARK: - Blur Background View
 	@ViewBuilder
@@ -422,26 +298,12 @@ struct PinterestPostCard: View {
 		}
 	}
 	
-	// MARK: - Video Player View
+	// MARK: - Video Player View (Simplified - Just Thumbnail)
 	@ViewBuilder
 	private func videoPlayerView(mediaItem: MediaItem) -> some View {
 		ZStack {
-			// Video Player
-			if let videoURL = mediaItem.videoURL, !videoURL.isEmpty {
-				let player = VideoPlayerManager.shared.getOrCreatePlayer(for: videoURL, postId: post.id)
-				VideoPlayer(player: player)
-					.frame(width: width, height: calculatedHeight)
-					.clipped()
-					.disabled(true) // Disable controls
-					.onAppear {
-						// Auto-play if visible
-						if isVisible {
-							VideoPlayerManager.shared.playVideo(playerId: playerId)
-						}
-					}
-			} else {
-				// Fallback thumbnail
-				if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty, let url = URL(string: thumbnailURL) {
+			// Thumbnail
+			if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty, let url = URL(string: thumbnailURL) {
 				WebImage(url: url)
 					.resizable()
 					.indicator(.activity)
@@ -449,27 +311,33 @@ struct PinterestPostCard: View {
 					.aspectRatio(contentMode: .fit)
 					.frame(width: width, height: calculatedHeight)
 					.clipped()
-				} else {
-					Rectangle()
-						.fill(Color.black)
-						.frame(height: calculatedHeight)
-				}
+			} else {
+				Rectangle()
+					.fill(Color.black)
+					.frame(height: calculatedHeight)
 			}
 			
-			// Elapsed Time Badge (count up)
-			VStack {
-				Spacer()
-				HStack {
+			// Play Button Overlay
+			Image(systemName: "play.circle.fill")
+				.font(.system(size: 50))
+				.foregroundColor(.white.opacity(0.9))
+			
+			// Duration Badge
+			if let duration = mediaItem.videoDuration {
+				VStack {
 					Spacer()
-					Text(formatElapsedTime(elapsedTime))
-						.font(.caption2)
-						.fontWeight(.semibold)
-						.foregroundColor(.white)
-						.padding(.horizontal, 6)
-						.padding(.vertical, 3)
-						.background(Color.black.opacity(0.7))
-						.cornerRadius(4)
-						.padding(8)
+					HStack {
+						Spacer()
+						Text(formatDuration(duration))
+							.font(.caption2)
+							.fontWeight(.semibold)
+							.foregroundColor(.white)
+							.padding(.horizontal, 6)
+							.padding(.vertical, 3)
+							.background(Color.black.opacity(0.7))
+							.cornerRadius(4)
+							.padding(8)
+					}
 				}
 			}
 		}
@@ -498,7 +366,7 @@ struct PinterestPostCard: View {
 		showStar = shouldShowStar
 	}
 	
-	private func formatElapsedTime(_ seconds: Double) -> String {
+	private func formatDuration(_ seconds: Double) -> String {
 		let minutes = Int(seconds) / 60
 		let secs = Int(seconds) % 60
 		return String(format: "%d:%02d", minutes, secs)
