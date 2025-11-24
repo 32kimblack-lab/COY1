@@ -530,19 +530,13 @@ struct ViewerProfileView: View {
 			let isMember = collection.members.contains(currentUserId)
 			let isAdmin = collection.owners.contains(currentUserId) // Admins are in owners array
 			
-			// ALL authorized users (owner, admin, member) need Face ID for private collections
+			// ALL authorized users (owner, admin, member) can access private collections
 			if isOwner || isMember || isAdmin {
-				// User is owner, admin, or member - require Face ID/Touch ID
-				let authManager = BiometricAuthManager()
-				let success = await authManager.authenticateWithFallback(reason: "Access \(collection.name)")
-				
-				if success {
-					await MainActor.run {
-						selectedCollection = collection
-						showingInsideCollection = true
-					}
+				// User is owner, admin, or member - allow access
+				await MainActor.run {
+					selectedCollection = collection
+					showingInsideCollection = true
 				}
-				// If authentication fails, do nothing (user stays on current screen)
 				return
 			}
 		}
@@ -582,7 +576,6 @@ struct SimpleCollectionRow: View {
 			hasRequested: false,
 			isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
 			isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
-			recentPosts: recentPosts,
 			onFollowTapped: {},
 			onActionTapped: {},
 			onProfileTapped: {

@@ -81,6 +81,35 @@ final class CYServiceManager: ObservableObject {
 		return currentUser?.blockedUsers ?? []
 	}
 	
+	func isUserBlocked(userId: String) -> Bool {
+		return currentUser?.blockedUsers.contains(userId) ?? false
+	}
+	
+	func blockUser(userId: String) async throws {
+		guard let currentUserId = Auth.auth().currentUser?.uid else {
+			throw NSError(domain: "CYServiceManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "No authenticated user"])
+		}
+		
+		let db = Firestore.firestore()
+		let userRef = db.collection("users").document(currentUserId)
+		
+		// Add to blockedUsers array
+		try await userRef.updateData([
+			"blockedUsers": FieldValue.arrayUnion([userId])
+		])
+		
+		// Update local state
+		if var user = currentUser {
+			if !user.blockedUsers.contains(userId) {
+				user.blockedUsers.append(userId)
+			}
+			self.currentUser = user
+		}
+		
+		// Post notification
+		NotificationCenter.default.post(name: Notification.Name("UserBlocked"), object: userId)
+	}
+	
 	func unblockUser(userId: String) async throws {
 		guard let currentUserId = Auth.auth().currentUser?.uid else {
 			throw NSError(domain: "CYServiceManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "No authenticated user"])
