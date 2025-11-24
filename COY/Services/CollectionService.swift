@@ -171,9 +171,7 @@ final class CollectionService {
 						thumbnailURL: mediaData["thumbnailURL"] as? String,
 						videoURL: mediaData["videoURL"] as? String,
 						videoDuration: mediaData["videoDuration"] as? Double,
-						isVideo: mediaData["isVideo"] as? Bool ?? false,
-						width: (mediaData["width"] as? Double).map { CGFloat($0) },
-						height: (mediaData["height"] as? Double).map { CGFloat($0) }
+						isVideo: mediaData["isVideo"] as? Bool ?? false
 					)
 				}
 			}
@@ -185,9 +183,7 @@ final class CollectionService {
 					thumbnailURL: firstMediaData["thumbnailURL"] as? String,
 					videoURL: firstMediaData["videoURL"] as? String,
 					videoDuration: firstMediaData["videoDuration"] as? Double,
-					isVideo: firstMediaData["isVideo"] as? Bool ?? false,
-					width: (firstMediaData["width"] as? Double).map { CGFloat($0) },
-					height: (firstMediaData["height"] as? Double).map { CGFloat($0) }
+					isVideo: firstMediaData["isVideo"] as? Bool ?? false
 				)
 				allMediaItems = [firstItem]
 			}
