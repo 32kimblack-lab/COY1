@@ -161,9 +161,8 @@ struct CYFollowersView: View {
 				let collectionDoc = try await db.collection("collections").document(collection.id).getDocument()
 				let followerIds = (collectionDoc.data()?["followers"] as? [String]) ?? []
 				
-				// Load current user's blocked users
-				await CYServiceManager.shared.loadCurrentUser()
-				let currentUserBlocked = CYServiceManager.shared.getBlockedUsers()
+				// Load current user's blocked users (for potential future use)
+				try? await CYServiceManager.shared.loadCurrentUser()
 				
 				// Load user info for each follower
 				var loadedFollowers: [FollowerInfo] = []
@@ -209,7 +208,7 @@ struct CYFollowersView: View {
 	}
 	
 	private func removeFollower(userId: String) async {
-		guard let currentUserId = authService.user?.uid else { return }
+		guard authService.user?.uid != nil else { return }
 		
 		do {
 			print("👤 CYFollowersView: Removing follower \(userId) from collection \(collection.id)")

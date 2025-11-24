@@ -192,5 +192,47 @@ final class CYServiceManager: ObservableObject {
 		
 		NotificationCenter.default.post(name: Notification.Name("CollectionUnhidden"), object: collectionId)
 	}
+	
+	func reportPost(postId: String, category: String, additionalDetails: String?) async throws {
+		guard let currentUserId = Auth.auth().currentUser?.uid else {
+			throw NSError(domain: "CYServiceManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "No authenticated user"])
+		}
+		
+		let db = Firestore.firestore()
+		
+		// Save report to Firebase
+		let reportRef = db.collection("reports").document()
+		var reportData: [String: Any] = [
+			"postId": postId,
+			"reporterId": currentUserId,
+			"category": category,
+			"createdAt": Timestamp(),
+			"status": "pending"
+		]
+		
+		if let details = additionalDetails, !details.isEmpty {
+			reportData["additionalDetails"] = details
+		}
+		
+		try await reportRef.setData(reportData)
+		
+		// Hide the post by adding to hiddenPostIds
+		let userRef = db.collection("users").document(currentUserId)
+		try await userRef.updateData([
+			"hiddenPostIds": FieldValue.arrayUnion([postId])
+		])
+		
+		// Update local state
+		if var user = currentUser {
+			if !user.hiddenPostIds.contains(postId) {
+				user.hiddenPostIds.append(postId)
+			}
+			self.currentUser = user
+		}
+		
+		// Post notification
+		NotificationCenter.default.post(name: Notification.Name("PostReported"), object: postId)
+		NotificationCenter.default.post(name: Notification.Name("PostHidden"), object: postId)
+	}
 }
 

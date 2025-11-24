@@ -364,9 +364,8 @@ struct CYCollectionMembersView: View {
 				return
 			}
 			
-			// Load current user's blocked users
-			await CYServiceManager.shared.loadCurrentUser()
-			let currentUserBlocked = CYServiceManager.shared.getBlockedUsers()
+			// Load current user's blocked users (for potential future use)
+			try? await CYServiceManager.shared.loadCurrentUser()
 			
 			// Check owner - use mutual blocking
 			var loadedOwner: User? = nil
