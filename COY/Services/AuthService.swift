@@ -213,15 +213,6 @@ class AuthService: ObservableObject {
 			user = result.user
 			
 			// Sync to backend
-			Task.detached { [weak self] in
-				await self?.syncUserToBackend(
-					uid: result.user.uid,
-					email: result.user.email,
-					name: nil,
-					username: nil
-				)
-			}
-			
 			isLoading = false
 			return true
 		} catch {
@@ -319,15 +310,6 @@ class AuthService: ObservableObject {
 			user = result.user
 			
 			// Sync to backend
-			Task.detached { [weak self] in
-				await self?.syncUserToBackend(
-					uid: result.user.uid,
-					email: result.user.email,
-					name: nil,
-					username: nil
-				)
-			}
-			
 			isLoading = false
 			return true
 		} catch {
