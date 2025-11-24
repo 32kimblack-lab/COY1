@@ -265,7 +265,6 @@ struct SearchView: View {
 						ownerId: ownerId,
 						ownerName: data["ownerName"] as? String ?? "",
 						owners: owners,
-						admins: data["admins"] as? [String],
 						imageURL: data["imageURL"] as? String,
 						invitedUsers: data["invitedUsers"] as? [String] ?? [],
 						members: data["members"] as? [String] ?? [],
