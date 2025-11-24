@@ -102,26 +102,6 @@ final class UserService: ObservableObject {
 		
 		cache[userId] = user
 		
-		// Sync to backend in background (don't wait for it)
-		Task {
-			do {
-				_ = try await APIClient.shared.createOrUpdateUser(
-					userId: userId,
-					name: user.name,
-					username: user.username,
-					email: user.email,
-					birthMonth: user.birthMonth,
-					birthDay: user.birthDay,
-					birthYear: user.birthYear,
-					profileImage: nil, // Don't re-upload images on read
-					backgroundImage: nil
-				)
-			} catch {
-				// Silent fail - Firebase is source of truth
-				print("⚠️ Background sync to backend failed (non-critical): \(error.localizedDescription)")
-			}
-		}
-		
 		return user
 	}
 	
@@ -168,10 +148,10 @@ final class UserService: ObservableObject {
 			backgroundImageURL = backgroundURL
 		}
 		
-		// Save to Firebase FIRST (source of truth)
+		// Save to Firebase (source of truth)
 		try await db.collection("users").document(userId).updateData(updateData)
 		
-		// Get email and birth info from Firebase for backend sync
+		// Get email and birth info from Firebase
 		let firestoreDoc = try await db.collection("users").document(userId).getDocument()
 		let firestoreData = firestoreDoc.data() ?? [:]
 		let email = firestoreData["email"] as? String ?? ""
@@ -179,29 +159,10 @@ final class UserService: ObservableObject {
 		let birthDay = firestoreData["birthDay"] as? String ?? ""
 		let birthYear = firestoreData["birthYear"] as? String ?? ""
 		
-		// Sync to backend API (this will upload images to S3 and save to MongoDB)
-		do {
-			_ = try await APIClient.shared.createOrUpdateUser(
-				userId: userId,
-				name: name,
-				username: username,
-				email: email,
-				birthMonth: birthMonth,
-				birthDay: birthDay,
-				birthYear: birthYear,
-				profileImage: profileImage,
-				backgroundImage: backgroundImage
-			)
-			print("✅ User profile synced to backend after Firebase update")
-		} catch {
-			// Log error but don't fail - Firebase is source of truth
-			print("⚠️ Failed to sync to backend (Firebase is source of truth): \(error.localizedDescription)")
-		}
-		
 		// Clear cache to force fresh load
 		cache[userId] = nil
 		
-		// Return updated user from Firebase (source of truth)
+		// Return updated user from Firebase
 		return AppUser(
 			userId: userId,
 			name: name,

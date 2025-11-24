@@ -15,7 +15,6 @@ class AuthService: ObservableObject {
 	
 	private var authStateHandle: AuthStateDidChangeListenerHandle?
 	private var _db: Firestore?
-	private let apiClient: APIClientProtocol
 	
 	// Safe Firebase Auth access - only returns if Firebase is configured
 	private var firebaseAuth: Auth? {
@@ -41,9 +40,7 @@ class AuthService: ObservableObject {
 		return firestore
 	}
 	
-	init(apiClient: APIClientProtocol? = nil) {
-		// Access activeInstance inside init body (we're already on MainActor)
-		self.apiClient = apiClient ?? APIClient.activeInstance
+	init() {
 		// Only setup auth listener if Firebase is configured
 		if FirebaseApp.app() != nil {
 			setupAuthStateListener()
@@ -53,38 +50,7 @@ class AuthService: ObservableObject {
 		}
 	}
 	
-	// MARK: - Backend Sync
-	
-	fileprivate func syncUserToBackend(uid: String, email: String?, name: String?, username: String?, profileImageURL: String? = nil, backgroundImageURL: String? = nil) async {
-		// If backend is disabled, skip sync (frontend runs standalone)
-		guard Config.isBackendEnabled else {
-			print("🔧 AuthService: Backend disabled, skipping user sync (standalone mode)")
-			return
-		}
-		
-		// Sync user to backend after Firebase Auth
-		do {
-			let response = try await apiClient.verifyToken(uid: uid, email: email, name: name, username: username, profileImageURL: profileImageURL, backgroundImageURL: backgroundImageURL)
-			print("✅ User synced to backend: \(uid) - \(response.name)")
-		} catch {
-			// Check if it's a duplicate email error (500) - this means user already exists
-			if let apiError = error as? APIError {
-				switch apiError {
-				case .httpError(let statusCode, let message):
-					if statusCode == 500 && message.contains("duplicate key") {
-						print("ℹ️ User already exists in backend with this email - this is OK for existing users")
-						return // User exists in backend, no need to fail
-					}
-				default:
-					break
-				}
-			}
-			
-			print("⚠️ Failed to sync user to backend: \(error)")
-			print("⚠️ App will continue in standalone mode (Firebase only)")
-			// Don't fail - app can work with Firebase only
-		}
-	}
+	// Backend sync removed - using Firebase only
 	
 	deinit {
 		// Check Firebase directly in deinit (not main actor isolated)
@@ -108,8 +74,6 @@ class AuthService: ObservableObject {
 				}
 				Task {
 					await self?.checkProfileSetupStatus(user: user)
-					// IMPORTANT: Sync user to backend on app launch
-					await self?.syncUserToBackendOnLaunch(user: user)
 					await MainActor.run {
 						self?.isLoading = false
 					}
@@ -121,56 +85,7 @@ class AuthService: ObservableObject {
 		}
 	}
 	
-	// Sync existing user to backend when app launches
-	func syncUserToBackendOnLaunch(user: FirebaseAuth.User) async {
-		// Get user data from Firebase to sync to backend
-		guard let db = self.db else {
-			print("⚠️ Firestore not available - skipping user data sync")
-			// Try sync with minimal data anyway
-			await syncUserToBackend(
-				uid: user.uid,
-				email: user.email,
-				name: nil,
-				username: nil
-			)
-			return
-		}
-		do {
-			let document = try await db.collection("users").document(user.uid).getDocument()
-			if let data = document.data(),
-			   let name = data["name"] as? String,
-			   let username = data["username"] as? String {
-				// Sync to backend with existing Firebase data (including image URLs)
-				let profileImageURL = data["profileImageURL"] as? String
-				let backgroundImageURL = data["backgroundImageURL"] as? String
-				await syncUserToBackend(
-					uid: user.uid,
-					email: user.email,
-					name: name,
-					username: username,
-					profileImageURL: profileImageURL,
-					backgroundImageURL: backgroundImageURL
-				)
-			} else {
-				// No profile data, sync basic info
-				await syncUserToBackend(
-					uid: user.uid,
-					email: user.email,
-					name: nil,
-					username: nil
-				)
-			}
-		} catch {
-			print("⚠️ Failed to load user data for sync: \(error)")
-			// Try sync with minimal data anyway
-			await syncUserToBackend(
-				uid: user.uid,
-				email: user.email,
-				name: nil,
-				username: nil
-			)
-		}
-	}
+	// Backend sync removed - using Firebase only
 	
 	func checkProfileSetupStatus(user: FirebaseAuth.User) async {
 		guard let db = self.db else {
@@ -348,16 +263,6 @@ class AuthService: ObservableObject {
 			} else {
 				print("⚠️ Firestore not available - user document not created in Firestore")
 				// Continue anyway - backend will have the user data
-			}
-			
-			// Sync to backend
-			Task.detached { [weak self] in
-				await self?.syncUserToBackend(
-					uid: user.uid,
-					email: email,
-					name: name,
-					username: username
-				)
 			}
 			
 			self.user = user
@@ -636,22 +541,6 @@ class AuthService: ObservableObject {
 
 #if DEBUG
 extension AuthService {
-	func syncUserToBackendForTesting(
-		uid: String,
-		email: String?,
-		name: String?,
-		username: String?,
-		profileImageURL: String? = nil,
-		backgroundImageURL: String? = nil
-	) async {
-		await syncUserToBackend(
-			uid: uid,
-			email: email,
-			name: name,
-			username: username,
-			profileImageURL: profileImageURL,
-			backgroundImageURL: backgroundImageURL
-		)
-	}
+	// Backend sync removed - using Firebase only
 }
 #endif

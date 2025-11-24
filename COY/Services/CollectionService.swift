@@ -8,26 +8,9 @@ final class CollectionService {
 	static let shared = CollectionService()
 	private init() {}
 	
-	private let apiClient = APIClient.shared
-	
 	func createCollection(name: String, description: String, type: String, isPublic: Bool, ownerId: String, ownerName: String, image: UIImage?, invitedUsers: [String]) async throws -> String {
-		// Try backend API first, fall back to Firebase if it fails
-		do {
-			let response = try await apiClient.createCollection(
-				name: name,
-				description: description,
-				type: type,
-				isPublic: isPublic,
-				ownerId: ownerId,
-				ownerName: ownerName,
-				image: image,
-				invitedUsers: invitedUsers
-			)
-			return response.id
-		} catch {
-			// Fall back to Firebase if backend fails
-			print("⚠️ Backend createCollection failed, falling back to Firebase: \(error.localizedDescription)")
-			let db = Firestore.firestore()
+		// Use Firebase directly
+		let db = Firestore.firestore()
 			var collectionData: [String: Any] = [
 				"name": name,
 				"description": description,
@@ -61,40 +44,37 @@ final class CollectionService {
 				}
 			}
 			
-			let docRef = try await db.collection("collections").addDocument(data: collectionData)
-			return docRef.documentID
-		}
+		let docRef = try await db.collection("collections").addDocument(data: collectionData)
+		return docRef.documentID
 	}
 	
 	func getCollection(collectionId: String) async throws -> CollectionData? {
-		// Use backend API instead of direct Firestore
-		let response = try await apiClient.getCollection(collectionId: collectionId)
+		// Use Firebase directly
+		let db = Firestore.firestore()
+		let doc = try await db.collection("collections").document(collectionId).getDocument()
 		
-		// Parse createdAt from string
-		let dateFormatter = ISO8601DateFormatter()
-		dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-		let createdAt = dateFormatter.date(from: response.createdAt) ?? Date()
+		guard let data = doc.data() else { return nil }
 		
-				return CollectionData(
-					id: response.id,
-					name: response.name,
-					description: response.description,
-					type: response.type,
-					isPublic: response.isPublic,
-					ownerId: response.ownerId,
-					ownerName: response.ownerName,
-					owners: response.owners ?? [response.ownerId],
-					admins: response.admins,
-					imageURL: response.imageURL,
-					invitedUsers: [],
-					members: response.members,
-					memberCount: response.memberCount,
-					followers: [],
-					followerCount: 0,
-					allowedUsers: response.allowedUsers ?? [],
-					deniedUsers: response.deniedUsers ?? [],
-					createdAt: createdAt
-				)
+		return CollectionData(
+			id: doc.documentID,
+			name: data["name"] as? String ?? "",
+			description: data["description"] as? String ?? "",
+			type: data["type"] as? String ?? "Individual",
+			isPublic: data["isPublic"] as? Bool ?? false,
+			ownerId: data["ownerId"] as? String ?? "",
+			ownerName: data["ownerName"] as? String ?? "",
+			owners: data["owners"] as? [String] ?? [data["ownerId"] as? String ?? ""],
+			admins: data["admins"] as? [String],
+			imageURL: data["imageURL"] as? String,
+			invitedUsers: data["invitedUsers"] as? [String] ?? [],
+			members: data["members"] as? [String] ?? [],
+			memberCount: data["memberCount"] as? Int ?? 0,
+			followers: data["followers"] as? [String] ?? [],
+			followerCount: data["followerCount"] as? Int ?? 0,
+			allowedUsers: data["allowedUsers"] as? [String] ?? [],
+			deniedUsers: data["deniedUsers"] as? [String] ?? [],
+			createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+		)
 	}
 	
 	func getPostById(postId: String) async throws -> CollectionPost? {
@@ -134,75 +114,34 @@ final class CollectionService {
 	}
 	
 	func getUserCollections(userId: String, forceFresh: Bool = false) async throws -> [CollectionData] {
-		// Try backend API first, fall back to Firebase if it fails
-		do {
-			let responses = try await apiClient.getUserCollections(userId: userId)
-			
-			// Convert CollectionResponse to CollectionData
-			return responses.map { response in
-				// Parse createdAt from string
-				let dateFormatter = ISO8601DateFormatter()
-				dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-				let createdAt = dateFormatter.date(from: response.createdAt) ?? Date()
-				
-				return CollectionData(
-					id: response.id,
-					name: response.name,
-					description: response.description,
-					type: response.type,
-					isPublic: response.isPublic,
-					ownerId: response.ownerId,
-					ownerName: response.ownerName,
-					owners: response.owners ?? [response.ownerId], // Use owners array if provided, otherwise use ownerId
-					admins: response.admins, // Admins promoted by Owner
-					imageURL: response.imageURL,
-					invitedUsers: [], // Backend may not return this in list, will need to fetch individually
-					members: response.members,
-					memberCount: response.memberCount,
-					followers: [], // Backend may not return this in list
-					followerCount: 0, // Backend may not return this in list
-					allowedUsers: response.allowedUsers ?? [], // Use allowedUsers from response
-					deniedUsers: response.deniedUsers ?? [], // Use deniedUsers from response
-					createdAt: createdAt
-				)
-			}
-		} catch {
-			// Fall back to Firebase if backend fails
-			print("⚠️ Backend getUserCollections failed, falling back to Firebase: \(error.localizedDescription)")
-			let db = Firestore.firestore()
-			do {
-				let snapshot = try await db.collection("collections")
-					.whereField("ownerId", isEqualTo: userId)
-					.getDocuments()
-				
-				return snapshot.documents.compactMap { doc in
-					let data = doc.data()
-					return CollectionData(
-						id: doc.documentID,
-						name: data["name"] as? String ?? "",
-						description: data["description"] as? String ?? "",
-						type: data["type"] as? String ?? "Individual",
-						isPublic: data["isPublic"] as? Bool ?? false,
-						ownerId: data["ownerId"] as? String ?? userId,
-						ownerName: data["ownerName"] as? String ?? "",
-						owners: data["owners"] as? [String] ?? [userId],
-						admins: data["admins"] as? [String],
-						imageURL: data["imageURL"] as? String,
-						invitedUsers: data["invitedUsers"] as? [String] ?? [],
-						members: data["members"] as? [String] ?? [userId],
-						memberCount: data["memberCount"] as? Int ?? 1,
-						followers: data["followers"] as? [String] ?? [],
-						followerCount: data["followerCount"] as? Int ?? 0,
-						allowedUsers: data["allowedUsers"] as? [String] ?? [],
-						deniedUsers: data["deniedUsers"] as? [String] ?? [],
-						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
-					)
-				}
-			} catch {
-				// If Firebase also fails, return empty array
-				print("❌ Firebase getUserCollections also failed: \(error.localizedDescription)")
-				return []
-			}
+		// Use Firebase directly
+		let db = Firestore.firestore()
+		let snapshot = try await db.collection("collections")
+			.whereField("ownerId", isEqualTo: userId)
+			.getDocuments()
+		
+		return snapshot.documents.compactMap { doc in
+			let data = doc.data()
+			return CollectionData(
+				id: doc.documentID,
+				name: data["name"] as? String ?? "",
+				description: data["description"] as? String ?? "",
+				type: data["type"] as? String ?? "Individual",
+				isPublic: data["isPublic"] as? Bool ?? false,
+				ownerId: data["ownerId"] as? String ?? userId,
+				ownerName: data["ownerName"] as? String ?? "",
+				owners: data["owners"] as? [String] ?? [userId],
+				admins: data["admins"] as? [String],
+				imageURL: data["imageURL"] as? String,
+				invitedUsers: data["invitedUsers"] as? [String] ?? [],
+				members: data["members"] as? [String] ?? [userId],
+				memberCount: data["memberCount"] as? Int ?? 1,
+				followers: data["followers"] as? [String] ?? [],
+				followerCount: data["followerCount"] as? Int ?? 0,
+				allowedUsers: data["allowedUsers"] as? [String] ?? [],
+				deniedUsers: data["deniedUsers"] as? [String] ?? [],
+				createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+			)
 		}
 	}
 	
@@ -270,60 +209,43 @@ final class CollectionService {
 	func softDeleteCollection(collectionId: String) async throws {
 		print("🗑️ CollectionService: Starting soft delete for collection: \(collectionId)")
 		
-		// CRITICAL FIX: Use backend API first (source of truth)
-		// Backend handles soft delete in Firebase and MongoDB
-		do {
-			try await apiClient.deleteCollection(collectionId: collectionId)
-			print("✅ CollectionService: Collection deleted via backend API")
-		} catch {
-			print("⚠️ CollectionService: Backend API failed, falling back to Firestore: \(error)")
-			
-			// Fallback to Firestore if backend fails
-			// Get ownerId from backend API first
-			var ownerId: String
-			do {
-				if let collection = try await getCollection(collectionId: collectionId) {
-					ownerId = collection.ownerId
-					print("✅ CollectionService: Found collection owner from backend: \(ownerId)")
-				} else {
-					throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
-				}
-			} catch {
-				throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
-			}
-			
-			let db = Firestore.firestore()
-			let collectionRef = db.collection("collections").document(collectionId)
-			
-			// Get collection data for soft delete
-			let collectionDoc = try await collectionRef.getDocument()
-			guard var collectionData = collectionDoc.data() else {
-				print("❌ CollectionService: Collection document not found: \(collectionId)")
-				throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
-			}
-			
-			// Add deletedAt timestamp
-			collectionData["deletedAt"] = Timestamp()
-			collectionData["isDeleted"] = true
-			
-			// Move to deleted_collections subcollection
-			let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
-			print("📝 CollectionService: Moving collection to deleted_collections subcollection...")
-			try await deletedRef.setData(collectionData)
-			print("✅ CollectionService: Collection moved to deleted_collections")
-			
-			// Remove from main collections
-			print("🗑️ CollectionService: Removing collection from main collections...")
-			try await collectionRef.delete()
-			print("✅ CollectionService: Collection removed from main collections")
+		// Use Firebase directly
+		guard let collection = try await getCollection(collectionId: collectionId) else {
+			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
 		}
+		
+		let ownerId = collection.ownerId
+		let db = Firestore.firestore()
+		let collectionRef = db.collection("collections").document(collectionId)
+		
+		// Get collection data for soft delete
+		let collectionDoc = try await collectionRef.getDocument()
+		guard var collectionData = collectionDoc.data() else {
+			print("❌ CollectionService: Collection document not found: \(collectionId)")
+			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
+		}
+		
+		// Add deletedAt timestamp
+		collectionData["deletedAt"] = Timestamp()
+		collectionData["isDeleted"] = true
+		
+		// Move to deleted_collections subcollection
+		let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
+		print("📝 CollectionService: Moving collection to deleted_collections subcollection...")
+		try await deletedRef.setData(collectionData)
+		print("✅ CollectionService: Collection moved to deleted_collections")
+		
+		// Remove from main collections
+		print("🗑️ CollectionService: Removing collection from main collections...")
+		try await collectionRef.delete()
+		print("✅ CollectionService: Collection removed from main collections")
 		
 		// Post notification so collection disappears immediately from UI
 		await MainActor.run {
 			NotificationCenter.default.post(
 				name: NSNotification.Name("CollectionDeleted"),
 				object: collectionId,
-				userInfo: ["ownerId": ""] // Backend will handle ownerId
+				userInfo: ["ownerId": ownerId]
 			)
 			print("📢 CollectionService: Posted CollectionDeleted notification")
 		}
@@ -334,37 +256,28 @@ final class CollectionService {
 	func recoverCollection(collectionId: String, ownerId: String) async throws {
 		print("🔄 CollectionService: Starting restore for collection: \(collectionId)")
 		
-		// CRITICAL FIX: Use backend API first (source of truth)
-		// Backend handles restore in Firebase and MongoDB
-		do {
-			try await apiClient.restoreCollection(collectionId: collectionId)
-			print("✅ CollectionService: Collection restored via backend API")
-		} catch {
-			print("⚠️ CollectionService: Backend API failed, falling back to Firestore: \(error)")
-			
-			// Fallback to Firestore if backend fails
-			let db = Firestore.firestore()
-			let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
-			
-			// Get deleted collection data
-			let deletedDoc = try await deletedRef.getDocument()
-			guard var collectionData = deletedDoc.data() else {
-				throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Deleted collection not found"])
-			}
-			
-			// Remove deleted fields
-			collectionData.removeValue(forKey: "deletedAt")
-			collectionData.removeValue(forKey: "isDeleted")
-			
-			// Restore to main collections
-			let collectionRef = db.collection("collections").document(collectionId)
-			try await collectionRef.setData(collectionData)
-			
-			// Remove from deleted_collections
-			try await deletedRef.delete()
-			
-			print("✅ CollectionService: Collection restored via Firestore fallback")
+		// Use Firebase directly
+		let db = Firestore.firestore()
+		let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
+		
+		// Get deleted collection data
+		let deletedDoc = try await deletedRef.getDocument()
+		guard var collectionData = deletedDoc.data() else {
+			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Deleted collection not found"])
 		}
+		
+		// Remove deleted fields
+		collectionData.removeValue(forKey: "deletedAt")
+		collectionData.removeValue(forKey: "isDeleted")
+		
+		// Restore to main collections
+		let collectionRef = db.collection("collections").document(collectionId)
+		try await collectionRef.setData(collectionData)
+		
+		// Remove from deleted_collections
+		try await deletedRef.delete()
+		
+		print("✅ CollectionService: Collection restored")
 		
 		// Post notification so collection appears immediately in UI
 		await MainActor.run {
@@ -382,22 +295,24 @@ final class CollectionService {
 	func permanentlyDeleteCollection(collectionId: String, ownerId: String) async throws {
 		print("🗑️ CollectionService: Starting permanent delete for collection: \(collectionId)")
 		
-		// CRITICAL FIX: Use backend API first (source of truth)
-		// Backend handles permanent delete in Firebase and MongoDB, including all posts
-		do {
-			try await apiClient.permanentlyDeleteCollection(collectionId: collectionId)
-			print("✅ CollectionService: Collection permanently deleted via backend API")
-		} catch {
-			print("⚠️ CollectionService: Backend API failed, falling back to Firestore: \(error)")
-			
-			// Fallback to Firestore if backend fails
-			let db = Firestore.firestore()
-			let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
-			
-			// Permanently delete
-			try await deletedRef.delete()
-			print("✅ CollectionService: Collection permanently deleted via Firestore fallback")
+		// Use Firebase directly
+		let db = Firestore.firestore()
+		
+		// Delete all posts in the collection
+		let postsSnapshot = try await db.collection("posts")
+			.whereField("collectionId", isEqualTo: collectionId)
+			.getDocuments()
+		
+		for postDoc in postsSnapshot.documents {
+			try await postDoc.reference.delete()
 		}
+		print("✅ Deleted \(postsSnapshot.documents.count) posts from collection")
+		
+		// Delete from deleted_collections
+		let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
+		try await deletedRef.delete()
+		
+		print("✅ CollectionService: Collection permanently deleted")
 		
 		// Post notification so collection disappears from deleted collections view
 		await MainActor.run {
@@ -485,67 +400,49 @@ final class CollectionService {
 			}
 		}
 		
-		// CRITICAL FIX: Use backend API FIRST (source of truth) - matches edit profile pattern
-		// Backend will update both MongoDB and Firebase, ensuring consistency
-		do {
-			let _ = try await apiClient.updateCollection(
-				collectionId: collectionId,
-				name: name,
-				description: description,
-				image: nil, // Don't send image data - we use Firebase Storage URLs
-				imageURL: finalImageURL, // Send Firebase Storage URL to backend
-				isPublic: isPublic,
-				allowedUsers: allowedUsers,  // Send array even if empty
-				deniedUsers: deniedUsers  // Send array even if empty
-			)
-			print("✅ CollectionService: Collection updated via backend API (source of truth)")
-		} catch {
-			print("⚠️ CollectionService: Backend API failed, falling back to Firebase: \(error)")
-			
-			// Fallback to Firebase if backend fails
-			let db = Firestore.firestore()
-			let collectionRef = db.collection("collections").document(collectionId)
-			
-			var firestoreUpdate: [String: Any] = [:]
-			
-			// Update name if provided
-			if let name = name {
-				firestoreUpdate["name"] = name
-			}
-			
-			// Update description if provided
-			if let description = description {
-				firestoreUpdate["description"] = description
-			}
-			
-			// Update imageURL if provided
-			if let imageURL = finalImageURL {
-				firestoreUpdate["imageURL"] = imageURL
-			}
-			
-			// Update isPublic if provided
-			if let isPublic = isPublic {
-				firestoreUpdate["isPublic"] = isPublic
-			}
-			
-			// Update allowedUsers if provided
-			if let allowedUsers = allowedUsers {
-				firestoreUpdate["allowedUsers"] = allowedUsers
-			}
-			
-			// Update deniedUsers if provided
-			if let deniedUsers = deniedUsers {
-				firestoreUpdate["deniedUsers"] = deniedUsers
-			}
-			
-			// CRITICAL: Use set with merge: true to handle collections that don't exist in Firestore
-			if !firestoreUpdate.isEmpty {
-				try await collectionRef.setData(firestoreUpdate, merge: true)
-				print("✅ CollectionService: Collection updated in Firebase Firestore (fallback)")
-			}
+		// Use Firebase directly
+		let db = Firestore.firestore()
+		let collectionRef = db.collection("collections").document(collectionId)
+		
+		var firestoreUpdate: [String: Any] = [:]
+		
+		// Update name if provided
+		if let name = name {
+			firestoreUpdate["name"] = name
 		}
 		
-		// CRITICAL: Reload collection from backend to get verified data (like edit profile)
+		// Update description if provided
+		if let description = description {
+			firestoreUpdate["description"] = description
+		}
+		
+		// Update imageURL if provided
+		if let imageURL = finalImageURL {
+			firestoreUpdate["imageURL"] = imageURL
+		}
+		
+		// Update isPublic if provided
+		if let isPublic = isPublic {
+			firestoreUpdate["isPublic"] = isPublic
+		}
+		
+		// Update allowedUsers if provided
+		if let allowedUsers = allowedUsers {
+			firestoreUpdate["allowedUsers"] = allowedUsers
+		}
+		
+		// Update deniedUsers if provided
+		if let deniedUsers = deniedUsers {
+			firestoreUpdate["deniedUsers"] = deniedUsers
+		}
+		
+		// Use set with merge: true to handle collections that don't exist in Firestore
+		if !firestoreUpdate.isEmpty {
+			try await collectionRef.setData(firestoreUpdate, merge: true)
+			print("✅ CollectionService: Collection updated in Firebase Firestore")
+		}
+		
+		// Reload collection to get verified data
 		print("🔍 Verifying collection update was saved...")
 		var verifiedCollection: CollectionData?
 		do {
@@ -623,13 +520,7 @@ final class CollectionService {
 	func promoteToAdmin(collectionId: String, userId: String) async throws {
 		print("👤 CollectionService: Promoting user \(userId) to admin in collection \(collectionId)")
 		
-		// CRITICAL FIX: Use backend API first, then update Firestore
-		do {
-			try await apiClient.promoteMemberToAdmin(collectionId: collectionId, memberId: userId)
-			print("✅ CollectionService: User promoted via backend API")
-		} catch {
-			print("⚠️ CollectionService: Backend API failed, falling back to Firestore: \(error)")
-			// Fallback to Firestore if backend fails
+		// Use Firebase directly
 		let db = Firestore.firestore()
 		let collectionRef = db.collection("collections").document(collectionId)
 		
@@ -637,8 +528,8 @@ final class CollectionService {
 		try await collectionRef.updateData([
 			"admins": FieldValue.arrayUnion([userId])
 		])
-			print("✅ CollectionService: User promoted via Firestore fallback")
-		}
+		
+		print("✅ CollectionService: User promoted")
 		
 		// Post notification to refresh UI
 		await MainActor.run {
@@ -667,28 +558,22 @@ final class CollectionService {
 	func removeMember(collectionId: String, userId: String) async throws {
 		print("👤 CollectionService: Removing user \(userId) from collection \(collectionId)")
 		
-		// CRITICAL FIX: Use backend API first, then update Firestore
-		do {
-			try await apiClient.removeMemberFromCollection(collectionId: collectionId, memberId: userId)
-			print("✅ CollectionService: Member removed via backend API")
-		} catch {
-			print("⚠️ CollectionService: Backend API failed, falling back to Firestore: \(error)")
-			// Fallback to Firestore if backend fails
-			let db = Firestore.firestore()
-			let collectionRef = db.collection("collections").document(collectionId)
-			
-			// Remove from members array
-			try await collectionRef.updateData([
-				"members": FieldValue.arrayRemove([userId]),
-				"memberCount": FieldValue.increment(Int64(-1))
-			])
-			
-			// Also remove from admins if they were an admin
-			try await collectionRef.updateData([
-				"admins": FieldValue.arrayRemove([userId])
-			])
-			print("✅ CollectionService: Member removed via Firestore fallback")
-		}
+		// Use Firebase directly
+		let db = Firestore.firestore()
+		let collectionRef = db.collection("collections").document(collectionId)
+		
+		// Remove from members array
+		try await collectionRef.updateData([
+			"members": FieldValue.arrayRemove([userId]),
+			"memberCount": FieldValue.increment(Int64(-1))
+		])
+		
+		// Also remove from admins if they were an admin
+		try await collectionRef.updateData([
+			"admins": FieldValue.arrayRemove([userId])
+		])
+		
+		print("✅ CollectionService: Member removed")
 		
 		// Post notification to refresh UI
 		await MainActor.run {
@@ -705,31 +590,22 @@ final class CollectionService {
 	func leaveCollection(collectionId: String, userId: String) async throws {
 		print("👋 CollectionService: User \(userId) leaving collection \(collectionId)")
 		
-		// CRITICAL FIX: Use backend API first (source of truth)
-		// Backend handles leaving in Firebase and MongoDB
-		do {
-			try await apiClient.leaveCollection(collectionId: collectionId)
-			print("✅ CollectionService: User left via backend API")
-		} catch {
-			print("⚠️ CollectionService: Backend API failed, falling back to Firestore: \(error)")
-			
-			// Fallback to Firestore if backend fails
-			let db = Firestore.firestore()
-			let collectionRef = db.collection("collections").document(collectionId)
-			
-			// Remove from members array
-			try await collectionRef.updateData([
-				"members": FieldValue.arrayRemove([userId]),
-				"memberCount": FieldValue.increment(Int64(-1))
-			])
-			
-			// Also remove from admins if they were an admin
-			try await collectionRef.updateData([
-				"admins": FieldValue.arrayRemove([userId])
-			])
-			
-			print("✅ CollectionService: User left via Firestore fallback")
-		}
+		// Use Firebase directly
+		let db = Firestore.firestore()
+		let collectionRef = db.collection("collections").document(collectionId)
+		
+		// Remove from members array
+		try await collectionRef.updateData([
+			"members": FieldValue.arrayRemove([userId]),
+			"memberCount": FieldValue.increment(Int64(-1))
+		])
+		
+		// Also remove from admins if they were an admin
+		try await collectionRef.updateData([
+			"admins": FieldValue.arrayRemove([userId])
+		])
+		
+		print("✅ CollectionService: User left")
 		
 		// Post notification for real-time UI updates
 		await MainActor.run {
@@ -746,12 +622,17 @@ final class CollectionService {
 	
 	// MARK: - Post Management
 	func deletePost(postId: String) async throws {
-		// Delete via backend API
-		try await apiClient.deletePost(postId: postId)
+		// Use Firebase directly
+		let db = Firestore.firestore()
+		try await db.collection("posts").document(postId).delete()
 	}
 	
 	func togglePostPin(postId: String, isPinned: Bool) async throws {
-		_ = try await apiClient.togglePostPin(postId: postId, isPinned: isPinned)
+		// Use Firebase directly
+		let db = Firestore.firestore()
+		try await db.collection("posts").document(postId).updateData([
+			"isPinned": isPinned
+		])
 	}
 	
 	// MARK: - Privacy Helper Functions

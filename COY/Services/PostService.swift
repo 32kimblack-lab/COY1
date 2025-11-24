@@ -10,7 +10,7 @@ final class PostService {
 	static let shared = PostService()
 	private init() {}
 	
-	/// Create a post - saves to Firebase FIRST (source of truth), then syncs to backend
+	/// Create a post - saves to Firebase (source of truth)
 	func createPost(
 		collectionId: String,
 		caption: String?,
@@ -92,26 +92,6 @@ final class PostService {
 		let postId = docRef.documentID
 		
 		print("✅ Post saved to Firebase: \(postId)")
-		
-		// Sync to backend in background (don't wait for it)
-		Task {
-			do {
-				// Convert CreatePostMediaItem to the format backend expects
-				// Backend will use the Firebase Storage URLs we already uploaded
-				_ = try await APIClient.shared.createPost(
-					collectionId: collectionId,
-					caption: caption,
-					mediaItems: mediaItems, // Backend will handle S3 upload if needed
-					taggedUsers: taggedUsers,
-					allowDownload: allowDownload,
-					allowReplies: allowReplies
-				)
-				print("✅ Post synced to backend: \(postId)")
-			} catch {
-				// Silent fail - Firebase is source of truth
-				print("⚠️ Failed to sync post to backend (Firebase is source of truth): \(error.localizedDescription)")
-			}
-		}
 		
 		return postId
 	}

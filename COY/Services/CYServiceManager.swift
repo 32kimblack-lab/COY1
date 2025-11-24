@@ -59,26 +59,7 @@ final class CYServiceManager: ObservableObject {
 				customCollectionOrder: data["customCollectionOrder"] as? [String] ?? []
 			)
 			
-			// Sync to backend in background (don't wait for it)
-			Task {
-				do {
-					let apiClient = APIClient.shared
-					_ = try await apiClient.createOrUpdateUser(
-						userId: userId,
-						name: data["name"] as? String ?? "",
-						username: data["username"] as? String ?? "",
-						email: data["email"] as? String ?? "",
-						birthMonth: data["birthMonth"] as? String ?? "",
-						birthDay: data["birthDay"] as? String ?? "",
-						birthYear: data["birthYear"] as? String ?? "",
-						profileImage: nil, // Don't re-upload on read
-						backgroundImage: nil
-					)
-				} catch {
-					// Silent fail - Firebase is source of truth
-					print("⚠️ Background sync to backend failed (non-critical): \(error.localizedDescription)")
-				}
-			}
+			// Backend sync removed - using Firebase only
 		} else {
 			// Create default user if not found
 			self.currentUser = CurrentUser(
@@ -138,13 +119,11 @@ final class CYServiceManager: ObservableObject {
 	func updateCollectionSortPreference(_ preference: String) async throws {
 		guard let currentUserId = Auth.auth().currentUser?.uid else { return }
 		
-		// Use backend API instead of direct Firestore
-		let apiClient = APIClient.shared
-		_ = try await apiClient.updateUser(
-			userId: currentUserId,
-			collectionSortPreference: preference,
-			customCollectionOrder: nil
-		)
+		// Use Firebase directly
+		let db = Firestore.firestore()
+		try await db.collection("users").document(currentUserId).updateData([
+			"collectionSortPreference": preference
+		])
 		
 		// Update local state
 		if var user = currentUser {
@@ -156,13 +135,11 @@ final class CYServiceManager: ObservableObject {
 	func updateCustomCollectionOrder(_ order: [String]) async throws {
 		guard let currentUserId = Auth.auth().currentUser?.uid else { return }
 		
-		// Use backend API instead of direct Firestore
-		let apiClient = APIClient.shared
-		_ = try await apiClient.updateUser(
-			userId: currentUserId,
-			collectionSortPreference: nil,
-			customCollectionOrder: order
-		)
+		// Use Firebase directly
+		let db = Firestore.firestore()
+		try await db.collection("users").document(currentUserId).updateData([
+			"customCollectionOrder": order
+		])
 		
 		// Update local state
 		if var user = currentUser {
