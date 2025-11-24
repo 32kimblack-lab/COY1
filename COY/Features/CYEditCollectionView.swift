@@ -372,18 +372,18 @@ struct CYEditCollectionView: View {
 				invitedUserIds.formUnion(Set(pendingInvites))
 			}
 			
-			// Method 2: Get notifications (if available)
+			// Method 2: Get notifications from Firebase (if available)
 			do {
-				let apiClient = APIClient.shared
-				let notifications = try await apiClient.getNotifications()
+				let db = Firestore.firestore()
+				let notificationsSnapshot = try await db.collection("notifications")
+					.whereField("type", isEqualTo: "collectionInvite")
+					.whereField("collectionId", isEqualTo: collection.id)
+					.whereField("fromUserId", isEqualTo: currentUserId)
+					.getDocuments()
 				
-				let sentInvites = notifications.filter { notification in
-					notification.type == .collectionInvite &&
-					notification.collectionId == collection.id &&
-					notification.fromUserId == currentUserId
-				}
-				
-				let notificationInvites = Set(sentInvites.map { $0.toUserId })
+				let notificationInvites = Set(notificationsSnapshot.documents.compactMap { doc in
+					doc.data()["toUserId"] as? String
+				})
 				invitedUserIds.formUnion(notificationInvites)
 			} catch {
 				print("⚠️ CYEditCollectionView: Could not load notifications: \(error)")

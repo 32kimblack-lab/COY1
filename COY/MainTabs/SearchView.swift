@@ -1,5 +1,6 @@
 import SwiftUI
 import FirebaseAuth
+import FirebaseFirestore
 
 struct SearchView: View {
 	@State private var searchText = ""
@@ -10,8 +11,6 @@ struct SearchView: View {
 	@State private var isLoadingPosts = false
 	@State private var searchTask: Task<Void, Never>?
 	@Environment(\.colorScheme) private var colorScheme
-	
-	private let apiClient = APIClient.shared
 
 	var body: some View {
 		NavigationStack {
@@ -232,34 +231,45 @@ struct SearchView: View {
 		
 		switch selectedTab {
 		case 0:
-			// Search collections
+			// Search collections using Firebase
 			isLoadingCollections = true
 			do {
-				let responses = try await apiClient.searchCollections(query: query)
-				// Convert CollectionResponse to CollectionData
-				collections = responses.map { response in
-					let dateFormatter = ISO8601DateFormatter()
-					dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-					let createdAt = dateFormatter.date(from: response.createdAt) ?? Date()
-					
+				let db = Firestore.firestore()
+				var queryRef: Query = db.collection("collections")
+				
+				if let query = query, !query.isEmpty {
+					// Firestore doesn't support full-text search, so we'll search by name
+					// Note: This is a simple prefix search. For better search, consider using Algolia or similar
+					queryRef = queryRef.whereField("name", isGreaterThanOrEqualTo: query)
+						.whereField("name", isLessThanOrEqualTo: query + "\u{f8ff}")
+				}
+				
+				let snapshot = try await queryRef
+					.whereField("isPublic", isEqualTo: true)
+					.limit(to: 50)
+					.getDocuments()
+				
+				collections = snapshot.documents.compactMap { doc in
+					let data = doc.data()
 					return CollectionData(
-						id: response.id,
-						name: response.name,
-						description: response.description,
-						type: response.type,
-						isPublic: response.isPublic,
-						ownerId: response.ownerId,
-						ownerName: response.ownerName,
-						owners: [response.ownerId],
-						imageURL: response.imageURL,
-						invitedUsers: [],
-						members: response.members,
-						memberCount: response.memberCount,
-						followers: [],
-						followerCount: 0,
-						allowedUsers: [],
-						deniedUsers: [],
-						createdAt: createdAt
+						id: doc.documentID,
+						name: data["name"] as? String ?? "",
+						description: data["description"] as? String ?? "",
+						type: data["type"] as? String ?? "Individual",
+						isPublic: data["isPublic"] as? Bool ?? false,
+						ownerId: data["ownerId"] as? String ?? "",
+						ownerName: data["ownerName"] as? String ?? "",
+						owners: data["owners"] as? [String] ?? [data["ownerId"] as? String ?? ""],
+						admins: data["admins"] as? [String],
+						imageURL: data["imageURL"] as? String,
+						invitedUsers: data["invitedUsers"] as? [String] ?? [],
+						members: data["members"] as? [String] ?? [],
+						memberCount: data["memberCount"] as? Int ?? 0,
+						followers: data["followers"] as? [String] ?? [],
+						followerCount: data["followerCount"] as? Int ?? 0,
+						allowedUsers: data["allowedUsers"] as? [String] ?? [],
+						deniedUsers: data["deniedUsers"] as? [String] ?? [],
+						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
 					)
 				}
 			} catch {
@@ -269,10 +279,54 @@ struct SearchView: View {
 			isLoadingCollections = false
 			
 		case 1:
-			// Search posts
+			// Search posts using Firebase
 			isLoadingPosts = true
 			do {
-				posts = try await apiClient.searchPosts(query: query)
+				let db = Firestore.firestore()
+				var queryRef: Query = db.collection("posts")
+				
+				if let query = query, !query.isEmpty {
+					// Search by title/caption
+					queryRef = queryRef.whereField("title", isGreaterThanOrEqualTo: query)
+						.whereField("title", isLessThanOrEqualTo: query + "\u{f8ff}")
+				}
+				
+				let snapshot = try await queryRef
+					.limit(to: 50)
+					.getDocuments()
+				
+				posts = snapshot.documents.compactMap { doc -> CollectionPost? in
+					let data = doc.data()
+					
+					// Parse mediaItems
+					var allMediaItems: [MediaItem] = []
+					if let mediaItemsArray = data["mediaItems"] as? [[String: Any]] {
+						allMediaItems = mediaItemsArray.compactMap { mediaData in
+							MediaItem(
+								imageURL: mediaData["imageURL"] as? String,
+								thumbnailURL: mediaData["thumbnailURL"] as? String,
+								videoURL: mediaData["videoURL"] as? String,
+								videoDuration: mediaData["videoDuration"] as? Double,
+								isVideo: mediaData["isVideo"] as? Bool ?? false,
+								width: (mediaData["width"] as? Double).map { CGFloat($0) },
+								height: (mediaData["height"] as? Double).map { CGFloat($0) }
+							)
+						}
+					}
+					
+					let firstMediaItem = allMediaItems.first
+					
+					return CollectionPost(
+						id: doc.documentID,
+						title: data["title"] as? String ?? data["caption"] as? String ?? "",
+						collectionId: data["collectionId"] as? String ?? "",
+						authorId: data["authorId"] as? String ?? "",
+						authorName: data["authorName"] as? String ?? "",
+						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
+						firstMediaItem: firstMediaItem,
+						mediaItems: allMediaItems
+					)
+				}
 			} catch {
 				print("Error searching posts: \(error.localizedDescription)")
 				posts = []

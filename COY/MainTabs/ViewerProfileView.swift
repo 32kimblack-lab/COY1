@@ -401,32 +401,15 @@ struct ViewerProfileView: View {
 				userCustomOrder = CYServiceManager.shared.getCustomCollectionOrder()
 			}
 		} else {
-			// CRITICAL FIX: Load viewed user's sort preference from backend API (source of truth)
-			// This ensures we show their actual organization preference, not just "Newest to Oldest"
+			// Load viewed user's sort preference from Firebase
 			do {
-				let apiClient = APIClient.shared
-				let backendUser = try await apiClient.getUser(userId: userId)
+				let db = Firestore.firestore()
+				let userDoc = try await db.collection("users").document(userId).getDocument()
 				
-				await MainActor.run {
-					// Get sort preference from backend user (matches how ProfileView loads it)
-					userSortPreference = backendUser.collectionSortPreference ?? "Newest to Oldest"
-					userCustomOrder = backendUser.customCollectionOrder ?? []
-					print("✅ ViewerProfileView: Loaded sort preference for user \(userId): \(userSortPreference)")
-					if !userCustomOrder.isEmpty {
-						print("✅ ViewerProfileView: Loaded custom order with \(userCustomOrder.count) collections")
-					}
-				}
-			} catch {
-				print("⚠️ ViewerProfileView: Error loading user sort preference from backend: \(error)")
-				// Fallback to Firestore if backend fails
-				do {
-					let db = Firestore.firestore()
-					let userDoc = try await db.collection("users").document(userId).getDocument()
-					
-					if let data = userDoc.data() {
-						await MainActor.run {
-							userSortPreference = data["collectionSortPreference"] as? String ?? "Newest to Oldest"
-							userCustomOrder = data["customCollectionOrder"] as? [String] ?? []
+				if let data = userDoc.data() {
+					await MainActor.run {
+						userSortPreference = data["collectionSortPreference"] as? String ?? "Newest to Oldest"
+						userCustomOrder = data["customCollectionOrder"] as? [String] ?? []
 							print("✅ ViewerProfileView: Loaded sort preference from Firestore fallback")
 						}
 					} else {
