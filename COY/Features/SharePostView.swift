@@ -19,8 +19,6 @@ struct SharePostView: View {
 	@State private var errorMessage: String?
 	@State private var showSuccessMessage = false
 	
-	private let friendService = FriendService.shared
-	private let chatService = ChatService.shared
 	private let userService = UserService.shared
 	private let db = Firestore.firestore()
 	
@@ -208,12 +206,18 @@ struct SharePostView: View {
 	
 	private func loadMessageContacts(currentUserId: String, friends: [ShareUser]) async -> [ShareUser] {
 		do {
-			let chatRooms = try await chatService.getUserChatRooms()
+			// Load chat rooms directly from Firebase
+			let chatRoomsSnapshot = try await db.collection("chatRooms")
+				.whereField("participants", arrayContains: currentUserId)
+				.getDocuments()
+			
 			var contactIds: Set<String> = []
 			
-			for room in chatRooms {
-				for participantId in room.participants where participantId != currentUserId {
-					contactIds.insert(participantId)
+			for doc in chatRoomsSnapshot.documents {
+				if let participants = doc.data()["participants"] as? [String] {
+					for participantId in participants where participantId != currentUserId {
+						contactIds.insert(participantId)
+					}
 				}
 			}
 			
@@ -286,11 +290,11 @@ struct SharePostView: View {
 		for userId in selectedUsers {
 			do {
 				// Get or create chat room
-				let chatRoom = try await chatService.getOrCreateChatRoom(participants: [currentUserId, userId])
+				let chatRoomId = try await getOrCreateChatRoom(participants: [currentUserId, userId])
 				
 				// Send post as message
-				try await chatService.sendMessage(
-					chatId: chatRoom.chatId,
+				try await sendMessage(
+					chatId: chatRoomId,
 					type: messageType,
 					content: shareContent
 				)

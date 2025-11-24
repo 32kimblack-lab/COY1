@@ -36,6 +36,7 @@ struct CollectionPost: Identifiable {
 	var mediaItems: [MediaItem] // All media items for swipeable carousel
 	var isPinned: Bool = false
 	var caption: String?
+	var allowReplies: Bool = true // Default to true
 }
 
 struct MediaItem {
@@ -44,5 +45,18 @@ struct MediaItem {
 	var videoURL: String?
 	var videoDuration: Double?
 	var isVideo: Bool
+}
+
+struct Comment: Identifiable {
+	var id: String
+	var postId: String
+	var userId: String
+	var username: String
+	var name: String
+	var profileImageURL: String?
+	var text: String
+	var createdAt: Date
+	var parentCommentId: String?
+	var replyCount: Int = 0
 }
 
