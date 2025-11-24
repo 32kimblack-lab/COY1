@@ -218,7 +218,7 @@ struct PinterestPostCard: View {
 			calculateImageAspectRatios()
 			setupVideoPlayer()
 		}
-		.onChange(of: isVisible) { newValue in
+		.onChange(of: isVisible) { oldValue, newValue in
 			handleVisibilityChange(newValue)
 		}
 		.onDisappear {
@@ -376,15 +376,6 @@ struct PinterestPostCard: View {
 				.aspectRatio(contentMode: .fit)
 				.frame(width: width, height: calculatedHeight)
 				.clipped()
-				.onSuccess { image, data, cacheType in
-					// Calculate and store aspect ratio when image loads
-					if let image = image {
-						let aspectRatio = image.size.width / image.size.height
-						DispatchQueue.main.async {
-							imageAspectRatios[imageURL] = aspectRatio
-						}
-					}
-				}
 		} else {
 			Rectangle()
 				.fill(Color.gray.opacity(0.3))
@@ -416,22 +407,13 @@ struct PinterestPostCard: View {
 			} else {
 				// Fallback thumbnail
 				if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty, let url = URL(string: thumbnailURL) {
-					WebImage(url: url)
-						.resizable()
-						.indicator(.activity)
-						.transition(.fade(duration: 0.2))
-						.aspectRatio(contentMode: .fit)
-						.frame(width: width, height: calculatedHeight)
-						.clipped()
-						.onSuccess { image, data, cacheType in
-							// Calculate and store aspect ratio when thumbnail loads
-							if let image = image, let thumbnailURL = mediaItem.thumbnailURL {
-								let aspectRatio = image.size.width / image.size.height
-								DispatchQueue.main.async {
-									imageAspectRatios[thumbnailURL] = aspectRatio
-								}
-							}
-						}
+				WebImage(url: url)
+					.resizable()
+					.indicator(.activity)
+					.transition(.fade(duration: 0.2))
+					.aspectRatio(contentMode: .fit)
+					.frame(width: width, height: calculatedHeight)
+					.clipped()
 				} else {
 					Rectangle()
 						.fill(Color.black)
