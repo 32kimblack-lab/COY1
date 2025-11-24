@@ -3,6 +3,7 @@ import SDWebImageSwiftUI
 import SDWebImage
 import AVKit
 import FirebaseAuth
+import Combine
 
 struct CYPostDetailView: View {
 	let post: CollectionPost
@@ -14,6 +15,8 @@ struct CYPostDetailView: View {
 	@State private var isStarred: Bool = false
 	@State private var showFullCaption: Bool = false
 	@State private var imageAspectRatios: [String: CGFloat] = [:]
+	@State private var elapsedTimes: [Int: Double] = [:]
+	@State private var timeObservers: [Int: AnyCancellable] = [:]
 	
 	private let screenWidth: CGFloat = UIScreen.main.bounds.width
 	private let maxHeight: CGFloat = UIScreen.main.bounds.height * 0.6
@@ -69,12 +72,15 @@ struct CYPostDetailView: View {
 							// Media carousel on top
 							TabView(selection: $currentMediaIndex) {
 								ForEach(0..<post.mediaItems.count, id: \.self) { index in
-									mediaView(mediaItem: post.mediaItems[index])
+									mediaView(mediaItem: post.mediaItems[index], index: index)
 										.tag(index)
 								}
 							}
 							.tabViewStyle(.page)
 							.frame(height: calculatedHeight)
+							.onChange(of: currentMediaIndex) { oldValue, newValue in
+								handleMediaIndexChange(from: oldValue, to: newValue)
+							}
 							.overlay(
 								// Page indicator dots
 								VStack {
@@ -171,7 +177,94 @@ struct CYPostDetailView: View {
 		.onAppear {
 			loadStarStatus()
 			calculateImageAspectRatios()
+			setupVideoPlayers()
+			// Play the first video if it's a video
+			if !post.mediaItems.isEmpty && post.mediaItems[0].isVideo {
+				playVideo(at: 0)
+			}
 		}
+		.onDisappear {
+			// Pause all videos when view disappears
+			pauseAllVideos()
+			cleanupTimeObservers()
+		}
+	}
+	
+	// MARK: - Video Player Management
+	private func setupVideoPlayers() {
+		for (index, mediaItem) in post.mediaItems.enumerated() {
+			if mediaItem.isVideo, let videoURL = mediaItem.videoURL {
+				// Create player for this video
+				_ = VideoPlayerManager.shared.getOrCreatePlayer(for: videoURL, postId: "\(post.id)_\(index)")
+				
+				// Set up elapsed time tracking
+				setupElapsedTimeTracking(for: index, videoURL: videoURL)
+			}
+		}
+	}
+	
+	private func getPlayerId(for index: Int, videoURL: String) -> String {
+		return "\(post.id)_\(index)_\(videoURL)"
+	}
+	
+	private func setupElapsedTimeTracking(for index: Int, videoURL: String) {
+		let playerId = getPlayerId(for: index, videoURL: videoURL)
+		if let publisher = VideoPlayerManager.shared.getElapsedTimePublisher(for: playerId) {
+			let cancellable = publisher.sink { time in
+				Task { @MainActor in
+					elapsedTimes[index] = time
+				}
+			}
+			timeObservers[index] = cancellable
+		}
+	}
+	
+	private func playVideo(at index: Int) {
+		guard index >= 0 && index < post.mediaItems.count else { return }
+		guard post.mediaItems[index].isVideo,
+			  let videoURL = post.mediaItems[index].videoURL else { return }
+		
+		// Pause all other videos
+		for i in 0..<post.mediaItems.count where i != index && post.mediaItems[i].isVideo {
+			if let otherVideoURL = post.mediaItems[i].videoURL {
+				let otherPlayerId = getPlayerId(for: i, videoURL: otherVideoURL)
+				VideoPlayerManager.shared.pauseVideo(playerId: otherPlayerId)
+			}
+		}
+		
+		// Play the current video
+		let playerId = getPlayerId(for: index, videoURL: videoURL)
+		VideoPlayerManager.shared.playVideo(playerId: playerId)
+	}
+	
+	private func pauseAllVideos() {
+		for (index, mediaItem) in post.mediaItems.enumerated() where mediaItem.isVideo {
+			if let videoURL = mediaItem.videoURL {
+				let playerId = getPlayerId(for: index, videoURL: videoURL)
+				VideoPlayerManager.shared.pauseVideo(playerId: playerId)
+			}
+		}
+	}
+	
+	private func handleMediaIndexChange(from oldIndex: Int, to newIndex: Int) {
+		// Pause the old video
+		if oldIndex >= 0 && oldIndex < post.mediaItems.count && post.mediaItems[oldIndex].isVideo,
+		   let oldVideoURL = post.mediaItems[oldIndex].videoURL {
+			let oldPlayerId = getPlayerId(for: oldIndex, videoURL: oldVideoURL)
+			VideoPlayerManager.shared.pauseVideo(playerId: oldPlayerId)
+		}
+		
+		// Play the new video if it's a video
+		if newIndex >= 0 && newIndex < post.mediaItems.count && post.mediaItems[newIndex].isVideo {
+			playVideo(at: newIndex)
+		}
+	}
+	
+	private func cleanupTimeObservers() {
+		for (_, cancellable) in timeObservers {
+			cancellable.cancel()
+		}
+		timeObservers.removeAll()
 	}
 	
 	// MARK: - Blur Background View
@@ -215,9 +308,9 @@ struct CYPostDetailView: View {
 	
 	// MARK: - Media View
 	@ViewBuilder
-	private func mediaView(mediaItem: MediaItem) -> some View {
+	private func mediaView(mediaItem: MediaItem, index: Int) -> some View {
 		if mediaItem.isVideo {
-			videoView(mediaItem: mediaItem)
+			videoView(mediaItem: mediaItem, index: index)
 		} else {
 			imageView(mediaItem: mediaItem)
 		}
@@ -246,51 +339,53 @@ struct CYPostDetailView: View {
 	}
 	
 	@ViewBuilder
-	private func videoView(mediaItem: MediaItem) -> some View {
+	private func videoView(mediaItem: MediaItem, index: Int) -> some View {
 		ZStack {
-			// Thumbnail
-			if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty, let url = URL(string: thumbnailURL) {
-				WebImage(url: url)
-					.resizable()
-					.indicator(.activity)
-					.transition(.fade(duration: 0.2))
-					.aspectRatio(contentMode: .fit)
+			// Video Player
+			if let videoURL = mediaItem.videoURL, !videoURL.isEmpty {
+				let player = VideoPlayerManager.shared.getOrCreatePlayer(for: videoURL, postId: "\(post.id)_\(index)")
+				VideoPlayer(player: player)
 					.frame(width: screenWidth, height: calculatedHeight)
 					.clipped()
+					.disabled(true) // Disable controls
+					.onAppear {
+						// Auto-play if this is the current index
+						if index == currentMediaIndex {
+							playVideo(at: index)
+						}
+					}
 			} else {
-				Rectangle()
-					.fill(Color.black)
-					.frame(height: calculatedHeight)
-			}
-			
-			// Play Button Overlay
-			if let videoURL = mediaItem.videoURL, !videoURL.isEmpty {
-				Button(action: {
-					// TODO: Play video in full screen
-				}) {
-					Image(systemName: "play.circle.fill")
-						.font(.system(size: 60))
-						.foregroundColor(.white.opacity(0.9))
+				// Fallback thumbnail
+				if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty, let url = URL(string: thumbnailURL) {
+					WebImage(url: url)
+						.resizable()
+						.indicator(.activity)
+						.transition(.fade(duration: 0.2))
+						.aspectRatio(contentMode: .fit)
+						.frame(width: screenWidth, height: calculatedHeight)
+						.clipped()
+				} else {
+					Rectangle()
+						.fill(Color.black)
+						.frame(height: calculatedHeight)
 				}
 			}
 			
-			// Duration Badge
-			if let duration = mediaItem.videoDuration {
-				VStack {
+			// Elapsed Time Badge (count up)
+			VStack {
+				Spacer()
+				HStack {
 					Spacer()
-					HStack {
-						Spacer()
-						Text(formatDuration(duration))
-							.font(.caption)
-							.fontWeight(.semibold)
-							.foregroundColor(.white)
-							.padding(.horizontal, 8)
-							.padding(.vertical, 4)
-							.background(Color.black.opacity(0.6))
-							.cornerRadius(4)
-							.padding(.trailing, 12)
-							.padding(.bottom, 12)
-					}
+					Text(formatElapsedTime(elapsedTimes[index] ?? 0.0))
+						.font(.caption)
+						.fontWeight(.semibold)
+						.foregroundColor(.white)
+						.padding(.horizontal, 8)
+						.padding(.vertical, 4)
+						.background(Color.black.opacity(0.6))
+						.cornerRadius(4)
+						.padding(.trailing, 12)
+						.padding(.bottom, 12)
 				}
 			}
 		}
@@ -315,10 +410,10 @@ struct CYPostDetailView: View {
 		return formatter.localizedString(for: date, relativeTo: Date())
 	}
 	
-	private func formatDuration(_ seconds: Double) -> String {
+	private func formatElapsedTime(_ seconds: Double) -> String {
 		let minutes = Int(seconds) / 60
-		let remainingSeconds = Int(seconds) % 60
-		return String(format: "%d:%02d", minutes, remainingSeconds)
+		let secs = Int(seconds) % 60
+		return String(format: "%d:%02d", minutes, secs)
 	}
 	
 	// MARK: - Calculate Image Aspect Ratios
