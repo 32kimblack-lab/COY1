@@ -2,9 +2,7 @@ import Foundation
 
 // MARK: - Config
 struct Config {
-	static var isBackendEnabled: Bool {
-		// Backend is disabled - using Firebase only
-		return false
-	}
+	// Configuration for Firebase-only architecture
+	// All backend operations are handled by Firebase (Auth, Firestore, Storage)
 }
 
