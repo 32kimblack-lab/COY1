@@ -3,6 +3,7 @@ import SDWebImageSwiftUI
 import SDWebImage
 import AVKit
 import FirebaseAuth
+import Combine
 
 // MARK: - Pinterest Style Post Grid
 struct PinterestPostGrid: View {
@@ -112,6 +113,7 @@ struct PinterestPostCard: View {
 	@State private var cardFrame: CGRect = .zero
 	@State private var isVisible: Bool = false
 	@State private var elapsedTime: Double = 0.0
+	@State private var timeObserver: AnyCancellable?
 	@Environment(\.colorScheme) var colorScheme
 	
 	private var playerId: String {
@@ -224,6 +226,7 @@ struct PinterestPostCard: View {
 			if post.mediaItems.contains(where: { $0.isVideo }) {
 				VideoPlayerManager.shared.pauseVideo(playerId: playerId)
 			}
+			timeObserver?.cancel()
 		}
 		.fullScreenCover(isPresented: $showPostDetail) {
 			CYPostDetailView(post: post, collection: collection)
@@ -277,8 +280,10 @@ struct PinterestPostCard: View {
 		_ = VideoPlayerManager.shared.getOrCreatePlayer(for: videoURL, postId: post.id)
 		
 		// Subscribe to elapsed time updates
-		VideoPlayerManager.shared.observeElapsedTime(for: playerId) { [self] time in
-			elapsedTime = time
+		timeObserver = VideoPlayerManager.shared.observeElapsedTime(for: playerId) { time in
+			Task { @MainActor in
+				elapsedTime = time
+			}
 		}
 	}
 	

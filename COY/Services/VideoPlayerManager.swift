@@ -73,12 +73,13 @@ class VideoPlayerManager: ObservableObject {
 		return elapsedTimePublishers[playerId]?.eraseToAnyPublisher()
 	}
 	
-	func observeElapsedTime(for playerId: String, callback: @escaping (Double) -> Void) {
+	func observeElapsedTime(for playerId: String, callback: @escaping (Double) -> Void) -> AnyCancellable? {
 		if let publisher = elapsedTimePublishers[playerId] {
-			_ = publisher.sink { time in
+			return publisher.sink { time in
 				callback(time)
 			}
 		}
+		return nil
 	}
 	
 	private func findPlayer(by playerId: String) -> AVPlayer? {
