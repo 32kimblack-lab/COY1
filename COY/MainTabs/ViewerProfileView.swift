@@ -410,22 +410,21 @@ struct ViewerProfileView: View {
 					await MainActor.run {
 						userSortPreference = data["collectionSortPreference"] as? String ?? "Newest to Oldest"
 						userCustomOrder = data["customCollectionOrder"] as? [String] ?? []
-							print("✅ ViewerProfileView: Loaded sort preference from Firestore fallback")
-						}
-					} else {
-						// User document doesn't exist, use defaults
-						await MainActor.run {
-							userSortPreference = "Newest to Oldest"
-							userCustomOrder = []
-						}
+						print("✅ ViewerProfileView: Loaded sort preference from Firestore")
 					}
-				} catch {
-					print("❌ ViewerProfileView: Error loading from Firestore fallback: \(error)")
-					// Use defaults on error
+				} else {
+					// User document doesn't exist, use defaults
 					await MainActor.run {
 						userSortPreference = "Newest to Oldest"
 						userCustomOrder = []
 					}
+				}
+			} catch {
+				print("❌ ViewerProfileView: Error loading from Firestore: \(error)")
+				// Use defaults on error
+				await MainActor.run {
+					userSortPreference = "Newest to Oldest"
+					userCustomOrder = []
 				}
 			}
 		}
