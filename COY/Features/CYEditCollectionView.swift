@@ -489,7 +489,7 @@ struct CYEditCollectionView: View {
 			var immediateUpdateData: [String: Any] = [
 				"collectionId": collection.id,
 				"name": verifiedCollection.name,
-				"description": verifiedCollection.description ?? ""
+				"description": verifiedCollection.description
 			]
 			
 			// Use verified URLs from Firebase (these are the actual saved URLs)

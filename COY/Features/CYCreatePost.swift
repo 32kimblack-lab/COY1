@@ -365,13 +365,9 @@ struct CYCreatePost: View {
 	
 	private func loadAllUsers() async {
 		isLoadingUsers = true
-		do {
-			// TODO: Implement fetchAllUsers - for now using empty array
-			// This would need to be implemented in UserService
-			allUsers = []
-		} catch {
-			print("Error loading users: \(error.localizedDescription)")
-		}
+		// TODO: Implement fetchAllUsers - for now using empty array
+		// This would need to be implemented in UserService
+		allUsers = []
 		isLoadingUsers = false
 	}
 	

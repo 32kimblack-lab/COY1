@@ -44,17 +44,65 @@ struct CYInsideCollectionView: View {
 	}
 	
 	var body: some View {
+		mainContentView
+			.navigationBarTitleDisplayMode(.inline)
+			.navigationBarBackButtonHidden(true)
+			.toolbar {
+				toolbarContent
+			}
+			.onAppear {
+				loadCollectionData()
+				loadPosts()
+				setupPostListener()
+			}
+			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUpdated"))) { notification in
+				handleCollectionUpdated(notification)
+			}
+			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostCreated"))) { notification in
+				handlePostCreated(notification)
+			}
+			.sheet(isPresented: $showPhotoPicker) {
+				photoPickerSheet
+			}
+			.sheet(isPresented: createPostBinding) {
+				createPostSheet
+			}
+			.confirmationDialog("Collection Options", isPresented: $showCustomMenu, titleVisibility: .hidden) {
+				collectionOptionsDialog
+			}
+			.sheet(isPresented: $showEditCollection) {
+				editCollectionSheet
+			}
+			.sheet(isPresented: $showAccessView) {
+				accessViewSheet
+			}
+			.alert("Delete Collection", isPresented: $showDeleteAlert) {
+				deleteCollectionAlert
+			} message: {
+				Text("Are you sure you want to delete this collection? This action cannot be undone.")
+			}
+			.alert("Delete Post", isPresented: $showPostDeleteAlert) {
+				deletePostAlert
+			} message: {
+				Text("Are you sure you want to delete this post? This action cannot be undone.")
+			}
+			.alert("Error Deleting Collection", isPresented: $showDeleteError) {
+				Button("OK", role: .cancel) { }
+			} message: {
+				Text(deleteErrorMessage.isEmpty ? "Failed to delete collection. Please try again." : deleteErrorMessage)
+			}
+	}
+	
+	// MARK: - View Components
+	private var mainContentView: some View {
 		ZStack {
 			ScrollView {
 				VStack(alignment: .leading, spacing: 0) {
-					// Collection Header Section
 					collectionHeaderSection
 						.padding()
 					
-					// Sort Section with Privacy Lock
 					sortSection
 					
-					// Pinterest Grid of Posts
 					if isLoadingPosts {
 						ProgressView()
 							.padding()
@@ -73,121 +121,120 @@ struct CYInsideCollectionView: View {
 			}
 			.background(colorScheme == .dark ? Color.black : Color.white)
 			
-			// Sort Menu Overlay
 			sortMenuOverlay
 		}
-		.navigationBarTitleDisplayMode(.inline)
-		.navigationBarBackButtonHidden(true)
-		.toolbar {
-			ToolbarItem(placement: .navigationBarLeading) {
-				Button(action: { dismiss() }) {
-					Image(systemName: "chevron.backward")
-						.foregroundColor(.primary)
-				}
-			}
-			ToolbarItem(placement: .navigationBarTrailing) {
-				Button(action: { showCustomMenu.toggle() }) {
-					Image(systemName: "ellipsis")
-						.foregroundColor(.primary)
-				}
+	}
+	
+	@ToolbarContentBuilder
+	private var toolbarContent: some ToolbarContent {
+		ToolbarItem(placement: .navigationBarLeading) {
+			Button(action: { dismiss() }) {
+				Image(systemName: "chevron.backward")
+					.foregroundColor(.primary)
 			}
 		}
-		.onAppear {
-			loadCollectionData()
-			loadPosts()
-			setupPostListener()
-		}
-		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUpdated"))) { notification in
-			// CRITICAL FIX: Reload collection when it's updated (edit, access changes, etc.)
-			if let collectionId = notification.object as? String, collectionId == collection.id {
-				print("🔄 CYInsideCollectionView: Collection updated, reloading collection data")
-				loadCollectionData()
-				refreshTrigger = UUID()
+		ToolbarItem(placement: .navigationBarTrailing) {
+			Button(action: { showCustomMenu.toggle() }) {
+				Image(systemName: "ellipsis")
+					.foregroundColor(.primary)
 			}
 		}
-		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostCreated"))) { notification in
-			if let collectionId = notification.object as? String, collectionId == collection.id {
-				loadPosts()
-			}
-		}
-		.sheet(isPresented: $showPhotoPicker) {
-			CustomPhotoPickerView(
-				selectedMedia: $selectedMedia,
-				maxSelectionCount: 5,
-				isProcessingMedia: $isProcessingMedia
-			)
-		}
-		.sheet(isPresented: Binding(
+	}
+	
+	private var photoPickerSheet: some View {
+		CustomPhotoPickerView(
+			selectedMedia: $selectedMedia,
+			maxSelectionCount: 5,
+			isProcessingMedia: $isProcessingMedia
+		)
+	}
+	
+	private var createPostBinding: Binding<Bool> {
+		Binding(
 			get: { !selectedMedia.isEmpty && !showPhotoPicker },
 			set: { newValue in
 				if !newValue {
 					selectedMedia = []
 				}
 			}
-		)) {
-			CYCreatePost(
-				selectedMedia: $selectedMedia,
-				collectionId: collection.id,
-				isProcessingMedia: $isProcessingMedia,
-				onPost: { _ in
-					selectedMedia = []
-					loadPosts()
-				},
-				isFromCamera: false
-			)
-		}
-		.confirmationDialog("Collection Options", isPresented: $showCustomMenu, titleVisibility: .hidden) {
-			// Owner and Admins can edit collection
-			if isCollectionOwnerOrAdmin() {
-				Button("Edit Collection") {
-					showEditCollection = true
-				}
-				Button("Access") {
-					showAccessView = true
-				}
-				Button("Followers") {
-					showFollowersView = true
-				}
-			} else if !isCurrentUserOwnerOrMember {
-				Button("Report Collection", role: .destructive) { }
+		)
+	}
+	
+	private var createPostSheet: some View {
+		CYCreatePost(
+			selectedMedia: $selectedMedia,
+			collectionId: collection.id,
+			isProcessingMedia: $isProcessingMedia,
+			onPost: { _ in
+				selectedMedia = []
+				loadPosts()
+			},
+			isFromCamera: false
+		)
+	}
+	
+	@ViewBuilder
+	private var collectionOptionsDialog: some View {
+		if isCollectionOwnerOrAdmin() {
+			Button("Edit Collection") {
+				showEditCollection = true
 			}
-			Button("Cancel", role: .cancel) {}
-		}
-		.sheet(isPresented: $showEditCollection) {
-			CYEditCollectionView(collection: collection) {
-				// Reload collection data after save
-				loadCollectionData()
+			Button("Access") {
+				showAccessView = true
 			}
+			Button("Followers") {
+				showFollowersView = true
+			}
+		} else if !isCurrentUserOwnerOrMember {
+			Button("Report Collection", role: .destructive) { }
+		}
+		Button("Cancel", role: .cancel) {}
+	}
+	
+	private var editCollectionSheet: some View {
+		CYEditCollectionView(collection: collection) {
+			loadCollectionData()
+		}
+		.environmentObject(authService)
+	}
+	
+	private var accessViewSheet: some View {
+		CYAccessView(collection: collection)
 			.environmentObject(authService)
+	}
+	
+	@ViewBuilder
+	private var deleteCollectionAlert: some View {
+		Button("Cancel", role: .cancel) { }
+		Button("Delete", role: .destructive) {
+			deleteCollection()
 		}
-		.sheet(isPresented: $showAccessView) {
-			CYAccessView(collection: collection)
-				.environmentObject(authService)
-		}
-		.alert("Delete Collection", isPresented: $showDeleteAlert) {
-			Button("Cancel", role: .cancel) { }
-			Button("Delete", role: .destructive) {
-				deleteCollection()
-			}
-		} message: {
-			Text("Are you sure you want to delete this collection? This action cannot be undone.")
-		}
-		.alert("Delete Post", isPresented: $showPostDeleteAlert) {
-			Button("Cancel", role: .cancel) { }
-			Button("Delete", role: .destructive) {
-				if let post = postToDelete {
-					Task {
-						await deletePost(post: post)
-					}
+	}
+	
+	@ViewBuilder
+	private var deletePostAlert: some View {
+		Button("Cancel", role: .cancel) { }
+		Button("Delete", role: .destructive) {
+			if let post = postToDelete {
+				Task {
+					await deletePost(post: post)
 				}
 			}
-		} message: {
-			Text("Are you sure you want to delete this post? This action cannot be undone.")
 		}
-		.alert("Error Deleting Collection", isPresented: $showDeleteError) {
-			Button("OK", role: .cancel) { }
-		} message: {
-			Text(deleteErrorMessage.isEmpty ? "Failed to delete collection. Please try again." : deleteErrorMessage)
+	}
+	
+	// MARK: - Notification Handlers
+	private func handleCollectionUpdated(_ notification: Notification) {
+		if let collectionId = notification.object as? String, collectionId == collection.id {
+			print("🔄 CYInsideCollectionView: Collection updated, reloading collection data")
+			loadCollectionData()
+			refreshTrigger = UUID()
+		}
+	}
+	
+	private func handlePostCreated(_ notification: Notification) {
+		if let collectionId = notification.object as? String, collectionId == collection.id {
+			loadPosts()
 		}
 	}
 	
