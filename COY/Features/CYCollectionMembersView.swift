@@ -339,7 +339,8 @@ struct CYCollectionMembersView: View {
 	
 	private var isCurrentUserAdmin: Bool {
 		guard let currentUserId = authService.user?.uid else { return false }
-		return collection.admins?.contains(currentUserId) ?? false
+		// Check if user is in the owners array (admins are stored in owners)
+		return collection.owners.contains(currentUserId) && collection.ownerId != currentUserId
 	}
 	
 	private var canCurrentUserManageMembers: Bool {
@@ -358,11 +359,14 @@ struct CYCollectionMembersView: View {
 			}
 			
 			// Get blocked users (mutual blocking check)
-			let friendService = FriendService.shared
 			guard let currentUserId = authService.user?.uid else {
 				await MainActor.run { isLoading = false }
 				return
 			}
+			
+			// Load current user's blocked users
+			await CYServiceManager.shared.loadCurrentUser()
+			let currentUserBlocked = CYServiceManager.shared.getBlockedUsers()
 			
 			// Check owner - use mutual blocking
 			var loadedOwner: User? = nil
@@ -404,13 +408,15 @@ struct CYCollectionMembersView: View {
 			}
 			
 			// Load members (excluding owner and admins) - use updated collection data and filter blocked users
+			let adminIds = updatedCollection.owners.filter { $0 != updatedCollection.ownerId }
 			let allMemberIds = updatedCollection.members.filter { memberId in
 				memberId != updatedCollection.ownerId &&
-				!(updatedCollection.admins ?? []).contains(memberId)
+				!adminIds.contains(memberId)
 			}
 			var filteredMemberIds: [String] = []
 			for memberId in allMemberIds {
-				let isBlocked = await friendService.areUsersMutuallyBlocked(userId1: currentUserId, userId2: memberId)
+				// Check if user is blocked (mutual block check)
+				let isBlocked = await areUsersMutuallyBlocked(userId1: currentUserId, userId2: memberId)
 				if !isBlocked {
 					filteredMemberIds.append(memberId)
 				}
@@ -505,6 +511,26 @@ struct CYCollectionMembersView: View {
 					isProcessingAction = false
 				}
 			}
+		}
+	}
+	
+	// MARK: - Helper Functions
+	private func areUsersMutuallyBlocked(userId1: String, userId2: String) async -> Bool {
+		// Load both users' blocked lists
+		let db = Firestore.firestore()
+		
+		do {
+			let user1Doc = try await db.collection("users").document(userId1).getDocument()
+			let user2Doc = try await db.collection("users").document(userId2).getDocument()
+			
+			let user1Blocked = (user1Doc.data()?["blockedUsers"] as? [String]) ?? []
+			let user2Blocked = (user2Doc.data()?["blockedUsers"] as? [String]) ?? []
+			
+			// Check if either user has blocked the other
+			return user1Blocked.contains(userId2) || user2Blocked.contains(userId1)
+		} catch {
+			print("⚠️ Error checking mutual block status: \(error)")
+			return false
 		}
 	}
 }

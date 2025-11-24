@@ -156,20 +156,24 @@ struct CYFollowersView: View {
 		isLoading = true
 		Task {
 			do {
-				// Get follower IDs from collection
-				let followerIds = try await CollectionService.shared.getFollowers(collectionId: collection.id)
+				// Get follower IDs from collection directly from Firebase
+				let db = Firestore.firestore()
+				let collectionDoc = try await db.collection("collections").document(collection.id).getDocument()
+				let followerIds = (collectionDoc.data()?["followers"] as? [String]) ?? []
+				
+				// Load current user's blocked users
+				await CYServiceManager.shared.loadCurrentUser()
+				let currentUserBlocked = CYServiceManager.shared.getBlockedUsers()
 				
 				// Load user info for each follower
 				var loadedFollowers: [FollowerInfo] = []
-				let friendService = FriendService.shared
 				
 				for userId in followerIds {
 					// Check if user is blocked (mutual block check for full invisibility)
-					let isBlocked = await friendService.isBlocked(userId: userId)
-					let isBlockedBy = await friendService.isBlockedBy(userId: userId)
+					let isBlocked = await areUsersMutuallyBlocked(userId1: authService.user?.uid ?? "", userId2: userId)
 					
 					// Filter out blocked users
-					if isBlocked || isBlockedBy {
+					if isBlocked {
 						continue
 					}
 					
@@ -209,11 +213,17 @@ struct CYFollowersView: View {
 		
 		do {
 			print("👤 CYFollowersView: Removing follower \(userId) from collection \(collection.id)")
-			try await CollectionService.shared.removeFollower(
-				collectionId: collection.id,
-				followerId: userId,
-				ownerId: currentUserId
-			)
+			
+			// Remove follower directly from Firebase
+			let db = Firestore.firestore()
+			let collectionRef = db.collection("collections").document(collection.id)
+			
+			// Remove from followers array and decrement followerCount
+			try await collectionRef.updateData([
+				"followers": FieldValue.arrayRemove([userId]),
+				"followerCount": FieldValue.increment(Int64(-1))
+			])
+			
 			print("✅ CYFollowersView: Follower removed successfully")
 			
 			// Reload followers to update the list
@@ -224,6 +234,26 @@ struct CYFollowersView: View {
 				errorMessage = error.localizedDescription
 				showError = true
 			}
+		}
+	}
+	
+	// MARK: - Helper Functions
+	private func areUsersMutuallyBlocked(userId1: String, userId2: String) async -> Bool {
+		// Load both users' blocked lists
+		let db = Firestore.firestore()
+		
+		do {
+			let user1Doc = try await db.collection("users").document(userId1).getDocument()
+			let user2Doc = try await db.collection("users").document(userId2).getDocument()
+			
+			let user1Blocked = (user1Doc.data()?["blockedUsers"] as? [String]) ?? []
+			let user2Blocked = (user2Doc.data()?["blockedUsers"] as? [String]) ?? []
+			
+			// Check if either user has blocked the other
+			return user1Blocked.contains(userId2) || user2Blocked.contains(userId1)
+		} catch {
+			print("⚠️ Error checking mutual block status: \(error)")
+			return false
 		}
 	}
 }
