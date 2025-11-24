@@ -118,8 +118,8 @@ struct StarredByView: View {
 				
 				fetchedUsers.append(CYUser(
 					id: userId,
-					username: data["username"] as? String ?? "",
 					name: data["name"] as? String ?? "",
+					username: data["username"] as? String ?? "",
 					profileImageURL: data["profileImageURL"] as? String ?? ""
 				))
 			}
