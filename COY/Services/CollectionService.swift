@@ -481,7 +481,7 @@ final class CollectionService {
 			// Use verified data from Firebase if available, otherwise use what we sent
 			if let verified = verifiedCollection {
 				updateData["name"] = verified.name
-				updateData["description"] = verified.description ?? ""
+				updateData["description"] = verified.description
 				if let imageURL = verified.imageURL {
 					updateData["imageURL"] = imageURL
 				}
