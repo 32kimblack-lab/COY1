@@ -461,7 +461,7 @@ final class CollectionService {
 		do {
 			verifiedCollection = try await getCollection(collectionId: collectionId)
 			if let verified = verifiedCollection {
-				print("✅ Verified update - Name: \(verified.name), Description: \(verified.description ?? "nil"), Image URL: \(verified.imageURL ?? "nil")")
+				print("✅ Verified update - Name: \(verified.name), Description: \(verified.description), Image URL: \(verified.imageURL ?? "nil")")
 			}
 		} catch {
 			print("⚠️ Could not verify collection update: \(error)")
