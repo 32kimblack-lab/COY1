@@ -66,18 +66,7 @@ struct CYInsideCollectionView: View {
 							posts: sortedPosts,
 							collection: collection,
 							isIndividualCollection: collection.type == "Individual",
-							currentUserId: Auth.auth().currentUser?.uid,
-							pinOrder: $pinOrder,
-							allPosts: posts,
-							onPinToggle: { post in
-								Task {
-									await togglePin(post: post)
-								}
-							},
-							onDelete: { post in
-								postToDelete = post
-								showPostDeleteAlert = true
-							}
+							currentUserId: Auth.auth().currentUser?.uid
 						)
 					}
 				}
@@ -161,7 +150,7 @@ struct CYInsideCollectionView: View {
 			Button("Cancel", role: .cancel) {}
 		}
 		.sheet(isPresented: $showEditCollection) {
-			EditCollectionView(collection: collection) {
+			CYEditCollectionView(collection: collection) {
 				// Reload collection data after save
 				loadCollectionData()
 			}
@@ -222,17 +211,11 @@ struct CYInsideCollectionView: View {
 						.fontWeight(.bold)
 						.foregroundColor(.primary)
 					
-					NavigationLink(destination: CYCollectionMembersView(collection: collection).environmentObject(authService)) {
-						HStack(spacing: 4) {
-							Text(collection.type == "Individual" ? "Individual" : "\(collection.memberCount) members")
-								.font(.subheadline)
-								.foregroundColor(.secondary)
-							Image(systemName: "chevron.right")
-								.font(.caption2)
-								.foregroundColor(.gray)
-						}
+					HStack(spacing: 4) {
+						Text(collection.type == "Individual" ? "Individual" : "\(collection.memberCount) members")
+							.font(.subheadline)
+							.foregroundColor(.secondary)
 					}
-					.buttonStyle(.plain)
 				}
 				
 				Spacer()
@@ -518,8 +501,8 @@ struct CYInsideCollectionView: View {
 	
 	private var isCurrentUserAdmin: Bool {
 		guard let currentUserId = authService.user?.uid else { return false }
-		// Check if user is in the admins array
-		return collection.admins?.contains(currentUserId) ?? false
+		// Check if user is in the owners array (admins are stored in owners)
+		return collection.owners.contains(currentUserId) && collection.ownerId != currentUserId
 	}
 	
 	// Check if user is owner or admin (can pin/delete any post, edit collection)
@@ -548,11 +531,11 @@ struct CYInsideCollectionView: View {
 			sortedUnpinned = unpinnedPosts.sorted { $0.createdAt < $1.createdAt }
 		case "Alphabetical":
 			// Alphabetical sorting only available for Invite, Request, and Open collections
-			// Sort by caption (if available), otherwise by author name
+			// Sort by caption (if available), otherwise by title
 			if collection.type != "Individual" {
 				sortedUnpinned = unpinnedPosts.sorted { post1, post2 in
-					let name1 = post1.caption ?? post1.title
-					let name2 = post2.caption ?? post2.title
+					let name1 = post1.caption ?? post1.title ?? ""
+					let name2 = post2.caption ?? post2.title ?? ""
 					return name1.localizedCaseInsensitiveCompare(name2) == .orderedAscending
 				}
 			} else {
@@ -724,9 +707,7 @@ struct CYInsideCollectionView: View {
 								thumbnailURL: mediaData["thumbnailURL"] as? String,
 								videoURL: mediaData["videoURL"] as? String,
 								videoDuration: mediaData["videoDuration"] as? Double,
-								isVideo: mediaData["isVideo"] as? Bool ?? false,
-								width: (mediaData["width"] as? Double).map { CGFloat($0) },
-								height: (mediaData["height"] as? Double).map { CGFloat($0) }
+								isVideo: mediaData["isVideo"] as? Bool ?? false
 							)
 						}
 					}
@@ -738,9 +719,7 @@ struct CYInsideCollectionView: View {
 							thumbnailURL: firstMediaData["thumbnailURL"] as? String,
 							videoURL: firstMediaData["videoURL"] as? String,
 							videoDuration: firstMediaData["videoDuration"] as? Double,
-							isVideo: firstMediaData["isVideo"] as? Bool ?? false,
-							width: (firstMediaData["width"] as? Double).map { CGFloat($0) },
-							height: (firstMediaData["height"] as? Double).map { CGFloat($0) }
+							isVideo: firstMediaData["isVideo"] as? Bool ?? false
 						)
 						allMediaItems = [firstItem]
 					}
@@ -929,9 +908,7 @@ struct CYInsideCollectionView: View {
 								thumbnailURL: mediaData["thumbnailURL"] as? String,
 								videoURL: mediaData["videoURL"] as? String,
 								videoDuration: mediaData["videoDuration"] as? Double,
-								isVideo: mediaData["isVideo"] as? Bool ?? false,
-								width: (mediaData["width"] as? Double).map { CGFloat($0) },
-								height: (mediaData["height"] as? Double).map { CGFloat($0) }
+								isVideo: mediaData["isVideo"] as? Bool ?? false
 							)
 						}
 					}
@@ -943,9 +920,7 @@ struct CYInsideCollectionView: View {
 							thumbnailURL: firstMediaData["thumbnailURL"] as? String,
 							videoURL: firstMediaData["videoURL"] as? String,
 							videoDuration: firstMediaData["videoDuration"] as? Double,
-							isVideo: firstMediaData["isVideo"] as? Bool ?? false,
-							width: (firstMediaData["width"] as? Double).map { CGFloat($0) },
-							height: (firstMediaData["height"] as? Double).map { CGFloat($0) }
+							isVideo: firstMediaData["isVideo"] as? Bool ?? false
 						)
 						allMediaItems = [firstItem]
 					}

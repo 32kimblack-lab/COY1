@@ -34,6 +34,8 @@ struct CollectionPost: Identifiable {
 	var createdAt: Date
 	var firstMediaItem: MediaItem? // For backward compatibility
 	var mediaItems: [MediaItem] // All media items for swipeable carousel
+	var isPinned: Bool = false
+	var caption: String?
 }
 
 struct MediaItem {
