@@ -1,5 +1,6 @@
 import SwiftUI
 import SDWebImageSwiftUI
+import SDWebImage
 import AVKit
 import FirebaseAuth
 
@@ -67,18 +68,57 @@ struct PinterestPostCard: View {
 	@State private var imageHeight: CGFloat = 200
 	@State private var showStar: Bool = false
 	@State private var showPostDetail: Bool = false
+	@State private var imageAspectRatios: [String: CGFloat] = [:]
 	@Environment(\.colorScheme) var colorScheme
+	
+	// Calculate the tallest height from all media items
+	private var calculatedHeight: CGFloat {
+		if post.mediaItems.isEmpty {
+			return 200 // Default height
+		}
+		
+		// For multiple media items, find the tallest one
+		var maxHeight: CGFloat = 200
+		
+		for mediaItem in post.mediaItems {
+			let height: CGFloat
+			
+			if mediaItem.isVideo {
+				// For videos, use a default aspect ratio (16:9)
+				height = width * (9.0 / 16.0)
+			} else if let imageURL = mediaItem.imageURL,
+					  let aspectRatio = imageAspectRatios[imageURL] {
+				// Use calculated aspect ratio
+				height = width / aspectRatio
+			} else {
+				// Default aspect ratio for images (4:3)
+				height = width * (3.0 / 4.0)
+			}
+			
+			maxHeight = max(maxHeight, height)
+		}
+		
+		return maxHeight
+	}
 	
 	var body: some View {
 		VStack(alignment: .leading, spacing: 8) {
-			// Media Content - no card styling, just the media
-			mediaContentView
-				.frame(width: width)
-				.clipped()
-				.cornerRadius(12)
-				.onTapGesture {
-					showPostDetail = true
-				}
+			// Media Content with blur background
+			ZStack {
+				// Blur background
+				blurBackgroundView
+					.frame(width: width, height: calculatedHeight)
+					.clipped()
+				
+				// Media content on top
+				mediaContentView
+					.frame(width: width, height: calculatedHeight)
+					.clipped()
+			}
+			.cornerRadius(12)
+			.onTapGesture {
+				showPostDetail = true
+			}
 			
 			// Post Info - under the media
 			VStack(alignment: .leading, spacing: 4) {
@@ -116,9 +156,49 @@ struct PinterestPostCard: View {
 		}
 		.onAppear {
 			checkStarVisibility()
+			calculateImageAspectRatios()
 		}
 		.fullScreenCover(isPresented: $showPostDetail) {
 			CYPostDetailView(post: post, collection: collection)
+		}
+	}
+	
+	// MARK: - Blur Background View
+	@ViewBuilder
+	private var blurBackgroundView: some View {
+		// Use the first media item for blur background
+		if let firstMedia = post.firstMediaItem ?? post.mediaItems.first {
+			if let imageURL = firstMedia.imageURL, !imageURL.isEmpty, let url = URL(string: imageURL) {
+				WebImage(url: url)
+					.resizable()
+					.indicator(.activity)
+					.aspectRatio(contentMode: .fill)
+					.frame(width: width, height: calculatedHeight)
+					.blur(radius: 20)
+					.opacity(0.6)
+			} else if let thumbnailURL = firstMedia.thumbnailURL, !thumbnailURL.isEmpty, let url = URL(string: thumbnailURL) {
+				WebImage(url: url)
+					.resizable()
+					.indicator(.activity)
+					.aspectRatio(contentMode: .fill)
+					.frame(width: width, height: calculatedHeight)
+					.blur(radius: 20)
+					.opacity(0.6)
+			} else {
+				// Fallback gradient
+				LinearGradient(
+					colors: [Color.gray.opacity(0.3), Color.gray.opacity(0.1)],
+					startPoint: .top,
+					endPoint: .bottom
+				)
+			}
+		} else {
+			// Fallback gradient
+			LinearGradient(
+				colors: [Color.gray.opacity(0.3), Color.gray.opacity(0.1)],
+				startPoint: .top,
+				endPoint: .bottom
+			)
 		}
 	}
 	
@@ -139,7 +219,7 @@ struct PinterestPostCard: View {
 				}
 			}
 			.tabViewStyle(.page)
-			.frame(height: imageHeight)
+			.frame(height: calculatedHeight)
 		} else if let mediaItem = post.firstMediaItem ?? post.mediaItems.first {
 			// Single media item
 			if mediaItem.isVideo {
@@ -153,7 +233,7 @@ struct PinterestPostCard: View {
 			// Placeholder
 			Rectangle()
 				.fill(Color.gray.opacity(0.3))
-				.frame(height: 200)
+				.frame(height: calculatedHeight)
 				.overlay(
 					Image(systemName: "photo")
 						.foregroundColor(.gray)
@@ -169,22 +249,22 @@ struct PinterestPostCard: View {
 				.resizable()
 				.indicator(.activity)
 				.transition(.fade(duration: 0.2))
-				.aspectRatio(contentMode: .fill)
-				.frame(width: width, height: imageHeight)
+				.aspectRatio(contentMode: .fit)
+				.frame(width: width, height: calculatedHeight)
 				.clipped()
-				.onAppear {
-					// Use default aspect ratio for Pinterest-style grid
-					// Images will be displayed with natural proportions
-					// Default height will be adjusted based on content
-					if imageHeight == 200 {
-						// Set a reasonable default height for grid layout
-						imageHeight = width * 1.2 // 1.2:1 aspect ratio (slightly taller)
+				.onSuccess { image, data, cacheType in
+					// Calculate and store aspect ratio when image loads
+					if let image = image {
+						let aspectRatio = image.size.width / image.size.height
+						DispatchQueue.main.async {
+							imageAspectRatios[imageURL] = aspectRatio
+						}
 					}
 				}
 		} else {
 			Rectangle()
 				.fill(Color.gray.opacity(0.3))
-				.frame(height: 200)
+				.frame(height: calculatedHeight)
 				.overlay(
 					Image(systemName: "photo")
 						.foregroundColor(.gray)
@@ -202,13 +282,22 @@ struct PinterestPostCard: View {
 					.resizable()
 					.indicator(.activity)
 					.transition(.fade(duration: 0.2))
-					.aspectRatio(contentMode: .fill)
-					.frame(height: imageHeight)
+					.aspectRatio(contentMode: .fit)
+					.frame(width: width, height: calculatedHeight)
 					.clipped()
+					.onSuccess { image, data, cacheType in
+						// Calculate and store aspect ratio when thumbnail loads
+						if let image = image, let thumbnailURL = mediaItem.thumbnailURL {
+							let aspectRatio = image.size.width / image.size.height
+							DispatchQueue.main.async {
+								imageAspectRatios[thumbnailURL] = aspectRatio
+							}
+						}
+					}
 			} else {
 				Rectangle()
 					.fill(Color.black)
-					.frame(height: imageHeight)
+					.frame(height: calculatedHeight)
 			}
 			
 			// Play Button Overlay
@@ -235,7 +324,7 @@ struct PinterestPostCard: View {
 				}
 			}
 		}
-		.frame(height: imageHeight)
+		.frame(height: calculatedHeight)
 		.onTapGesture {
 			// Handle video tap - could open full screen player
 			playVideo(mediaItem: mediaItem)
@@ -272,6 +361,53 @@ struct PinterestPostCard: View {
 		// This could open a sheet with AVPlayerViewController
 		if let videoURL = mediaItem.videoURL, !videoURL.isEmpty {
 			print("Playing video: \(videoURL)")
+		}
+	}
+	
+	// MARK: - Calculate Image Aspect Ratios
+	private func calculateImageAspectRatios() {
+		// Pre-calculate aspect ratios for all media items using SDWebImage
+		for mediaItem in post.mediaItems {
+			if !mediaItem.isVideo {
+				if let imageURL = mediaItem.imageURL, !imageURL.isEmpty {
+					// Load image to get dimensions
+					Task {
+						if let url = URL(string: imageURL) {
+							// Use SDWebImage to load and get dimensions
+							SDWebImageManager.shared.loadImage(
+								with: url,
+								options: [],
+								progress: nil
+							) { image, data, error, cacheType, finished, imageURL in
+								if let image = image, finished, let imageURL = imageURL {
+									let aspectRatio = image.size.width / image.size.height
+									DispatchQueue.main.async {
+										imageAspectRatios[imageURL.absoluteString] = aspectRatio
+									}
+								}
+							}
+						}
+					}
+				}
+			} else if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty {
+				// For videos, load thumbnail to get aspect ratio
+				Task {
+					if let url = URL(string: thumbnailURL) {
+						SDWebImageManager.shared.loadImage(
+							with: url,
+							options: [],
+							progress: nil
+						) { image, data, error, cacheType, finished, imageURL in
+							if let image = image, finished, let imageURL = imageURL {
+								let aspectRatio = image.size.width / image.size.height
+								DispatchQueue.main.async {
+									imageAspectRatios[thumbnailURL] = aspectRatio
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 }
