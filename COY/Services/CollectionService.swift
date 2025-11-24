@@ -64,7 +64,6 @@ final class CollectionService {
 			ownerId: data["ownerId"] as? String ?? "",
 			ownerName: data["ownerName"] as? String ?? "",
 			owners: data["owners"] as? [String] ?? [data["ownerId"] as? String ?? ""],
-			admins: data["admins"] as? [String],
 			imageURL: data["imageURL"] as? String,
 			invitedUsers: data["invitedUsers"] as? [String] ?? [],
 			members: data["members"] as? [String] ?? [],
@@ -92,9 +91,7 @@ final class CollectionService {
 					thumbnailURL: mediaData["thumbnailURL"] as? String,
 					videoURL: mediaData["videoURL"] as? String,
 					videoDuration: mediaData["videoDuration"] as? Double,
-					isVideo: mediaData["isVideo"] as? Bool ?? false,
-					width: (mediaData["width"] as? Double).map { CGFloat($0) },
-					height: (mediaData["height"] as? Double).map { CGFloat($0) }
+					isVideo: mediaData["isVideo"] as? Bool ?? false
 				)
 			}
 		}
@@ -120,16 +117,24 @@ final class CollectionService {
 			.whereField("ownerId", isEqualTo: userId)
 			.getDocuments()
 		
-		return snapshot.documents.compactMap { doc in
+		return snapshot.documents.compactMap { doc -> CollectionData? in
 			let data = doc.data()
+			let collectionId = doc.documentID
+			let collectionName = data["name"] as? String ?? ""
+			let collectionDescription = data["description"] as? String ?? ""
+			let collectionType = data["type"] as? String ?? "Individual"
+			let collectionIsPublic = data["isPublic"] as? Bool ?? false
+			let collectionOwnerId = data["ownerId"] as? String ?? userId
+			let collectionOwnerName = data["ownerName"] as? String ?? ""
+			
 			return CollectionData(
-				id: doc.documentID,
-				name: data["name"] as? String ?? "",
-				description: data["description"] as? String ?? "",
-				type: data["type"] as? String ?? "Individual",
-				isPublic: data["isPublic"] as? Bool ?? false,
-				ownerId: data["ownerId"] as? String ?? userId,
-				ownerName: data["ownerName"] as? String ?? "",
+				id: collectionId,
+				name: collectionName,
+				description: collectionDescription,
+				type: collectionType,
+				isPublic: collectionIsPublic,
+				ownerId: collectionOwnerId,
+				ownerName: collectionOwnerName,
 				owners: data["owners"] as? [String] ?? [userId],
 				admins: data["admins"] as? [String],
 				imageURL: data["imageURL"] as? String,
@@ -355,7 +360,6 @@ final class CollectionService {
 				ownerId: data["ownerId"] as? String ?? ownerId,
 				ownerName: data["ownerName"] as? String ?? "",
 				owners: data["owners"] as? [String] ?? [ownerId],
-				admins: data["admins"] as? [String],
 				imageURL: data["imageURL"] as? String,
 				invitedUsers: data["invitedUsers"] as? [String] ?? [],
 				members: data["members"] as? [String] ?? [ownerId],
