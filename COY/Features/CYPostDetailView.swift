@@ -233,15 +233,6 @@ struct CYPostDetailView: View {
 				.aspectRatio(contentMode: .fit)
 				.frame(width: screenWidth, height: calculatedHeight)
 				.clipped()
-				.onSuccess { image, data, cacheType in
-					// Calculate and store aspect ratio when image loads
-					if let image = image {
-						let aspectRatio = image.size.width / image.size.height
-						DispatchQueue.main.async {
-							imageAspectRatios[imageURL] = aspectRatio
-						}
-					}
-				}
 		} else {
 			Rectangle()
 				.fill(Color.gray.opacity(0.3))
@@ -266,15 +257,6 @@ struct CYPostDetailView: View {
 					.aspectRatio(contentMode: .fit)
 					.frame(width: screenWidth, height: calculatedHeight)
 					.clipped()
-					.onSuccess { image, data, cacheType in
-						// Calculate and store aspect ratio when thumbnail loads
-						if let image = image, let thumbnailURL = mediaItem.thumbnailURL {
-							let aspectRatio = image.size.width / image.size.height
-							DispatchQueue.main.async {
-								imageAspectRatios[thumbnailURL] = aspectRatio
-							}
-						}
-					}
 			} else {
 				Rectangle()
 					.fill(Color.black)
@@ -372,8 +354,8 @@ struct CYPostDetailView: View {
 							with: url,
 							options: [],
 							progress: nil
-						) { image, data, error, cacheType, finished, imageURL in
-							if let image = image, finished, let imageURL = imageURL {
+						) { image, data, error, cacheType, finished, _ in
+							if let image = image, finished {
 								let aspectRatio = image.size.width / image.size.height
 								DispatchQueue.main.async {
 									imageAspectRatios[thumbnailURL] = aspectRatio

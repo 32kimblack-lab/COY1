@@ -1,6 +1,6 @@
 import Foundation
 import AVKit
-import Combine
+@preconcurrency import Combine
 
 // MARK: - Video Player Manager
 @MainActor
@@ -34,7 +34,7 @@ class VideoPlayerManager: ObservableObject {
 		elapsedTimePublishers[playerId] = elapsedTimeSubject
 		
 		// Observe time updates
-		let timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC)), queue: .main) { [weak self] time in
+		let timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC)), queue: .main) { time in
 			let elapsed = time.seconds
 			elapsedTimeSubject.send(elapsed)
 		}
