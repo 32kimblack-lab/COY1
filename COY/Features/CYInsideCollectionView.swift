@@ -119,7 +119,11 @@ struct CYInsideCollectionView: View {
 		}
 		.sheet(isPresented: Binding(
 			get: { !selectedMedia.isEmpty && !showPhotoPicker },
-			set: { _ in }
+			set: { newValue in
+				if !newValue {
+					selectedMedia = []
+				}
+			}
 		)) {
 			CYCreatePost(
 				selectedMedia: $selectedMedia,
