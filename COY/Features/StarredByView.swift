@@ -1,6 +1,7 @@
 import SwiftUI
 import SDWebImageSwiftUI
 import FirebaseAuth
+import FirebaseFirestore
 
 struct StarredByView: View {
 	let postId: String
@@ -103,7 +104,26 @@ struct StarredByView: View {
 	private func loadStarredByUsers() async {
 		isLoading = true
 		do {
-			let fetchedUsers = try await UpdatesService.shared.fetchStarredByUsers(postId: postId)
+			// Query Firebase for users who have starred this post
+			let db = Firestore.firestore()
+			let usersSnapshot = try await db.collection("users")
+				.whereField("starredPostIds", arrayContains: postId)
+				.getDocuments()
+			
+			// Load user data for each user who starred the post
+			var fetchedUsers: [CYUser] = []
+			for doc in usersSnapshot.documents {
+				let data = doc.data()
+				let userId = doc.documentID
+				
+				fetchedUsers.append(CYUser(
+					id: userId,
+					username: data["username"] as? String ?? "",
+					name: data["name"] as? String ?? "",
+					profileImageURL: data["profileImageURL"] as? String ?? ""
+				))
+			}
+			
 			await MainActor.run {
 				self.users = fetchedUsers
 				self.isLoading = false
