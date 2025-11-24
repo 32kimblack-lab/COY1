@@ -380,10 +380,12 @@ struct CYCollectionMembersView: View {
 			}
 			
 			// Load admins - use updated collection data and filter blocked users
-			let adminIds = updatedCollection.admins ?? []
+			// Admins are stored in owners array (excluding the ownerId)
+			let adminIds = updatedCollection.owners.filter { $0 != updatedCollection.ownerId }
 			var filteredAdminIds: [String] = []
-			for adminId in adminIds where adminId != updatedCollection.ownerId {
-				let isBlocked = await friendService.areUsersMutuallyBlocked(userId1: currentUserId, userId2: adminId)
+			for adminId in adminIds {
+				// Check if user is blocked (mutual block check)
+				let isBlocked = await areUsersMutuallyBlocked(userId1: currentUserId, userId2: adminId)
 				if !isBlocked {
 					filteredAdminIds.append(adminId)
 				}
