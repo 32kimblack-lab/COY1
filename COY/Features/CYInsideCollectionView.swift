@@ -192,10 +192,11 @@ struct CYInsideCollectionView: View {
 	}
 	
 	private var editCollectionSheet: some View {
-		CYEditCollectionView(collection: collection) {
-			loadCollectionData()
-		}
-		.environmentObject(authService)
+		CYEditCollectionView(collection: collection)
+			.environmentObject(authService)
+			.onDisappear {
+				loadCollectionData()
+			}
 	}
 	
 	private var accessViewSheet: some View {
