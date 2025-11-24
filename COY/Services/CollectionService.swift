@@ -136,7 +136,6 @@ final class CollectionService {
 				ownerId: collectionOwnerId,
 				ownerName: collectionOwnerName,
 				owners: data["owners"] as? [String] ?? [userId],
-				admins: data["admins"] as? [String],
 				imageURL: data["imageURL"] as? String,
 				invitedUsers: data["invitedUsers"] as? [String] ?? [],
 				members: data["members"] as? [String] ?? [userId],
