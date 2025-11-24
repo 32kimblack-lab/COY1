@@ -391,9 +391,22 @@ final class CollectionService {
 			print("📤 CollectionService: Starting collection image upload to Firebase Storage...")
 			
 			do {
-				let storageService = await MainActor.run { StorageService.shared }
-				finalImageURL = try await storageService.uploadCollectionImage(image, collectionId: collectionId)
-				print("✅ Collection image uploaded to Firebase Storage: \(finalImageURL ?? "nil")")
+				let storage = Storage.storage()
+				let imageRef = storage.reference().child("collection_images/\(collectionId).jpg")
+				if let imageData = image.jpegData(compressionQuality: 0.8) {
+					try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+						_ = imageRef.putData(imageData, metadata: nil) { metadata, error in
+							if let error = error {
+								continuation.resume(throwing: error)
+							} else {
+								continuation.resume()
+							}
+						}
+					}
+					let downloadURL = try await imageRef.downloadURL()
+					finalImageURL = downloadURL.absoluteString
+					print("✅ Collection image uploaded to Firebase Storage: \(finalImageURL ?? "nil")")
+				}
 			} catch {
 				print("❌ CollectionService: Failed to upload collection image to Firebase Storage: \(error)")
 				throw error
@@ -454,8 +467,7 @@ final class CollectionService {
 			print("⚠️ Could not verify collection update: \(error)")
 		}
 		
-		// Clear collection cache to force fresh load (like edit profile clears cache)
-		CYInsideCollectionCache.shared.clearCache(for: collectionId)
+		// Clear image cache to force fresh load (like edit profile clears cache)
 		if let oldImageURL = imageURL, !oldImageURL.isEmpty {
 			ImageCache.shared.removeImage(for: oldImageURL)
 		}

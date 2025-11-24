@@ -538,8 +538,18 @@ struct CYInsideCollectionView: View {
 			// Sort by caption (if available), otherwise by title
 			if collection.type != "Individual" {
 				sortedUnpinned = unpinnedPosts.sorted { post1, post2 in
-					let name1 = post1.caption ?? post1.title ?? ""
-					let name2 = post2.caption ?? post2.title ?? ""
+					let name1: String = {
+						if let caption = post1.caption, !caption.isEmpty {
+							return caption
+						}
+						return post1.title
+					}()
+					let name2: String = {
+						if let caption = post2.caption, !caption.isEmpty {
+							return caption
+						}
+						return post2.title
+					}()
 					return name1.localizedCaseInsensitiveCompare(name2) == .orderedAscending
 				}
 			} else {
@@ -732,12 +742,22 @@ struct CYInsideCollectionView: View {
 					let isPinned = data["isPinned"] as? Bool ?? false
 					let caption = data["caption"] as? String
 					
+					let titleValue: String = {
+						if let title = data["title"] as? String, !title.isEmpty {
+							return title
+						}
+						return caption ?? ""
+					}()
+					let collectionIdValue = data["collectionId"] as? String ?? ""
+					let authorIdValue = data["authorId"] as? String ?? ""
+					let authorNameValue = data["authorName"] as? String ?? ""
+					
 					return CollectionPost(
 						id: doc.documentID,
-						title: data["title"] as? String ?? caption ?? "",
-						collectionId: data["collectionId"] as? String ?? "",
-						authorId: data["authorId"] as? String ?? "",
-						authorName: data["authorName"] as? String ?? "",
+						title: titleValue,
+						collectionId: collectionIdValue,
+						authorId: authorIdValue,
+						authorName: authorNameValue,
 						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
 						firstMediaItem: firstMediaItem,
 						mediaItems: allMediaItems,
@@ -933,12 +953,22 @@ struct CYInsideCollectionView: View {
 					let isPinned = data["isPinned"] as? Bool ?? false
 					let caption = data["caption"] as? String
 					
+					let titleValue: String = {
+						if let title = data["title"] as? String, !title.isEmpty {
+							return title
+						}
+						return caption ?? ""
+					}()
+					let collectionIdValue = data["collectionId"] as? String ?? ""
+					let authorIdValue = data["authorId"] as? String ?? ""
+					let authorNameValue = data["authorName"] as? String ?? ""
+					
 					return CollectionPost(
 						id: doc.documentID,
-						title: data["title"] as? String ?? caption ?? "",
-						collectionId: data["collectionId"] as? String ?? "",
-						authorId: data["authorId"] as? String ?? "",
-						authorName: data["authorName"] as? String ?? "",
+						title: titleValue,
+						collectionId: collectionIdValue,
+						authorId: authorIdValue,
+						authorName: authorNameValue,
 						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
 						firstMediaItem: firstMediaItem,
 						mediaItems: allMediaItems,

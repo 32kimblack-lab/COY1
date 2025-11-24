@@ -35,8 +35,8 @@ struct CYEditCollectionView: View {
 	
 	private var isCurrentUserAdmin: Bool {
 		guard let currentUserId = authService.user?.uid else { return false }
-		// Check if user is in the admins array
-		return collection.admins?.contains(currentUserId) ?? false
+		// Check if user is in the owners array (admins are stored in owners)
+		return collection.owners.contains(currentUserId) && collection.ownerId != currentUserId
 	}
 	
 	// Owner and Admins can edit collections
@@ -417,9 +417,22 @@ struct CYEditCollectionView: View {
 			var uploadedImageURL: String? = nil
 			if let image = imageToUpload {
 				do {
-					let storageService = await MainActor.run { StorageService.shared }
-					uploadedImageURL = try await storageService.uploadCollectionImage(image, collectionId: collection.id)
-					print("✅ CYEditCollectionView: Image uploaded to Firebase Storage: \(uploadedImageURL ?? "nil")")
+					let storage = Storage.storage()
+					let imageRef = storage.reference().child("collection_images/\(collection.id).jpg")
+					if let imageData = image.jpegData(compressionQuality: 0.8) {
+						try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+							_ = imageRef.putData(imageData, metadata: nil) { metadata, error in
+								if let error = error {
+									continuation.resume(throwing: error)
+								} else {
+									continuation.resume()
+								}
+							}
+						}
+						let downloadURL = try await imageRef.downloadURL()
+						uploadedImageURL = downloadURL.absoluteString
+						print("✅ CYEditCollectionView: Image uploaded to Firebase Storage: \(uploadedImageURL ?? "nil")")
+					}
 				} catch {
 					print("❌ CYEditCollectionView: Failed to upload image: \(error)")
 					// Continue without image - user can retry
@@ -437,8 +450,10 @@ struct CYEditCollectionView: View {
 			// Always send description (even if empty - user might want to clear it)
 			let descriptionToSend: String? = trimmedDescription
 			
-			// CRITICAL FIX: Clear cache BEFORE update (like edit profile does)
-			CYInsideCollectionCache.shared.clearCache(for: collection.id)
+			// CRITICAL FIX: Clear image cache BEFORE update (like edit profile does)
+			if let oldImageURL = collection.imageURL, !oldImageURL.isEmpty {
+				ImageCache.shared.removeImage(for: oldImageURL)
+			}
 			
 			// Update collection with all fields (saves to Firebase)
 			try await CollectionService.shared.updateCollection(
@@ -526,8 +541,12 @@ struct CYEditCollectionView: View {
 				
 				print("📢 CYEditCollectionView: Posted comprehensive collection update notifications")
 				print("   - Collection ID: \(collection.id)")
-				print("   - Name: \(immediateUpdateData["name"] as? String ?? "nil")")
-				print("   - Image URL: \(immediateUpdateData["imageURL"] as? String ?? "nil")")
+				if let name = immediateUpdateData["name"] as? String {
+					print("   - Name: \(name)")
+				}
+				if let imageURL = immediateUpdateData["imageURL"] as? String {
+					print("   - Image URL: \(imageURL)")
+				}
 				
 				isUploading = false
 				isSaving = false
