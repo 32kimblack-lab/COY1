@@ -351,7 +351,7 @@ struct CYCollectionMembersView: View {
 	private func loadMembers() {
 		isLoading = true
 		Task {
-			// CRITICAL FIX: Reload collection from backend to get latest member/admin data
+			// Reload collection from Firebase to get latest member/admin data
 			var updatedCollection = collection
 				if let freshCollection = try? await CollectionService.shared.getCollection(collectionId: collection.id) {
 					updatedCollection = freshCollection
@@ -456,7 +456,7 @@ struct CYCollectionMembersView: View {
 			do {
 				print("🗑️ CYCollectionMembersView: Removing member \(user.id) from collection \(collection.id)")
 				
-				// Use CollectionService which handles both backend API and Firestore
+				// Use CollectionService which handles Firestore operations
 				try await CollectionService.shared.removeMember(collectionId: collection.id, userId: user.id)
 				
 				print("✅ CYCollectionMembersView: Member removed successfully")
@@ -466,7 +466,7 @@ struct CYCollectionMembersView: View {
 					members.removeAll { $0.id == user.id }
 					admins.removeAll { $0.id == user.id }
 					
-					// Reload members to ensure we have the latest data from backend
+					// Reload members to ensure we have the latest data from Firebase
 					loadMembers()
 					
 					isProcessingAction = false
@@ -488,7 +488,7 @@ struct CYCollectionMembersView: View {
 			do {
 				print("👤 CYCollectionMembersView: Promoting member \(user.id) to admin in collection \(collection.id)")
 				
-				// Use CollectionService which handles both backend API and Firestore
+				// Use CollectionService which handles Firestore operations
 				try await CollectionService.shared.promoteToAdmin(collectionId: collection.id, userId: user.id)
 				
 				print("✅ CYCollectionMembersView: Member promoted successfully")
@@ -498,7 +498,7 @@ struct CYCollectionMembersView: View {
 					members.removeAll { $0.id == user.id }
 					admins.append(user)
 					
-					// Reload members to ensure we have the latest data from backend
+					// Reload members to ensure we have the latest data from Firebase
 					loadMembers()
 					
 					isProcessingAction = false

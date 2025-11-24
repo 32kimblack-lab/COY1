@@ -55,7 +55,7 @@ struct ProfileView: View {
 				// Always force fresh load from Firebase (source of truth) when view appears
 				// This ensures we show the latest data, especially after editing
 				if !hasLoadedUserDataOnce {
-					loadUserDataFromBackend()
+					refreshUserData()
 				} else {
 					// Even if we've loaded before, do a quick refresh to ensure we have latest data
 					// This handles the case where user edits profile and comes back
@@ -80,7 +80,7 @@ struct ProfileView: View {
 						}
 						
 						// Then refresh from Firebase to ensure we have latest data
-						loadUserDataFromBackend()
+						refreshUserData()
 					}
 				}
 			}
@@ -91,7 +91,7 @@ struct ProfileView: View {
 			}
 			.refreshable {
 				// Force refresh user data and collections
-				loadUserDataFromBackend()
+				refreshUserData()
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { notification in
 				// Update data in real-time
@@ -116,7 +116,7 @@ struct ProfileView: View {
 					}
 					
 					// Force refresh from Firebase (source of truth) to get latest data including images
-					loadUserDataFromBackend()
+					refreshUserData()
 					
 					// Trigger UI refresh with new IDs for images
 					self.profileRefreshTrigger = UUID()
@@ -533,7 +533,7 @@ struct ProfileView: View {
 	
 	// MARK: - Load User Data from Firebase
 	
-	private func loadUserDataFromBackend() {
+	private func refreshUserData() {
 		guard let userId = authService.user?.uid else {
 			return
 		}

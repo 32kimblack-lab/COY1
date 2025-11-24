@@ -41,7 +41,7 @@ final class CYServiceManager: ObservableObject {
 			throw NSError(domain: "CYServiceManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "No authenticated user"])
 		}
 		
-		// Load from Firebase (source of truth) - not backend
+		// Load from Firebase (source of truth)
 		let db = Firestore.firestore()
 		let doc = try await db.collection("users").document(userId).getDocument()
 		
@@ -59,7 +59,7 @@ final class CYServiceManager: ObservableObject {
 				customCollectionOrder: data["customCollectionOrder"] as? [String] ?? []
 			)
 			
-			// Backend sync removed - using Firebase only
+			// Using Firebase only
 		} else {
 			// Create default user if not found
 			self.currentUser = CurrentUser(

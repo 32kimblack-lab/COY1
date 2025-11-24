@@ -50,7 +50,7 @@ class AuthService: ObservableObject {
 		}
 	}
 	
-	// Backend sync removed - using Firebase only
+	// Using Firebase only
 	
 	deinit {
 		// Check Firebase directly in deinit (not main actor isolated)
@@ -85,7 +85,7 @@ class AuthService: ObservableObject {
 		}
 	}
 	
-	// Backend sync removed - using Firebase only
+	// Using Firebase only
 	
 	func checkProfileSetupStatus(user: FirebaseAuth.User) async {
 		guard let db = self.db else {
@@ -335,7 +335,7 @@ class AuthService: ObservableObject {
 			guard let db = self.db else {
 				print("⚠️ Firestore not available - user document not created in Firestore")
 				isLoading = false
-				return true // Continue anyway - backend will have the user data
+				return true // Continue anyway - Firebase will have the user data
 			}
 			
 			let userData: [String: Any] = [
@@ -523,6 +523,6 @@ class AuthService: ObservableObject {
 
 #if DEBUG
 extension AuthService {
-	// Backend sync removed - using Firebase only
+	// Using Firebase only
 }
 #endif
