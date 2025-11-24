@@ -204,6 +204,8 @@ struct CYPostDetailView: View {
 	}
 	
 	private func getPlayerId(for index: Int, videoURL: String) -> String {
+		// VideoPlayerManager creates playerId as "\(postId)_\(videoURL)"
+		// We pass postId as "\(post.id)_\(index)", so the final playerId is "\(post.id)_\(index)_\(videoURL)"
 		return "\(post.id)_\(index)_\(videoURL)"
 	}
 	
