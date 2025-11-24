@@ -337,13 +337,8 @@ struct CYSignUpOverallProfile: View {
 						UserService.shared.clearUserCache(userId: userId)
 					}
 					
-					// Run backend sync and user reload in parallel
+					// Reload user data
 					await withTaskGroup(of: Void.self) { group in
-						// Add backend sync task (non-throwing)
-						group.addTask {
-							await authService.syncUserToBackendOnLaunch(user: currentUser)
-						}
-						
 						// Add user reload task (throwing)
 						group.addTask {
 							try? await CYServiceManager.shared.loadCurrentUser()

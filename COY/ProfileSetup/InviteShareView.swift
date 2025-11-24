@@ -96,9 +96,9 @@ struct InviteShareView: View {
 								await authService.checkProfileSetupStatus(user: currentUser)
 								print("✅ Profile status checked")
 								
-								// Sync to backend to ensure user data is available
-								await authService.syncUserToBackendOnLaunch(user: currentUser)
-								print("✅ Backend sync completed")
+								// Reload user data from Firebase
+								try? await CYServiceManager.shared.loadCurrentUser()
+								print("✅ User data reloaded")
 							}
 							
 							// Small delay to ensure state updates propagate
