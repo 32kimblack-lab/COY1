@@ -317,6 +317,51 @@ struct SharePostView: View {
 			}
 		}
 	}
+	
+	// MARK: - Chat Helper Functions
+	private func getOrCreateChatRoom(participants: [String]) async throws -> String {
+		let sortedParticipants = participants.sorted()
+		
+		// Try to find existing chat room
+		let existingRooms = try await db.collection("chatRooms")
+			.whereField("participants", isEqualTo: sortedParticipants)
+			.limit(to: 1)
+			.getDocuments()
+		
+		if let existingRoom = existingRooms.documents.first {
+			return existingRoom.documentID
+		}
+		
+		// Create new chat room
+		let newRoomRef = db.collection("chatRooms").document()
+		try await newRoomRef.setData([
+			"participants": sortedParticipants,
+			"createdAt": Timestamp(),
+			"lastMessageAt": Timestamp()
+		])
+		
+		return newRoomRef.documentID
+	}
+	
+	private func sendMessage(chatId: String, type: String, content: String) async throws {
+		guard let currentUserId = Auth.auth().currentUser?.uid else {
+			throw NSError(domain: "SharePostView", code: -1, userInfo: [NSLocalizedDescriptionKey: "User not authenticated"])
+		}
+		
+		let messageRef = db.collection("chatRooms").document(chatId).collection("messages").document()
+		try await messageRef.setData([
+			"senderId": currentUserId,
+			"type": type,
+			"content": content,
+			"createdAt": Timestamp(),
+			"read": false
+		])
+		
+		// Update chat room's last message timestamp
+		try await db.collection("chatRooms").document(chatId).updateData([
+			"lastMessageAt": Timestamp()
+		])
+	}
 }
 
 // MARK: - Share User Model
