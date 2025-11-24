@@ -345,7 +345,7 @@ struct CYSignUpOverallProfile: View {
 						}
 					}
 					
-					print("✅ Backend sync and user reload completed")
+					print("✅ User reload completed")
 					
 					// Post notification to refresh profile views with latest data
 					await MainActor.run {
