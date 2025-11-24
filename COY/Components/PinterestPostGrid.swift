@@ -123,8 +123,13 @@ struct PinterestPostCard: View {
 	// Calculate individual heights for each media item
 	private func calculateHeight(for mediaItem: MediaItem) -> CGFloat {
 		if mediaItem.isVideo {
-			// For videos, use a default aspect ratio (16:9)
-			return width * (9.0 / 16.0)
+			// For videos, use thumbnail aspect ratio if available, otherwise default 16:9
+			if let thumbnailURL = mediaItem.thumbnailURL,
+			   let aspectRatio = imageAspectRatios[thumbnailURL] {
+				return width / aspectRatio
+			} else {
+				return width * (9.0 / 16.0) // Default 16:9
+			}
 		} else if let imageURL = mediaItem.imageURL,
 				  let aspectRatio = imageAspectRatios[imageURL] {
 			// Use calculated aspect ratio
