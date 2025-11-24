@@ -580,20 +580,8 @@ struct EditProfileDesign: View {
 			
 		} catch {
 			await MainActor.run {
-				// Better error handling
-				var errorMsg = "Failed to save profile: \(error.localizedDescription)"
-				if let apiError = error as? APIError {
-					switch apiError {
-					case .httpError(let statusCode, let message):
-						if statusCode == 404 {
-							errorMsg = "User account not found. Please try signing out and back in, or contact support."
-						} else {
-							errorMsg = "Failed to save profile: \(message)"
-						}
-					default:
-						errorMsg = "Failed to save profile: \(error.localizedDescription)"
-					}
-				}
+				// Error handling
+				let errorMsg = "Failed to save profile: \(error.localizedDescription)"
 				self.errorMessage = errorMsg
 				self.showErrorAlert = true
 				self.isLoading = false

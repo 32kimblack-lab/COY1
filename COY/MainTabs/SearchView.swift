@@ -249,17 +249,22 @@ struct SearchView: View {
 					.limit(to: 50)
 					.getDocuments()
 				
-				collections = snapshot.documents.compactMap { doc in
+				collections = snapshot.documents.compactMap { doc -> CollectionData? in
 					let data = doc.data()
+					let ownerId = data["ownerId"] as? String ?? ""
+					let ownersArray = data["owners"] as? [String]
+					let owners = ownersArray ?? [ownerId]
+					let createdAt = (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+					
 					return CollectionData(
 						id: doc.documentID,
 						name: data["name"] as? String ?? "",
 						description: data["description"] as? String ?? "",
 						type: data["type"] as? String ?? "Individual",
 						isPublic: data["isPublic"] as? Bool ?? false,
-						ownerId: data["ownerId"] as? String ?? "",
+						ownerId: ownerId,
 						ownerName: data["ownerName"] as? String ?? "",
-						owners: data["owners"] as? [String] ?? [data["ownerId"] as? String ?? ""],
+						owners: owners,
 						admins: data["admins"] as? [String],
 						imageURL: data["imageURL"] as? String,
 						invitedUsers: data["invitedUsers"] as? [String] ?? [],
@@ -269,7 +274,7 @@ struct SearchView: View {
 						followerCount: data["followerCount"] as? Int ?? 0,
 						allowedUsers: data["allowedUsers"] as? [String] ?? [],
 						deniedUsers: data["deniedUsers"] as? [String] ?? [],
-						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+						createdAt: createdAt
 					)
 				}
 			} catch {
@@ -307,9 +312,7 @@ struct SearchView: View {
 								thumbnailURL: mediaData["thumbnailURL"] as? String,
 								videoURL: mediaData["videoURL"] as? String,
 								videoDuration: mediaData["videoDuration"] as? Double,
-								isVideo: mediaData["isVideo"] as? Bool ?? false,
-								width: (mediaData["width"] as? Double).map { CGFloat($0) },
-								height: (mediaData["height"] as? Double).map { CGFloat($0) }
+								isVideo: mediaData["isVideo"] as? Bool ?? false
 							)
 						}
 					}
