@@ -367,7 +367,7 @@ struct CYCreatePost: View {
 		isLoadingUsers = true
 		do {
 			// TODO: Implement fetchAllUsers - for now using empty array
-			// This would need to be implemented in UserService or APIClient
+			// This would need to be implemented in UserService
 			allUsers = []
 		} catch {
 			print("Error loading users: \(error.localizedDescription)")
@@ -492,7 +492,7 @@ struct CYCreatePost: View {
 				throw NSError(domain: "CYCreatePost", code: -1, userInfo: [NSLocalizedDescriptionKey: "Please select a collection to post in"])
 			}
 			
-			// Create post - saves to Firebase FIRST (like profile images), then syncs to backend
+			// Create post - saves to Firebase (like profile images)
 			let taggedUserIds = taggedFriends.map { $0.id }
 			let postId = try await PostService.shared.createPost(
 				collectionId: targetCollectionId,

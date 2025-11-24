@@ -47,7 +47,7 @@ struct EditProfileDesign: View {
 	@State private var usernameError = ""
 	@State private var isCheckingUsername = false
 	
-	// UserService for backend sync
+		// UserService for Firebase operations
 	private let userService = UserService.shared
 	
 	var body: some View {
@@ -337,7 +337,7 @@ struct EditProfileDesign: View {
 	private func loadUserData() {
 		guard let user = authService.user else { return }
 		
-		// Load from Firebase (source of truth) - not backend
+		// Load from Firebase (source of truth)
 		print("🔄 EditProfile: Loading fresh data from Firebase (source of truth)")
 		
 		// Clear caches to force fresh load
@@ -481,13 +481,13 @@ struct EditProfileDesign: View {
 		}
 		
 		do {
-			// Save to Firebase FIRST (source of truth), then sync to backend
-			print("🔄 Saving profile to Firebase (source of truth)...")
+			// Save to Firebase (source of truth)
+			print("🔄 Saving profile to Firebase...")
 			
 			// Clear UserService cache BEFORE update to ensure fresh data
 			UserService.shared.clearUserCache(userId: user.uid)
 			
-			// Use UserService to update profile (saves to Firebase, then syncs to backend)
+			// Use UserService to update profile (saves to Firebase)
 			let updatedUser = try await userService.updateUserProfile(
 				userId: user.uid,
 				name: nameToSave,
@@ -495,9 +495,9 @@ struct EditProfileDesign: View {
 				profileImage: profileImageToSave,
 				backgroundImage: backgroundImageToSave
 			)
-			print("✅ User profile saved to Firebase and synced to backend")
+			print("✅ User profile saved to Firebase")
 			
-			// Get the URLs returned from backend
+			// Get the URLs returned from Firebase
 			let profileImageURL = updatedUser.profileImageURL
 			let backgroundImageURL = updatedUser.backgroundImageURL
 			
@@ -526,12 +526,12 @@ struct EditProfileDesign: View {
 				print("💾 Pre-cached new background image: \(backgroundImageURL)")
 			}
 			
-			// CRITICAL: Force reload CYServiceManager with fresh data from backend
+			// Force reload CYServiceManager with fresh data from Firebase
 			// This ensures currentUser is updated with the latest URLs
 			print("🔄 Reloading CYServiceManager with fresh data...")
 			try await CYServiceManager.shared.loadCurrentUser()
 			
-			// Verify the update was saved by fetching fresh data from backend again
+			// Verify the update was saved by fetching fresh data from Firebase
 			print("🔍 Verifying update was saved...")
 			let verifiedUser = try await UserService.shared.getUser(userId: user.uid)
 			guard let verifiedUser = verifiedUser else {
@@ -540,13 +540,13 @@ struct EditProfileDesign: View {
 			
 			print("✅ Verified update - Profile URL: \(verifiedUser.profileImageURL ?? "nil"), Background URL: \(verifiedUser.backgroundImageURL ?? "nil")")
 			
-			// Prepare notification data with verified URLs from backend
+			// Prepare notification data with verified URLs from Firebase
 			var immediateUpdateData: [String: Any] = [
 				"name": verifiedUser.name,
 				"username": verifiedUser.username
 			]
 			
-			// Use verified URLs from backend (these are the actual saved URLs)
+			// Use verified URLs from Firebase (these are the actual saved URLs)
 			if let profileImageURL = verifiedUser.profileImageURL, !profileImageURL.isEmpty {
 				immediateUpdateData["profileImageURL"] = profileImageURL
 			}
@@ -561,7 +561,7 @@ struct EditProfileDesign: View {
 					object: nil,
 					userInfo: ["updatedData": immediateUpdateData]
 				)
-				print("📢 Posted profile update notification with verified URLs from backend")
+				print("📢 Posted profile update notification with verified URLs from Firebase")
 				print("   - Name: \(immediateUpdateData["name"] as? String ?? "nil")")
 				print("   - Username: \(immediateUpdateData["username"] as? String ?? "nil")")
 				print("   - Profile URL: \(immediateUpdateData["profileImageURL"] as? String ?? "nil")")

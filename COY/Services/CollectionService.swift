@@ -371,7 +371,7 @@ final class CollectionService {
 		}
 	}
 	
-	// Image upload is now handled by backend API
+	// Image upload is handled by Firebase Storage
 	// No need for direct Firebase Storage upload
 	
 	func updateCollection(
@@ -466,7 +466,7 @@ final class CollectionService {
 				"collectionId": collectionId
 			]
 			
-			// Use verified data from backend if available, otherwise use what we sent
+			// Use verified data from Firebase if available, otherwise use what we sent
 			if let verified = verifiedCollection {
 				updateData["name"] = verified.name
 				updateData["description"] = verified.description ?? ""

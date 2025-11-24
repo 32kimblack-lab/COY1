@@ -257,7 +257,7 @@ class StarredViewModel: ObservableObject {
 			return
 		}
 		
-		// Load actual collection from backend
+		// Load actual collection from Firebase
 		do {
 			if let collection = try await CollectionService.shared.getCollection(collectionId: post.collectionId) {
 				await MainActor.run {

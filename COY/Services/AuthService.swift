@@ -212,7 +212,7 @@ class AuthService: ObservableObject {
 			let result = try await auth.signIn(withEmail: email, password: password)
 			user = result.user
 			
-			// Sync to backend
+			// User data saved to Firebase
 			isLoading = false
 			return true
 		} catch {
@@ -253,7 +253,7 @@ class AuthService: ObservableObject {
 				}.value
 			} else {
 				print("⚠️ Firestore not available - user document not created in Firestore")
-				// Continue anyway - backend will have the user data
+				// Continue anyway - user data is in Firebase
 			}
 			
 			self.user = user
@@ -309,7 +309,7 @@ class AuthService: ObservableObject {
 			let result = try await auth.signIn(with: credential)
 			user = result.user
 			
-			// Sync to backend
+			// User data saved to Firebase
 			isLoading = false
 			return true
 		} catch {

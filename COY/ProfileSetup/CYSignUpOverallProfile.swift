@@ -321,7 +321,7 @@ struct CYSignUpOverallProfile: View {
 			print("✅ Profile complete - navigating to invite screen")
 			
 			// Navigate to invite screen (user can skip if they want)
-			// Heavy operations (backend sync, user reload) will happen in background
+			// Heavy operations (user reload) will happen in background
 			await MainActor.run {
 				self.isLoading = false
 				self.navigateToInvite = true

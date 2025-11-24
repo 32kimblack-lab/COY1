@@ -292,7 +292,7 @@ struct CYAccessView: View {
 				
 				// Load all users using UserService (off main thread)
 				// Note: UserService.getAllUsers() still uses Firestore to get user list
-				// until backend has a search/list users endpoint
+				// until we have a search/list users endpoint
 				let allUsersList = try await Task.detached(priority: .userInitiated) {
 					try await UserService.shared.getAllUsers()
 				}.value
@@ -322,8 +322,7 @@ struct CYAccessView: View {
 	private func loadCurrentAccessUsers() {
 		Task {
 			do {
-				// CRITICAL FIX: Load collection access data from backend API (source of truth)
-				// Backend returns allowedUsers and deniedUsers in the collection response
+				// Load collection access data from Firebase
 				guard let updatedCollection = try await CollectionService.shared.getCollection(collectionId: collection.id) else {
 					print("⚠️ CYAccessView: Collection not found")
 					return
@@ -332,7 +331,7 @@ struct CYAccessView: View {
 				let allowedUsers = updatedCollection.allowedUsers
 				let deniedUsers = updatedCollection.deniedUsers
 				
-				print("✅ CYAccessView: Loaded access data from backend")
+				print("✅ CYAccessView: Loaded access data from Firebase")
 				print("   - Allowed users: \(allowedUsers.count)")
 				print("   - Denied users: \(deniedUsers.count)")
 				
@@ -342,29 +341,7 @@ struct CYAccessView: View {
 					self.selectedUserIds = Set(accessField)
 				}
 			} catch {
-				print("⚠️ CYAccessView: Error loading current access users from backend: \(error)")
-				// Fallback to Firestore if backend fails
-				do {
-					let db = Firestore.firestore()
-					let doc = try await db.collection("collections").document(collection.id).getDocument()
-					
-					guard let data = doc.data() else {
-						print("⚠️ CYAccessView: Collection document not found in Firestore")
-						return
-					}
-					
-					let allowedUsers = data["allowedUsers"] as? [String] ?? []
-					let deniedUsers = data["deniedUsers"] as? [String] ?? []
-					
-					let accessField = isPrivateCollection ? allowedUsers : deniedUsers
-					await MainActor.run {
-						self.currentAccessUsers = accessField
-						self.selectedUserIds = Set(accessField)
-					}
-					print("✅ CYAccessView: Loaded access data from Firestore fallback")
-				} catch {
-					print("❌ CYAccessView: Error loading from Firestore fallback: \(error)")
-				}
+				print("⚠️ CYAccessView: Error loading current access users: \(error)")
 			}
 		}
 	}
@@ -373,12 +350,11 @@ struct CYAccessView: View {
 		isSaving = true
 		
 		do {
-			// CRITICAL FIX: Always send arrays, even if empty
-			// Backend might require the field to be present
+			// Always send arrays, even if empty
 			let allowedUsersArray = Array(selectedUserIds)
 			let deniedUsersArray = Array(selectedUserIds)
 			
-			// Save access changes via backend API
+			// Save access changes via Firebase
 			if isPrivateCollection {
 				// For private collections, update allowedUsers
 				// CRITICAL: Send empty array if no users selected, don't send nil

@@ -427,7 +427,7 @@ struct CYEditCollectionView: View {
 			}
 			
 			// CRITICAL FIX: Always send name and description if they're being edited
-			// Backend needs the fields to be present to update them properly
+			// Fields need to be present to update them properly
 			let trimmedName = collectionName.trimmingCharacters(in: .whitespacesAndNewlines)
 			let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
 			
@@ -440,7 +440,7 @@ struct CYEditCollectionView: View {
 			// CRITICAL FIX: Clear cache BEFORE update (like edit profile does)
 			CYInsideCollectionCache.shared.clearCache(for: collection.id)
 			
-			// Update collection with all fields (saves to Firebase first, then syncs to backend)
+			// Update collection with all fields (saves to Firebase)
 			try await CollectionService.shared.updateCollection(
 				collectionId: collection.id,
 				name: nameToSend,

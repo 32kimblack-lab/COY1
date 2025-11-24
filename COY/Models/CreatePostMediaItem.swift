@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-// Local MediaItem for create post (before upload to backend)
+// Local MediaItem for create post (before upload to Firebase)
 struct CreatePostMediaItem: Identifiable {
 	let id = UUID()
 	var image: UIImage?

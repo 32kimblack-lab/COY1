@@ -467,7 +467,7 @@ struct ProfileView: View {
 				// Load current user to get their custom order
 				try await CYServiceManager.shared.loadCurrentUser()
 				
-				// Always fetch fresh collections from backend (don't use cache)
+				// Always fetch fresh collections from Firebase (don't use cache)
 				// This ensures newly created collections are included
 				let userCollections = try await CollectionService.shared.getUserCollections(userId: userId, forceFresh: true)
 				
@@ -531,7 +531,7 @@ struct ProfileView: View {
 		}
 	}
 	
-	// MARK: - Load User Data from Backend
+	// MARK: - Load User Data from Firebase
 	
 	private func loadUserDataFromBackend() {
 		guard let userId = authService.user?.uid else {
@@ -549,7 +549,7 @@ struct ProfileView: View {
 				// Clear cache to force fresh data from Firebase (source of truth)
 				UserService.shared.clearUserCache(userId: userId)
 				
-				// Load from Firebase (source of truth) - not backend
+				// Load from Firebase (source of truth)
 				let user = try await UserService.shared.getUser(userId: userId)
 				
 				// Also load CYServiceManager data for preferences
