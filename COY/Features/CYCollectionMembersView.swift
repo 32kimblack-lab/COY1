@@ -370,7 +370,7 @@ struct CYCollectionMembersView: View {
 			
 			// Check owner - use mutual blocking
 			var loadedOwner: User? = nil
-			let isOwnerBlocked = await friendService.areUsersMutuallyBlocked(userId1: currentUserId, userId2: updatedCollection.ownerId)
+			let isOwnerBlocked = await areUsersMutuallyBlocked(userId1: currentUserId, userId2: updatedCollection.ownerId)
 			if !isOwnerBlocked {
 				do {
 					loadedOwner = try await UserService.shared.getUser(userId: updatedCollection.ownerId)
