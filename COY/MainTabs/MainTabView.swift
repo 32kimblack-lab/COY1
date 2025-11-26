@@ -10,6 +10,7 @@ struct MainTabView: View {
 		TabView(selection: $selectedTab) {
 			// Home
 			CYHome()
+				.phoneSizeContainer()
 				.tabItem {
 					Image(systemName: selectedTab == 0 ? "house.fill" : "house")
 					Text("Home")
@@ -18,6 +19,8 @@ struct MainTabView: View {
 
 			// Search
 			SearchView()
+				.environmentObject(authService)
+				.phoneSizeContainer()
 				.tabItem {
 					Image(systemName: selectedTab == 1 ? "magnifyingglass.circle.fill" : "magnifyingglass.circle")
 					Text("Search")
@@ -34,6 +37,7 @@ struct MainTabView: View {
 
 			// Messages
 			MessagesView()
+				.phoneSizeContainer()
 				.tabItem {
 					Image(systemName: selectedTab == 3 ? "message.fill" : "message")
 					Text("Messages")
@@ -42,6 +46,7 @@ struct MainTabView: View {
 
 			// Profile
 			ProfileView()
+				.phoneSizeContainer()
 				.tabItem {
 					Image(systemName: selectedTab == 4 ? "person.fill" : "person")
 					Text("Profile")

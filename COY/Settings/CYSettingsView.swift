@@ -9,7 +9,8 @@ struct CYSettingsView: View {
 	
 	var body: some View {
 		NavigationStack {
-			ScrollView {
+			PhoneSizeContainer {
+				ScrollView {
 				settingsContent
 			}
 			.navigationTitle("Settings")
@@ -22,6 +23,7 @@ struct CYSettingsView: View {
 							.foregroundColor(colorScheme == .dark ? .white : .black)
 					}
 				}
+			}
 			}
 		}
 		.background(colorScheme == .dark ? Color.black : Color.white)

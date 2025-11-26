@@ -1,6 +1,7 @@
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
+import SDWebImageSwiftUI
 
 struct CYAccessView: View {
 	let collection: CollectionData
@@ -9,33 +10,40 @@ struct CYAccessView: View {
 	@EnvironmentObject var authService: AuthService
 	
 	@State private var searchText = ""
-	@State private var selectedUserIds: Set<String> = []
 	@State private var allUsers: [User] = []
 	@State private var isLoading = false
 	@State private var isSaving = false
 	@State private var showError = false
 	@State private var errorMessage = ""
-	@State private var currentAccessUsers: [String] = []
+	@State private var selectedUsers: Set<String> = []
 	
-	// Determine if this is for allowing access (private) or denying access (public)
+	// Determine if this is for allowing (private) or denying (public)
 	private var isPrivateCollection: Bool {
 		!collection.isPublic
 	}
 	
-	private var accessTitle: String {
-		isPrivateCollection ? "Allow Access" : "Limit Viewers"
+	private var titleText: String {
+		isPrivateCollection ? "Allow Access" : "Deny Access"
 	}
 	
-	private var accessDescription: String {
-		isPrivateCollection 
-			? "Allow access to users without giving them membership or ownership"
-			: "Limit viewers to viewing this collection without making it private"
+	private var descriptionText: String {
+		if isPrivateCollection {
+			return "Select users to allow access to this private collection. They will be able to see it everywhere."
+		} else {
+			return "Select users to deny access to this public collection. They will not be able to see it anywhere."
+		}
+	}
+	
+	private var buttonText: String {
+		"Update"
 	}
 	
 	private var filteredUsers: [User] {
 		let availableUsers = allUsers.filter { user in
-			// Filter out current collection members and owner
-			!collection.members.contains(user.id) && user.id != collection.ownerId
+			// Filter out current collection members, owner, and admins
+			!collection.members.contains(user.id) && 
+			user.id != collection.ownerId &&
+			!collection.owners.contains(user.id)
 		}
 		
 		if searchText.isEmpty {
@@ -48,14 +56,9 @@ struct CYAccessView: View {
 		}
 	}
 	
-	// Check if there are any changes from the original access users
-	private var hasChanges: Bool {
-		let currentSet = Set(currentAccessUsers)
-		return selectedUserIds != currentSet
-	}
-	
 	var body: some View {
-		ZStack {
+		PhoneSizeContainer {
+			ZStack {
 			(colorScheme == .dark ? Color.black : Color.white)
 				.ignoresSafeArea()
 			
@@ -71,36 +74,14 @@ struct CYAccessView: View {
 					
 					Spacer()
 					
-					Text(accessTitle)
+					Text(titleText)
 						.font(.system(size: 18, weight: .bold))
 						.foregroundColor(colorScheme == .dark ? .white : .black)
 					
 					Spacer()
 					
-					// Done button - show when there are changes
-					if hasChanges {
-						Button(action: {
-							Task {
-								await saveAccessChanges()
-							}
-						}) {
-							if isSaving {
-								ProgressView()
-									.scaleEffect(0.8)
-									.frame(width: 44, height: 44)
-							} else {
-								Text("Done")
-									.font(.system(size: 16, weight: .semibold))
-									.foregroundColor(.blue)
-									.frame(width: 44, height: 44)
-							}
-						}
-						.disabled(isSaving)
-					} else {
-						// Invisible spacer to center the title when no changes
-						Color.clear
-							.frame(width: 44, height: 44)
-					}
+					Color.clear
+						.frame(width: 44, height: 44)
 				}
 				.padding(.horizontal, 16)
 				.padding(.top, 20)
@@ -114,7 +95,7 @@ struct CYAccessView: View {
 					VStack(spacing: 0) {
 						// Description
 						VStack(alignment: .leading, spacing: 8) {
-							Text(accessDescription)
+							Text(descriptionText)
 								.font(.subheadline)
 								.foregroundColor(.gray)
 								.multilineTextAlignment(.leading)
@@ -151,7 +132,7 @@ struct CYAccessView: View {
 									.foregroundColor(colorScheme == .dark ? .white : .black)
 								
 								Text(searchText.isEmpty 
-									 ? "All users are already members or have access"
+									 ? "All users are already members or admins"
 									 : "No users match your search")
 									.font(.subheadline)
 									.foregroundColor(.gray)
@@ -169,39 +150,29 @@ struct CYAccessView: View {
 							}
 						}
 						
-						// Bottom save button (alternative to header Done button)
-						// Show when there are changes and we want a more prominent save button
-						if hasChanges {
+						// Save Button
+						VStack(spacing: 0) {
+							Divider()
+								.padding(.bottom, 12)
+							
 							Button(action: {
 								Task {
 									await saveAccessChanges()
 								}
 							}) {
-								HStack {
-									if isSaving {
-										ProgressView()
-											.scaleEffect(0.8)
-											.foregroundColor(.white)
-									} else {
-										Image(systemName: isPrivateCollection ? "checkmark.circle" : "xmark.circle")
-											.font(.system(size: 16, weight: .medium))
-										
-										Text("Save Changes")
-											.font(.system(size: 16, weight: .semibold))
-									}
-								}
-								.foregroundColor(.white)
-								.frame(maxWidth: .infinity)
-								.padding(.vertical, 16)
-								.background(
-									RoundedRectangle(cornerRadius: 12)
-										.fill(isPrivateCollection ? Color.green : Color.red)
-								)
-								.padding(.horizontal, 16)
+								Text(buttonText)
+									.font(.system(size: 16, weight: .semibold))
+									.foregroundColor(.white)
+									.frame(maxWidth: .infinity)
+									.padding(.vertical, 14)
+									.background(isSaving ? Color.gray : Color.blue)
+									.cornerRadius(12)
 							}
 							.disabled(isSaving)
+							.padding(.horizontal, 16)
 							.padding(.bottom, 20)
 						}
+						.background(colorScheme == .dark ? Color.black : Color.white)
 					}
 				}
 			}
@@ -210,15 +181,15 @@ struct CYAccessView: View {
 		.navigationBarBackButtonHidden(true)
 		.toolbar(.hidden, for: .navigationBar)
 		.onAppear {
-			// Defensive check: Only owners can manage access
 			if !isCurrentUserOwner {
-				print("⚠️ CYAccessView: Non-owner attempted to access access view - dismissing")
+				print("⚠️ CYAccessView: Non-owner attempted to access - dismissing")
 				dismiss()
 				return
 			}
 			loadUsers()
-			loadCurrentAccessUsers()
+			loadCurrentAccess()
 		}
+			}
 		.alert("Error", isPresented: $showError) {
 			Button("OK", role: .cancel) { }
 		} message: {
@@ -229,8 +200,35 @@ struct CYAccessView: View {
 	// MARK: - User Row
 	private func userRow(user: User) -> some View {
 		HStack(spacing: 12) {
+			// Checkbox/Circle
+			Button(action: {
+				if selectedUsers.contains(user.id) {
+					selectedUsers.remove(user.id)
+				} else {
+					selectedUsers.insert(user.id)
+				}
+			}) {
+				ZStack {
+					Circle()
+						.stroke(selectedUsers.contains(user.id) ? (isPrivateCollection ? Color.green : Color.red) : Color.gray, lineWidth: 2)
+						.frame(width: 24, height: 24)
+					
+					if selectedUsers.contains(user.id) {
+						Circle()
+							.fill(isPrivateCollection ? Color.green : Color.red)
+							.frame(width: 16, height: 16)
+					}
+				}
+			}
+			.buttonStyle(.plain)
+			
 			// Profile Image
-			CachedProfileImageView(url: user.profileImageURL ?? "", size: 50)
+			if let imageURL = user.profileImageURL, !imageURL.isEmpty {
+				CachedProfileImageView(url: imageURL, size: 50)
+					.clipShape(Circle())
+			} else {
+				DefaultProfileImageView(size: 50)
+			}
 			
 			// User Info
 			VStack(alignment: .leading, spacing: 2) {
@@ -244,21 +242,6 @@ struct CYAccessView: View {
 			}
 			
 			Spacer()
-			
-			// Selection Toggle
-			Button(action: {
-				if selectedUserIds.contains(user.id) {
-					selectedUserIds.remove(user.id)
-				} else {
-					selectedUserIds.insert(user.id)
-				}
-			}) {
-				Image(systemName: selectedUserIds.contains(user.id) ? "checkmark.circle.fill" : "circle")
-					.font(.system(size: 24))
-					.foregroundColor(selectedUserIds.contains(user.id) 
-								   ? (isPrivateCollection ? .green : .red)
-								   : .gray)
-			}
 		}
 		.padding(.horizontal, 16)
 		.padding(.vertical, 12)
@@ -268,13 +251,20 @@ struct CYAccessView: View {
 		)
 		.padding(.horizontal, 16)
 		.padding(.vertical, 4)
+		.contentShape(Rectangle())
+		.onTapGesture {
+			// Toggle selection when tapping anywhere on the row
+			if selectedUsers.contains(user.id) {
+				selectedUsers.remove(user.id)
+			} else {
+				selectedUsers.insert(user.id)
+			}
+		}
 	}
 	
 	// MARK: - Computed Properties
-	
 	private var isCurrentUserOwner: Bool {
 		guard let currentUserId = authService.user?.uid else { return false }
-		// Check if user is the original creator OR is in the owners array (promoted)
 		return collection.ownerId == currentUserId || collection.owners.contains(currentUserId)
 	}
 	
@@ -283,26 +273,20 @@ struct CYAccessView: View {
 		isLoading = true
 		Task {
 			do {
-				// Load current user to get blocked users list
 				try await CYServiceManager.shared.loadCurrentUser()
-				
-				// Get blocked users list
 				let blockedUserIds = CYServiceManager.shared.getBlockedUsers()
-				print("🚫 CYAccessView: Filtering out \(blockedUserIds.count) blocked users")
 				
-				// Load all users using UserService (off main thread)
-				// Note: UserService.getAllUsers() still uses Firestore to get user list
-				// until we have a search/list users endpoint
 				let allUsersList = try await Task.detached(priority: .userInitiated) {
 					try await UserService.shared.getAllUsers()
 				}.value
 				
-				// Filter out blocked users and users already in collection (efficient)
 				let blockedSet = Set(blockedUserIds)
 				let membersSet = Set(collection.members)
+				let ownersSet = Set(collection.owners)
 				let filteredUsers = allUsersList.filter { user in
 					!blockedSet.contains(user.id) &&
 					!membersSet.contains(user.id) &&
+					!ownersSet.contains(user.id) &&
 					user.id != collection.ownerId
 				}
 				
@@ -319,116 +303,83 @@ struct CYAccessView: View {
 		}
 	}
 	
-	private func loadCurrentAccessUsers() {
+	private func loadCurrentAccess() {
 		Task {
 			do {
-				// Load collection access data from Firebase
 				guard let updatedCollection = try await CollectionService.shared.getCollection(collectionId: collection.id) else {
-					print("⚠️ CYAccessView: Collection not found")
 					return
 				}
 				
-				let allowedUsers = updatedCollection.allowedUsers
-				let deniedUsers = updatedCollection.deniedUsers
-				
-				print("✅ CYAccessView: Loaded access data from Firebase")
-				print("   - Allowed users: \(allowedUsers.count)")
-				print("   - Denied users: \(deniedUsers.count)")
-				
-				let accessField = isPrivateCollection ? allowedUsers : deniedUsers
 				await MainActor.run {
-					self.currentAccessUsers = accessField
-					self.selectedUserIds = Set(accessField)
+					// Load current selections based on collection type
+					if isPrivateCollection {
+						// For private: show users who are currently allowed
+						self.selectedUsers = Set(updatedCollection.allowedUsers)
+					} else {
+						// For public: show users who are currently denied
+						self.selectedUsers = Set(updatedCollection.deniedUsers)
+					}
 				}
 			} catch {
-				print("⚠️ CYAccessView: Error loading current access users: \(error)")
+				print("⚠️ CYAccessView: Error loading current access: \(error)")
 			}
 		}
 	}
 	
 	private func saveAccessChanges() async {
 		isSaving = true
-		
 		do {
-			// Always send arrays, even if empty
-			let allowedUsersArray = Array(selectedUserIds)
-			let deniedUsersArray = Array(selectedUserIds)
-			
-			// Save access changes via Firebase
-			if isPrivateCollection {
-				// For private collections, update allowedUsers
-				// CRITICAL: Send empty array if no users selected, don't send nil
-				try await CollectionService.shared.updateCollection(
-					collectionId: collection.id,
-					name: nil,
-					description: nil,
-					image: nil,
-					imageURL: nil,
-					isPublic: nil,  // Don't change visibility
-					allowedUsers: allowedUsersArray,  // Always send array, even if empty
-					deniedUsers: nil  // Don't update deniedUsers for private collections
-				)
-			} else {
-				// For public collections, update deniedUsers
-				// CRITICAL: Send empty array if no users selected, don't send nil
-				try await CollectionService.shared.updateCollection(
-					collectionId: collection.id,
-					name: nil,
-					description: nil,
-					image: nil,
-					imageURL: nil,
-					isPublic: nil,  // Don't change visibility
-					allowedUsers: nil,  // Don't update allowedUsers for public collections
-					deniedUsers: deniedUsersArray  // Always send array, even if empty
-				)
-			}
-			
-			// CRITICAL FIX: Verify update was saved (like edit profile)
-			print("🔍 Verifying access changes were saved...")
-			let verifiedCollection = try await CollectionService.shared.getCollection(collectionId: collection.id)
-			guard let verifiedCollection = verifiedCollection else {
-				throw NSError(domain: "AccessUpdateError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to verify access update"])
-			}
-			
-			let verifiedAllowedUsers = verifiedCollection.allowedUsers
-			let verifiedDeniedUsers = verifiedCollection.deniedUsers
-			
-			print("✅ Verified access update - Allowed: \(verifiedAllowedUsers.count), Denied: \(verifiedDeniedUsers.count)")
-			
-			// CRITICAL FIX: Post comprehensive notifications with verified data (like edit profile)
-			await MainActor.run {
-				// Build update data with verified access changes from Firebase
-				var updateData: [String: Any] = [
-					"collectionId": collection.id
-				]
-				
-				if isPrivateCollection {
-					updateData["allowedUsers"] = verifiedAllowedUsers
-				} else {
-					updateData["deniedUsers"] = verifiedDeniedUsers
+			// Get current state
+			guard let updatedCollection = try await CollectionService.shared.getCollection(collectionId: collection.id) else {
+				await MainActor.run {
+					errorMessage = "Failed to load collection"
+					showError = true
+					isSaving = false
 				}
+				return
+			}
+			
+			var newAllowedUsers = updatedCollection.allowedUsers
+			var newDeniedUsers = updatedCollection.deniedUsers
+			
+			if isPrivateCollection {
+				// For private collections: selected users go to allowedUsers
+				// Remove all users from allowedUsers first, then add selected ones
+				newAllowedUsers = Array(selectedUsers)
+				// Remove selected users from deniedUsers (in case they were denied before)
+				newDeniedUsers.removeAll { selectedUsers.contains($0) }
+			} else {
+				// For public collections: selected users go to deniedUsers
+				// Remove all users from deniedUsers first, then add selected ones
+				newDeniedUsers = Array(selectedUsers)
+				// Remove selected users from allowedUsers (in case they were allowed before)
+				newAllowedUsers.removeAll { selectedUsers.contains($0) }
+			}
+			
+			// Update collection
+			try await CollectionService.shared.updateCollection(
+				collectionId: collection.id,
+				name: nil,
+				description: nil,
+				image: nil,
+				imageURL: nil,
+				isPublic: nil,
+				allowedUsers: newAllowedUsers,
+				deniedUsers: newDeniedUsers
+			)
+			
+			await MainActor.run {
+				self.isSaving = false
 				
-				// Post CollectionUpdated with verified access data
+				// Post notification to refresh views
 				NotificationCenter.default.post(
 					name: NSNotification.Name("CollectionUpdated"),
-					object: collection.id,
-					userInfo: ["updatedData": updateData]
+					object: collection.id
 				)
 				
-				// Post ProfileUpdated to refresh profile views (collections list)
-				NotificationCenter.default.post(
-					name: NSNotification.Name("ProfileUpdated"),
-					object: nil,
-					userInfo: ["updatedData": ["collectionId": collection.id]]
-				)
-				
-				print("📢 CYAccessView: Posted comprehensive collection update notifications")
-				print("   - Collection ID: \(collection.id)")
-				print("   - Verified access: \(isPrivateCollection ? "allowedUsers" : "deniedUsers") = \(isPrivateCollection ? verifiedAllowedUsers.count : verifiedDeniedUsers.count) users")
-				
+				// Dismiss the view
 				dismiss()
 			}
-			
 		} catch {
 			await MainActor.run {
 				errorMessage = error.localizedDescription
@@ -438,4 +389,3 @@ struct CYAccessView: View {
 		}
 	}
 }
-

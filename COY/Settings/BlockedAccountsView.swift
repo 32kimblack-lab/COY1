@@ -8,7 +8,8 @@ struct BlockedAccountsView: View {
 	@StateObject private var viewModel = BlockedAccountsViewModel()
 	
 	var body: some View {
-		VStack(spacing: 0) {
+		PhoneSizeContainer {
+			VStack(spacing: 0) {
 			// Header
 			HStack {
 				Button(action: { presentationMode.wrappedValue.dismiss() }) {
@@ -73,6 +74,7 @@ struct BlockedAccountsView: View {
 				}
 				.listStyle(PlainListStyle())
 			}
+			}
 		}
 		.background(colorScheme == .dark ? Color.black : Color.white)
 		.navigationBarBackButtonHidden(true)
@@ -114,13 +116,7 @@ struct BlockedUserRow: View {
 				CachedProfileImageView(url: user.profileImageURL, size: 60)
 					.clipShape(Circle())
 			} else {
-				Circle()
-					.fill(Color.gray.opacity(0.3))
-					.frame(width: 60, height: 60)
-					.overlay(
-						Image(systemName: "person.fill")
-							.foregroundColor(.gray)
-					)
+				DefaultProfileImageView(size: 60)
 			}
 			
 			// User info

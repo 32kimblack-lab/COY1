@@ -170,21 +170,7 @@ struct CYSignUpBackgroundimage: View {
 					.offset(y: 35)
 					.zIndex(1)
 			} else {
-				Circle()
-					.fill(Color.gray.opacity(0.2))
-					.frame(width: 70, height: 70)
-					.overlay {
-						Image(systemName: "person.crop.circle.fill")
-							.resizable()
-							.scaledToFit()
-							.frame(width: 70, height: 70)
-							.foregroundColor(.gray)
-							.opacity(0.8)
-					}
-					.overlay(
-						Circle()
-							.stroke(Color.white, lineWidth: 2)
-					)
+				DefaultProfileImageView(size: 70)
 					.offset(y: 35)
 					.zIndex(1)
 			}

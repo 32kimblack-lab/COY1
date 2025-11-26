@@ -640,7 +640,7 @@ struct CompactUserRowView: View {
 					image.resizable()
 						.aspectRatio(contentMode: .fill)
 				} placeholder: {
-					Circle().fill(Color.gray.opacity(0.3))
+					DefaultProfileImageView(size: 44)
 				}
 				.frame(width: 44, height: 44)
 				.clipShape(Circle())
@@ -690,7 +690,7 @@ struct TaggedFriendView: View {
 					image.resizable()
 						.aspectRatio(contentMode: .fill)
 				} placeholder: {
-					Circle().fill(Color.gray.opacity(0.3))
+					DefaultProfileImageView(size: 24)
 				}
 				.frame(width: 24, height: 24)
 				.clipShape(Circle())
@@ -742,20 +742,32 @@ struct CustomPhotoPickerView: UIViewControllerRepresentable {
 	
 	class Coordinator: NSObject, PHPickerViewControllerDelegate {
 		let parent: CustomPhotoPickerView
+		private var isProcessing = false // Prevent duplicate processing
 		
 		init(_ parent: CustomPhotoPickerView) {
 			self.parent = parent
 		}
 		
 		func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+			// Prevent duplicate processing if already processing
+			guard !isProcessing else {
+				print("⚠️ CustomPhotoPickerView: Already processing, ignoring duplicate call")
+				return
+			}
+			
+			isProcessing = true
+			
 			Task {
+				await MainActor.run {
 				parent.isProcessingMedia = true
+				}
 				
 				if results.isEmpty {
 					// User cancelled - dismiss picker
 					await MainActor.run {
 						parent.dismiss()
 						parent.isProcessingMedia = false
+						self.isProcessing = false
 					}
 				} else {
 					// User selected media - load the results
@@ -763,6 +775,7 @@ struct CustomPhotoPickerView: UIViewControllerRepresentable {
 					await MainActor.run {
 						parent.dismiss()
 						parent.isProcessingMedia = false
+						self.isProcessing = false
 					}
 				}
 			}
@@ -809,7 +822,36 @@ struct CustomPhotoPickerView: UIViewControllerRepresentable {
 				// Only add up to the 5-item limit
 				let itemsToAdd = min(newItems.count, 5 - parent.selectedMedia.count)
 				if itemsToAdd > 0 {
-					parent.selectedMedia.append(contentsOf: Array(newItems.prefix(itemsToAdd)))
+					// Prevent duplicate items by checking if they already exist
+					let existingIds = Set(parent.selectedMedia.map { item in
+						// Create a unique identifier for each media item
+						if let videoURL = item.videoURL {
+							return videoURL.absoluteString
+						} else if let image = item.image {
+							// Use image data hash as identifier
+							return image.pngData()?.base64EncodedString() ?? UUID().uuidString
+						}
+						return UUID().uuidString
+					})
+					
+					// Filter out duplicates
+					let uniqueNewItems = newItems.filter { item in
+						let itemId: String
+						if let videoURL = item.videoURL {
+							itemId = videoURL.absoluteString
+						} else if let image = item.image {
+							itemId = image.pngData()?.base64EncodedString() ?? UUID().uuidString
+						} else {
+							return false // Skip invalid items
+						}
+						return !existingIds.contains(itemId)
+					}
+					
+					// Only add unique items up to the limit
+					let finalItemsToAdd = min(uniqueNewItems.count, 5 - parent.selectedMedia.count)
+					if finalItemsToAdd > 0 {
+						parent.selectedMedia.append(contentsOf: Array(uniqueNewItems.prefix(finalItemsToAdd)))
+					}
 				}
 			}
 		}

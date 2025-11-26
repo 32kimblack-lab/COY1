@@ -14,7 +14,8 @@ struct HiddenCollectionsView: View {
 	@State private var userListener: ListenerRegistration?
 	
 	var body: some View {
-		VStack(spacing: 0) {
+		PhoneSizeContainer {
+			VStack(spacing: 0) {
 			// Header
 			HStack {
 				Button(action: { presentationMode.wrappedValue.dismiss() }) {
@@ -80,6 +81,7 @@ struct HiddenCollectionsView: View {
 			}
 		}
 		.background(colorScheme == .dark ? Color.black : Color.white)
+			}
 		.navigationBarBackButtonHidden(true)
 		.navigationTitle("")
 		.toolbar(.hidden, for: .tabBar)

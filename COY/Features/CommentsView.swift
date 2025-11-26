@@ -25,7 +25,8 @@ struct CommentsView: View {
 	
 	var body: some View {
 		NavigationStack {
-			ZStack {
+			PhoneSizeContainer {
+				ZStack {
 				// Background
 				Color(colorScheme == .dark ? .black : .white)
 					.ignoresSafeArea()
@@ -152,6 +153,7 @@ struct CommentsView: View {
 					}
 				}
 			}
+				}
 			.navigationTitle("Comments")
 			.navigationBarTitleDisplayMode(.inline)
 			.toolbar {
@@ -223,10 +225,69 @@ class CommentsViewModel: ObservableObject {
 		comments.filter { $0.parentCommentId == nil }
 	}
 	
+	/// Filter out comments from blocked users or where commenter has blocked current user (mutual blocking)
+	private func filterBlockedUsersComments(_ comments: [Comment]) async -> [Comment] {
+		guard let currentUserId = Auth.auth().currentUser?.uid else {
+			return comments
+		}
+		
+		do {
+			try await CYServiceManager.shared.loadCurrentUser()
+			let blockedUserIds = Set(CYServiceManager.shared.getBlockedUsers())
+			
+			// Get unique commenter IDs to check
+			let commenterIds = Set(comments.map { $0.userId })
+			
+			// Batch fetch commenter data to check if they've blocked current user
+			var commentersWhoBlockedCurrentUser: Set<String> = []
+			await withTaskGroup(of: (String, Bool).self) { group in
+				for commenterId in commenterIds {
+					group.addTask {
+						do {
+							let db = Firestore.firestore()
+							let commenterDoc = try await db.collection("users").document(commenterId).getDocument()
+							if let data = commenterDoc.data(),
+							   let commenterBlockedUsers = data["blockedUsers"] as? [String],
+							   commenterBlockedUsers.contains(currentUserId) {
+								return (commenterId, true)
+							}
+						} catch {
+							print("Error checking if commenter blocked current user: \(error.localizedDescription)")
+						}
+						return (commenterId, false)
+					}
+				}
+				
+				for await (commenterId, isBlocked) in group {
+					if isBlocked {
+						commentersWhoBlockedCurrentUser.insert(commenterId)
+					}
+				}
+			}
+			
+			return comments.filter { comment in
+				// Exclude if current user has blocked the commenter
+				if blockedUserIds.contains(comment.userId) {
+					return false
+				}
+				// Exclude if commenter has blocked current user (mutual blocking)
+				if commentersWhoBlockedCurrentUser.contains(comment.userId) {
+					return false
+				}
+				return true
+			}
+		} catch {
+			print("Error loading blocked users: \(error.localizedDescription)")
+			return comments
+		}
+	}
+	
 	func loadComments(postId: String) async {
 		isLoading = true
 		do {
-			let loadedComments = try await CommentService.shared.loadComments(postId: postId)
+			var loadedComments = try await CommentService.shared.loadComments(postId: postId)
+			// Filter out comments from blocked users
+			loadedComments = await filterBlockedUsersComments(loadedComments)
 			self.comments = loadedComments
 			
 			// Organize comments and replies
@@ -325,6 +386,29 @@ class CommentsViewModel: ObservableObject {
 						)
 						
 						Task { @MainActor in
+							// Check if comment author is blocked (mutual blocking check)
+							guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+							
+							let blockedUserIds = Set(CYServiceManager.shared.getBlockedUsers())
+							if blockedUserIds.contains(comment.userId) {
+								// Don't add comments from blocked users
+								return
+							}
+							
+							// Check if commenter has blocked current user (mutual blocking)
+							do {
+								let db = Firestore.firestore()
+								let commenterDoc = try await db.collection("users").document(comment.userId).getDocument()
+								if let data = commenterDoc.data(),
+								   let commenterBlockedUsers = data["blockedUsers"] as? [String],
+								   commenterBlockedUsers.contains(currentUserId) {
+									// Don't add comments from users who blocked current user
+									return
+								}
+							} catch {
+								print("Error checking if commenter blocked current user: \(error.localizedDescription)")
+							}
+							
 							if change.type == .added {
 								// New comment - add if not already present
 								if !self.comments.contains(where: { $0.id == comment.id }) {
@@ -372,7 +456,9 @@ class CommentsViewModel: ObservableObject {
 	
 	func loadReplies(parentCommentId: String) async {
 		do {
-			let loadedReplies = try await CommentService.shared.loadReplies(postId: postId, parentCommentId: parentCommentId)
+			var loadedReplies = try await CommentService.shared.loadReplies(postId: postId, parentCommentId: parentCommentId)
+			// Filter out replies from blocked users
+			loadedReplies = await filterBlockedUsersComments(loadedReplies)
 			replies[parentCommentId] = loadedReplies
 		} catch {
 			print("❌ Error loading replies: \(error)")
@@ -387,6 +473,12 @@ class CommentsViewModel: ObservableObject {
 		// Use postId from CommentsView
 		do {
 			try await CommentService.shared.addComment(postId: postId, text: text)
+			// Post notification to trigger refresh
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CommentAdded"),
+				object: postId
+			)
+			// Reload comments to ensure it appears
 			await loadComments(postId: postId)
 		} catch {
 			print("❌ Error adding comment: \(error)")
@@ -399,6 +491,12 @@ class CommentsViewModel: ObservableObject {
 			try await CommentService.shared.addComment(postId: postId, text: text, parentCommentId: parentCommentId)
 			showReplyField = false
 			selectedCommentForReply = nil
+			// Post notification to trigger refresh
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CommentAdded"),
+				object: postId
+			)
+			// Reload comments to ensure it appears
 			await loadComments(postId: postId)
 			// Auto-expand parent comment
 			expandedComments.insert(parentCommentId)

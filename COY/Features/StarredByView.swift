@@ -13,7 +13,8 @@ struct StarredByView: View {
 	
 	var body: some View {
 		NavigationStack {
-			ZStack {
+			PhoneSizeContainer {
+				ZStack {
 				// Background
 				Color(colorScheme == .dark ? .black : .white)
 					.ignoresSafeArea()
@@ -51,14 +52,7 @@ struct StarredByView: View {
 										.frame(width: 50, height: 50)
 										.clipShape(Circle())
 									} else {
-										Circle()
-											.fill(colorScheme == .dark ? Color(white: 0.2) : Color(white: 0.8))
-											.frame(width: 50, height: 50)
-											.overlay(
-												Image(systemName: "person.fill")
-													.foregroundColor(.secondary)
-													.font(.system(size: 20))
-											)
+										DefaultProfileImageView(size: 50)
 									}
 									
 									// Username
@@ -84,6 +78,7 @@ struct StarredByView: View {
 					.scrollContentBackground(.hidden)
 				}
 			}
+				}
 			.navigationTitle("Starred by")
 			.navigationBarTitleDisplayMode(.inline)
 			.toolbar {

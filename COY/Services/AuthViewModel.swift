@@ -83,48 +83,69 @@ class AuthViewModel: ObservableObject {
 	func login() async throws {
 		try validateLoginInputs(emailOrUsername: emailOrUsername, password: password)
 		
+		// Trim and normalize the input
+		let trimmedInput = emailOrUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+		
 		do {
 			// Check if input is email or username
-			if emailOrUsername.contains("@") {
+			if trimmedInput.contains("@") {
 				// It's an email, sign in directly
-				try await Auth.auth().signIn(withEmail: emailOrUsername, password: password)
+				print("🔐 Attempting login with email: \(trimmedInput)")
+				try await Auth.auth().signIn(withEmail: trimmedInput, password: password)
+				print("✅ Login successful with email")
 			} else {
 				// It's a username, find the associated email first
-				// Usernames are case-insensitive, so use lowercase
+				// Usernames are case-insensitive, so use lowercase and trim
+				let normalizedUsername = trimmedInput.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+				print("🔐 Attempting login with username: '\(normalizedUsername)'")
+				
 				let userService = UserService.shared
 				
 				// Try to get user by username
 				do {
-					guard let user = try await userService.getUserByUsername(emailOrUsername.lowercased()) else {
+					print("🔍 Looking up user by username: '\(normalizedUsername)'")
+					guard let user = try await userService.getUserByUsername(normalizedUsername) else {
+						print("❌ Username not found: '\(normalizedUsername)'")
 						throw AuthError.invalidCredentials("Email or password is incorrect")
 					}
 					
+					print("✅ Found user with username '\(normalizedUsername)': email = '\(user.email)'")
+					
 					// Check if user has an email (required for Firebase Auth)
 					guard !user.email.isEmpty else {
+						print("❌ User found but has no email associated")
 						throw AuthError.invalidCredentials("User account has no email associated. Please contact support.")
 					}
 					
 					// Sign in with the email associated with this username
+					print("🔐 Signing in with email: '\(user.email)'")
 					try await Auth.auth().signIn(withEmail: user.email, password: password)
-				} catch {
+					print("✅ Login successful with username")
+				} catch let lookupError {
 					// If Firestore query fails (e.g., permissions), provide helpful error
-					if let nsError = error as NSError?,
+					if let nsError = lookupError as NSError?,
 					   (nsError.domain == "FIRFirestoreErrorDomain" || 
-						error.localizedDescription.contains("permission") ||
-						error.localizedDescription.contains("Permission")) {
-						print("⚠️ Firestore permissions error during username lookup: \(error.localizedDescription)")
+						lookupError.localizedDescription.contains("permission") ||
+						lookupError.localizedDescription.contains("Permission")) {
+						print("⚠️ Firestore permissions error during username lookup: \(lookupError.localizedDescription)")
 						// Still throw generic error to user (don't expose internal errors)
 						throw AuthError.invalidCredentials("Email or password is incorrect")
+					} else if let authError = lookupError as? AuthError {
+						// Re-throw AuthError as-is
+						print("❌ AuthError during username lookup: \(authError.localizedDescription)")
+						throw authError
 					} else {
-						// Re-throw other errors (including AuthError)
-						throw error
+						// Re-throw other errors
+						print("❌ Error during username lookup: \(lookupError.localizedDescription)")
+						throw AuthError.invalidCredentials("Email or password is incorrect")
 					}
 				}
 			}
-		} catch {
+		} catch let authError {
 			// Convert Firebase Auth errors to user-friendly messages
-			if let nsError = error as NSError? {
+			if let nsError = authError as NSError? {
 				let errorCode = nsError.code
+				print("❌ Firebase Auth error: code \(errorCode), domain: \(nsError.domain)")
 				// Firebase Auth error codes
 				// 17008 = invalid-email, 17009 = wrong-password, 17011 = user-not-found
 				if errorCode == 17008 || errorCode == 17009 || errorCode == 17011 || errorCode == 17010 {
@@ -137,10 +158,11 @@ class AuthViewModel: ObservableObject {
 				}
 			} else {
 				// If it's already an AuthError, rethrow it
-				if let authError = error as? AuthError {
-					throw authError
+				if let authErr = authError as? AuthError {
+					throw authErr
 				}
 				// Otherwise, convert to generic error
+				print("❌ Unknown error during login: \(authError.localizedDescription)")
 				throw AuthError.invalidCredentials("Email or password is incorrect")
 			}
 		}

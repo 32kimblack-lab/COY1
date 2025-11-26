@@ -9,7 +9,7 @@ final class UserService: ObservableObject {
 	static let shared = UserService()
 	private init() {}
 
-	struct AppUser: Identifiable {
+	struct AppUser: Identifiable, Equatable {
 		var id: String { userId }
 		var userId: String
 		var name: String
@@ -56,16 +56,57 @@ final class UserService: ObservableObject {
 	func getUserByUsername(_ username: String) async throws -> AppUser? {
 		let db = Firestore.firestore()
 		// Usernames are stored in lowercase, so search lowercase
-		let lowercaseUsername = username.lowercased()
+		// Also trim whitespace to handle any input issues
+		let normalizedUsername = username.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
 		
+		print("🔍 Searching for username: '\(normalizedUsername)'")
+		
+		// First try exact match with lowercase (for new users)
 		let snapshot = try await db.collection("users")
-			.whereField("username", isEqualTo: lowercaseUsername)
+			.whereField("username", isEqualTo: normalizedUsername)
 			.limit(to: 1)
 			.getDocuments()
 		
-		guard let doc = snapshot.documents.first else { return nil }
+		// If not found, try case-insensitive search by getting all users and filtering
+		// (This handles legacy users who might have mixed-case usernames)
+		if snapshot.documents.isEmpty {
+			print("⚠️ Username not found with exact match, trying case-insensitive search...")
+			// Get a larger batch and filter client-side (less efficient but handles edge cases)
+			let allUsersSnapshot = try await db.collection("users")
+				.limit(to: 1000) // Reasonable limit
+				.getDocuments()
+			
+			// Filter for case-insensitive match
+			for doc in allUsersSnapshot.documents {
+				let data = doc.data()
+				if let storedUsername = data["username"] as? String,
+				   storedUsername.lowercased() == normalizedUsername {
+					print("✅ Found user with case-insensitive match")
+					return AppUser(
+						userId: doc.documentID,
+						name: data["name"] as? String ?? "",
+						username: storedUsername,
+						profileImageURL: data["profileImageURL"] as? String,
+						backgroundImageURL: data["backgroundImageURL"] as? String,
+						birthMonth: data["birthMonth"] as? String ?? "",
+						birthDay: data["birthDay"] as? String ?? "",
+						birthYear: data["birthYear"] as? String ?? "",
+						email: data["email"] as? String ?? ""
+					)
+				}
+			}
+			
+			print("❌ Username not found even with case-insensitive search")
+			return nil
+		}
+		
+		guard let doc = snapshot.documents.first else {
+			print("❌ No documents found")
+			return nil
+		}
 		
 		let data = doc.data()
+		print("✅ Found user: \(doc.documentID), email: \(data["email"] as? String ?? "none")")
 		return AppUser(
 			userId: doc.documentID,
 			name: data["name"] as? String ?? "",
@@ -224,10 +265,12 @@ final class UserService: ObservableObject {
 		}
 		
 		let db = Firestore.firestore()
+		// Ensure username is always stored in lowercase for consistent lookup
+		let lowercaseUsername = username.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
 		var userData: [String: Any] = [
 			"name": name,
-			"username": username,
-			"email": email,
+			"username": lowercaseUsername,
+			"email": email.lowercased().trimmingCharacters(in: .whitespacesAndNewlines),
 			"birthMonth": birthMonth,
 			"birthDay": birthDay,
 			"birthYear": birthYear,

@@ -18,49 +18,47 @@ struct ProfileView: View {
 	@State private var allCollections: [CollectionData] = []
 	@State private var userListener: ListenerRegistration?
 	@State private var collectionsListener: ListenerRegistration?
+	@State private var selectedCollection: CollectionData?
+	@State private var showingInsideCollection = false
+	@State private var selectedUserId: String?
+	@State private var showingProfile = false
+	@State private var requestStatus: [String: Bool] = [:] // Track request status per collection
+	@State private var pendingRequests: Set<String> = [] // Track collections with pending requests
 	@Environment(\.colorScheme) var colorScheme
 	
 	var body: some View {
 		NavigationStack {
-			ZStack {
-				(colorScheme == .dark ? Color.black : Color.white)
-					.ignoresSafeArea()
-				
-				VStack(spacing: 0) {
-					// Fixed Profile Header (doesn't scroll) - Always show
-					profileHeaderSection(safeAreaTop: 0)
-						.id("\(profileRefreshTrigger)-\(userData?["profileImageURL"] as? String ?? "")-\(userData?["backgroundImageURL"] as? String ?? "")")
-					
-					// Collections Section (List handles its own scrolling)
-					if isCustomizing {
-						CustomizeCollectionsView(
-							allCollections: $allCollections,
-							selectedCollections: $selectedCollections,
-							customOrder: $customOrder
-						)
-						.padding(.top, -20)
-					} else {
-						UserCollectionsView(sortOption: sortOption)
-							.padding(.top, -20)
-					}
-				}
+			PhoneSizeContainer {
+				mainContentView
+			}
 			}
 			.navigationBarTitleDisplayMode(.inline)
 			.toolbarBackground(.hidden, for: .navigationBar)
 			.toolbarColorScheme(.dark, for: .navigationBar)
+			.navigationDestination(isPresented: $showingInsideCollection) {
+				if let collection = selectedCollection {
+					CYInsideCollectionView(collection: collection)
+						.environmentObject(authService)
+				}
+			}
+		.navigationDestination(isPresented: $showingProfile) {
+			if let userId = selectedUserId {
+				ViewerProfileView(userId: userId)
+					.environmentObject(authService)
+			}
+		}
 			.toolbar(isCustomizing ? .hidden : .automatic, for: .tabBar)
 			.onAppear {
 				loadSortPreference()
+			// Initialize shared request state manager
+			Task {
+				await CollectionRequestStateManager.shared.initializeState()
+			}
 				
-				// Always force fresh load from Firebase (source of truth) when view appears
-				// This ensures we show the latest data, especially after editing
 				if !hasLoadedUserDataOnce {
 					refreshUserData()
 				} else {
-					// Even if we've loaded before, do a quick refresh to ensure we have latest data
-					// This handles the case where user edits profile and comes back
 					Task {
-						// Use cached data immediately for instant display
 						if let cyUser = CYServiceManager.shared.currentUser {
 							await MainActor.run {
 								self.userData = [
@@ -78,103 +76,55 @@ struct ProfileView: View {
 								self.profileRefreshTrigger = UUID()
 							}
 						}
-						
-						// Then refresh from Firebase to ensure we have latest data
-						refreshUserData()
 					}
 				}
 			}
 			.onDisappear {
-				// Clean up listeners when view disappears
 				userListener?.remove()
 				collectionsListener?.remove()
 			}
 			.refreshable {
-				// Force refresh user data and collections
-				refreshUserData()
+				refreshUserData(forceRefresh: true)
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { notification in
-				// Update data in real-time
-				if let userInfo = notification.userInfo,
-				   let updatedData = userInfo["updatedData"] as? [String: Any] {
-					print("📢 ProfileView: Received ProfileUpdated notification")
-					print("   - Updated data: \(updatedData)")
-					
-					// Clear caches to force fresh load
-					if let userId = authService.user?.uid {
-						UserService.shared.clearUserCache(userId: userId)
+			handleProfileUpdate(notification)
 					}
-					
-					// Update local userData immediately with the new values
-					if self.userData == nil {
-						self.userData = updatedData
-					} else {
-						// Merge updated data
-						for (key, value) in updatedData {
-							self.userData?[key] = value
-						}
-					}
-					
-					// Force refresh from Firebase (source of truth) to get latest data including images
-					refreshUserData()
-					
-					// Trigger UI refresh with new IDs for images
-					self.profileRefreshTrigger = UUID()
-				}
-			}
-			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { _ in
-				// Refresh handled by collections view
-			}
-			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { _ in
-				// Refresh handled by collections view
-			}
-			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToProfile"))) { _ in
-				// Navigate back to profile view when collection editing is complete
-				// This will be handled by the navigation system automatically
-				// The notification ensures the profile view refreshes its data
-			}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { _ in }
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { _ in }
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToProfile"))) { _ in }
 			.overlay {
 				sortMenuOverlay
 			}
+		// Request state is managed by CollectionRequestStateManager.shared
+		// No need for notification listeners here - the manager handles it
 			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionOrderUpdated"))) { _ in
-				// Reload sort preference to reflect the change (without reloading collections)
-				// Collections will automatically re-sort via sortedCollections computed property
 				loadSortPreference()
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionCreated"))) { _ in
-				// If we're in customize mode, reload collections to include the new one
 				if isCustomizing {
 					loadCollectionsForCustomization()
 				}
 			}
-			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionRestored"))) { notification in
-				// Immediately reload collections when a collection is restored
-				print("🔄 ProfileView: Collection restored, refreshing collections immediately")
-				// Reload collections to show the restored collection
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionRestored"))) { _ in
 				loadCollectionsForCustomization()
-				// Also trigger a refresh of the main collections view
-				NotificationCenter.default.post(
-					name: NSNotification.Name("UserCollectionsUpdated"),
-					object: nil
-				)
+			NotificationCenter.default.post(name: NSNotification.Name("UserCollectionsUpdated"), object: nil)
 			}
 			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionUpdated"))) { _ in
-				// Refresh collections when collection is updated
-				print("🔄 ProfileView: Collection updated, refreshing collections")
 				loadCollectionsForCustomization()
 			}
-			.overlay(
+		.overlay(customizeOverlay)
+	}
+	
+	private var customizeOverlay: some View {
 				Group {
 					if isCustomizing {
 						VStack {
 							Spacer()
 							HStack {
 								Button("Clear") {
-									// Clear all selections and exit customize mode
 									selectedCollections.removeAll()
 									customOrder.removeAll()
 									isCustomizing = false
-									// Reset sort option to previous (not Customize)
 									if sortOption == "Customize" {
 										sortOption = "Newest to Oldest"
 									}
@@ -208,7 +158,49 @@ struct ProfileView: View {
 						}
 					}
 				}
-			)
+	}
+	
+	private func handleProfileUpdate(_ notification: Notification) {
+		if let userInfo = notification.userInfo,
+		   let updatedData = userInfo["updatedData"] as? [String: Any] {
+			if let userId = authService.user?.uid {
+				UserService.shared.clearUserCache(userId: userId)
+			}
+			if self.userData == nil {
+				self.userData = updatedData
+			} else {
+				for (key, value) in updatedData {
+					self.userData?[key] = value
+				}
+			}
+			refreshUserData(forceRefresh: true)
+			self.profileRefreshTrigger = UUID()
+		}
+	}
+	
+	private var mainContentView: some View {
+		ZStack {
+			(colorScheme == .dark ? Color.black : Color.white)
+				.ignoresSafeArea()
+			
+			VStack(spacing: 0) {
+				// Fixed Profile Header (doesn't scroll) - Always show
+				profileHeaderSection(safeAreaTop: 0)
+					.id("\(profileRefreshTrigger)-\(userData?["profileImageURL"] as? String ?? "")-\(userData?["backgroundImageURL"] as? String ?? "")")
+				
+				// Collections Section (List handles its own scrolling)
+				if isCustomizing {
+					CustomizeCollectionsView(
+						allCollections: $allCollections,
+						selectedCollections: $selectedCollections,
+						customOrder: $customOrder
+					)
+					.padding(.top, -20)
+				} else {
+					UserCollectionsView(sortOption: sortOption)
+						.padding(.top, -20)
+				}
+			}
 		}
 	}
 	
@@ -443,6 +435,27 @@ struct ProfileView: View {
 		.ignoresSafeArea(edges: .top)
 	}
 	
+	private func initializeRequestState() {
+		// Check for existing pending request notifications
+		Task {
+			guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+			do {
+				let notifications = try await NotificationService.shared.getNotifications(userId: currentUserId)
+				await MainActor.run {
+					for notification in notifications {
+						if notification.type == "collection_request" && notification.status == "pending",
+						   let collectionId = notification.collectionId {
+							requestStatus[collectionId] = true
+							pendingRequests.insert(collectionId)
+						}
+					}
+				}
+			} catch {
+				print("Error initializing request state: \(error)")
+			}
+		}
+	}
+	
 	private func loadSortPreference() {
 		Task {
 			sortOption = CYServiceManager.shared.getCollectionSortPreference()
@@ -533,7 +546,7 @@ struct ProfileView: View {
 	
 	// MARK: - Load User Data from Firebase
 	
-	private func refreshUserData() {
+	private func refreshUserData(forceRefresh: Bool = false) {
 		guard let userId = authService.user?.uid else {
 			return
 		}
@@ -543,11 +556,19 @@ struct ProfileView: View {
 			return
 		}
 		
+		// If we have cached data and not forcing refresh, skip loading
+		if hasLoadedUserDataOnce && userData != nil && !forceRefresh {
+			print("⏭️ ProfileView: Using cached user data")
+			return
+		}
+		
 		isLoadingUserData = true
 		Task {
 			do {
-				// Clear cache to force fresh data from Firebase (source of truth)
+				// Clear cache to force fresh data from Firebase (source of truth) only if forcing refresh
+				if forceRefresh {
 				UserService.shared.clearUserCache(userId: userId)
+				}
 				
 				// Load from Firebase (source of truth)
 				let user = try await UserService.shared.getUser(userId: userId)
@@ -636,6 +657,12 @@ struct CustomizeCollectionsView: View {
 	@Binding var allCollections: [CollectionData]
 	@Binding var selectedCollections: Set<String>
 	@Binding var customOrder: [String]
+	@State private var selectedCollection: CollectionData?
+	@State private var showingInsideCollection = false
+	@State private var selectedUserId: String?
+	@State private var showingProfile = false
+	@State private var requestStatus: [String: Bool] = [:] // Track request status per collection
+	@State private var pendingRequests: Set<String> = [] // Track collections with pending requests
 	@Environment(\.colorScheme) var colorScheme
 	@EnvironmentObject var authService: AuthService
 	
@@ -657,6 +684,61 @@ struct CustomizeCollectionsView: View {
 		.safeAreaInset(edge: .bottom, spacing: 0) {
 			Color.clear
 				.frame(height: 80)
+		}
+		.navigationDestination(isPresented: $showingInsideCollection) {
+			if let collection = selectedCollection {
+				CYInsideCollectionView(collection: collection)
+					.environmentObject(authService)
+			}
+		}
+		.navigationDestination(isPresented: $showingProfile) {
+			if let userId = selectedUserId {
+				ViewerProfileView(userId: userId)
+					.environmentObject(authService)
+			}
+		}
+		.onAppear {
+			initializeRequestState()
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionRequestSent"))) { notification in
+			// Update request status when request is sent - works for ANY collection
+			if let collectionId = notification.object as? String ?? notification.userInfo?["collectionId"] as? String,
+			   let requesterId = notification.userInfo?["requesterId"] as? String,
+			   requesterId == Auth.auth().currentUser?.uid {
+				requestStatus[collectionId] = true
+				pendingRequests.insert(collectionId)
+				print("✅ CustomizeCollectionsView: Request status updated to true for collection \(collectionId)")
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionRequestCancelled"))) { notification in
+			// Update request status when request is cancelled - works for ANY collection
+			if let collectionId = notification.object as? String ?? notification.userInfo?["collectionId"] as? String,
+			   let requesterId = notification.userInfo?["requesterId"] as? String,
+			   requesterId == Auth.auth().currentUser?.uid {
+				requestStatus[collectionId] = false
+				pendingRequests.remove(collectionId)
+				print("✅ CustomizeCollectionsView: Request status updated to false for collection \(collectionId)")
+			}
+		}
+	}
+	
+	private func initializeRequestState() {
+		Task {
+			guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+			do {
+				let notifications = try await NotificationService.shared.getNotifications(userId: currentUserId)
+				await MainActor.run {
+					for notification in notifications {
+						if notification.type == "collection_request" && notification.status == "pending",
+						   let collectionId = notification.collectionId {
+							requestStatus[collectionId] = true
+							pendingRequests.insert(collectionId)
+						}
+					}
+				}
+			} catch {
+				print("Error initializing request state: \(error)")
+			}
 		}
 	}
 	
@@ -692,20 +774,29 @@ struct CustomizeCollectionsView: View {
 				.fixedSize(horizontal: true, vertical: false)
 			
 			// Collection row - flexible width with navigation
-			NavigationLink(destination: CYInsideCollectionView(collection: collection).environmentObject(authService)) {
 				CollectionRowDesign(
 					collection: collection,
 					isFollowing: false,
-					hasRequested: false,
-					isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
+					hasRequested: CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id),
+					isMember: {
+						let currentUserId = Auth.auth().currentUser?.uid ?? ""
+						return collection.members.contains(currentUserId) || collection.owners.contains(currentUserId)
+					}(),
 					isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
 					onFollowTapped: {},
 					onActionTapped: {},
-					onProfileTapped: {}
+				onProfileTapped: {
+					// Navigate to owner's profile
+					selectedUserId = collection.ownerId
+					showingProfile = true
+				},
+				onCollectionTapped: {
+					Task {
+						await handleCollectionTap(collection: collection)
+					}
+				}
 				)
 				.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-			}
-			.buttonStyle(PlainButtonStyle())
 		}
 		.padding(.vertical, 4)
 		.listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -744,6 +835,39 @@ struct CustomizeCollectionsView: View {
 			customOrder.append(collectionId)
 		}
 	}
+	
+	private func handleCollectionTap(collection: CollectionData) async {
+		// Check if this is a private collection
+		if !collection.isPublic {
+			// Check if current user is owner, admin, or member
+			guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+			let isMember = collection.members.contains(currentUserId)
+			let isOwner = collection.ownerId == currentUserId
+			let isAdmin = collection.owners.contains(currentUserId)
+			
+			// ALL authorized users (owner, admin, member) need Face ID for private collections
+			if isOwner || isMember || isAdmin {
+				// User is owner, admin, or member - require Face ID/Touch ID
+				let authManager = BiometricAuthManager()
+				let success = await authManager.authenticateWithFallback(reason: "Access \(collection.name)")
+				
+				if success {
+					await MainActor.run {
+						selectedCollection = collection
+						showingInsideCollection = true
+					}
+				}
+				// If authentication fails, do nothing (user stays on current screen)
+				return
+			}
+		}
+		
+		// For public collections or non-members, proceed normally
+		await MainActor.run {
+			selectedCollection = collection
+			showingInsideCollection = true
+		}
+	}
 }
 
 // MARK: - User Collections View
@@ -752,6 +876,13 @@ struct UserCollectionsView: View {
 	@EnvironmentObject var authService: AuthService
 	@State private var userCollections: [CollectionData] = []
 	@State private var isLoading = false
+	@State private var selectedCollection: CollectionData?
+	@State private var showingInsideCollection = false
+	@State private var selectedUserId: String?
+	@State private var showingProfile = false
+	@State private var hasLoadedCollectionsOnce = false // Track if collections have been loaded
+	@State private var requestStatus: [String: Bool] = [:] // Track request status per collection
+	@State private var pendingRequests: Set<String> = [] // Track collections with pending requests
 	@Environment(\.colorScheme) var colorScheme
 	
 	var sortedCollections: [CollectionData] {
@@ -802,21 +933,30 @@ struct UserCollectionsView: View {
 				.listRowBackground(Color.clear)
 			} else {
 				ForEach(sortedCollections) { collection in
-					NavigationLink(destination: CYInsideCollectionView(collection: collection).environmentObject(authService)) {
 						CollectionRowDesign(
 							collection: collection,
 							isFollowing: false,
-							hasRequested: false,
-							isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
+							hasRequested: CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id),
+							isMember: {
+								let currentUserId = Auth.auth().currentUser?.uid ?? ""
+								return collection.members.contains(currentUserId) || collection.owners.contains(currentUserId)
+							}(),
 							isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
 							onFollowTapped: {},
 							onActionTapped: {},
-							onProfileTapped: {}
+						onProfileTapped: {
+							// Navigate to owner's profile
+							selectedUserId = collection.ownerId
+							showingProfile = true
+						},
+						onCollectionTapped: {
+							Task {
+								await handleCollectionTap(collection: collection)
+							}
+						}
 						)
 						.padding(.horizontal)
 						.padding(.bottom, 12)
-					}
-					.buttonStyle(PlainButtonStyle())
 					.listRowInsets(EdgeInsets())
 					.listRowSeparator(.hidden)
 					.listRowBackground(Color.clear)
@@ -826,27 +966,90 @@ struct UserCollectionsView: View {
 		.listStyle(PlainListStyle())
 		.scrollContentBackground(.hidden)
 		.background(colorScheme == .dark ? Color.black : Color.white)
+		.refreshable {
+			// Force refresh collections on pull-to-refresh
+			loadCollections(forceRefresh: true)
+		}
 		.onAppear {
+			// Only load collections if we haven't loaded them before
+			// This prevents reloading when navigating back to the view
+			if !hasLoadedCollectionsOnce {
 			loadCollections()
+			}
+			// Initialize request state from notifications
+			initializeRequestState()
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("UserCollectionsUpdated"))) { _ in
-			loadCollections()
+			loadCollections(forceRefresh: true)
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionCreated"))) { _ in
-			loadCollections()
+			loadCollections(forceRefresh: true)
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUpdated"))) { notification in
+			// Refresh when collection is updated (e.g., user joined)
+			if let userInfo = notification.userInfo,
+			   let action = userInfo["action"] as? String,
+			   action == "memberAdded" {
+				loadCollections(forceRefresh: true)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionInviteAccepted"))) { _ in
+			// Refresh when user accepts an invite
+			loadCollections(forceRefresh: true)
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionRequestSent"))) { notification in
+			// Update request status when request is sent - works for ANY collection
+			if let collectionId = notification.object as? String ?? notification.userInfo?["collectionId"] as? String,
+			   let requesterId = notification.userInfo?["requesterId"] as? String,
+			   requesterId == Auth.auth().currentUser?.uid {
+				requestStatus[collectionId] = true
+				pendingRequests.insert(collectionId)
+				print("✅ UserCollectionsView: Request status updated to true for collection \(collectionId)")
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionRequestCancelled"))) { notification in
+			// Update request status when request is cancelled - works for ANY collection
+			if let collectionId = notification.object as? String ?? notification.userInfo?["collectionId"] as? String,
+			   let requesterId = notification.userInfo?["requesterId"] as? String,
+			   requesterId == Auth.auth().currentUser?.uid {
+				requestStatus[collectionId] = false
+				pendingRequests.remove(collectionId)
+				print("✅ UserCollectionsView: Request status updated to false for collection \(collectionId)")
+			}
+		}
+		.navigationDestination(isPresented: $showingInsideCollection) {
+			if let collection = selectedCollection {
+				CYInsideCollectionView(collection: collection)
+					.environmentObject(authService)
+			}
+		}
+		.navigationDestination(isPresented: $showingProfile) {
+			if let userId = selectedUserId {
+				ViewerProfileView(userId: userId)
+					.environmentObject(authService)
+			}
 		}
 	}
 	
-	private func loadCollections() {
+	private func loadCollections(forceRefresh: Bool = false) {
 		guard authService.user?.uid != nil else { return }
+		
+		// If we have cached collections and not forcing refresh, skip loading
+		if hasLoadedCollectionsOnce && !userCollections.isEmpty && !forceRefresh {
+			print("⏭️ UserCollectionsView: Using cached collections")
+			return
+		}
+		
 		isLoading = true
 		Task {
 			do {
 				guard let userId = authService.user?.uid else { return }
-				let collections = try await CollectionService.shared.getUserCollections(userId: userId, forceFresh: true)
+				// Only force fresh if explicitly requested (pull-to-refresh)
+				let collections = try await CollectionService.shared.getUserCollections(userId: userId, forceFresh: forceRefresh)
 				await MainActor.run {
 					self.userCollections = collections
 					self.isLoading = false
+					self.hasLoadedCollectionsOnce = true
 				}
 			} catch {
 				print("Error loading collections: \(error)")
@@ -854,6 +1057,60 @@ struct UserCollectionsView: View {
 					self.isLoading = false
 				}
 			}
+		}
+	}
+	
+	private func initializeRequestState() {
+		// Check for existing pending request notifications
+		Task {
+			guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+			do {
+				let notifications = try await NotificationService.shared.getNotifications(userId: currentUserId)
+				await MainActor.run {
+					for notification in notifications {
+						if notification.type == "collection_request" && notification.status == "pending",
+						   let collectionId = notification.collectionId {
+							requestStatus[collectionId] = true
+							pendingRequests.insert(collectionId)
+						}
+					}
+				}
+			} catch {
+				print("Error initializing request state: \(error)")
+			}
+		}
+	}
+	
+	private func handleCollectionTap(collection: CollectionData) async {
+		// Check if this is a private collection
+		if !collection.isPublic {
+			// Check if current user is owner, admin, or member
+			guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+			let isMember = collection.members.contains(currentUserId)
+			let isOwner = collection.ownerId == currentUserId
+			let isAdmin = collection.owners.contains(currentUserId)
+			
+			// ALL authorized users (owner, admin, member) need Face ID for private collections
+			if isOwner || isMember || isAdmin {
+				// User is owner, admin, or member - require Face ID/Touch ID
+				let authManager = BiometricAuthManager()
+				let success = await authManager.authenticateWithFallback(reason: "Access \(collection.name)")
+				
+				if success {
+					await MainActor.run {
+						selectedCollection = collection
+						showingInsideCollection = true
+					}
+				}
+				// If authentication fails, do nothing (user stays on current screen)
+				return
+			}
+		}
+		
+		// For public collections or non-members, proceed normally
+		await MainActor.run {
+			selectedCollection = collection
+			showingInsideCollection = true
 		}
 	}
 }

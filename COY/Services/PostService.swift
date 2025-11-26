@@ -149,5 +149,130 @@ final class PostService {
 		
 		return try await uploadImage(thumbnail, path: path)
 	}
+	
+	// MARK: - Star/Unstar Post
+	func toggleStarPost(postId: String, isStarred: Bool) async throws {
+		guard let userId = Auth.auth().currentUser?.uid else {
+			throw NSError(domain: "PostService", code: -1, userInfo: [NSLocalizedDescriptionKey: "User not authenticated"])
+		}
+		
+		let db = Firestore.firestore()
+		let starsRef = db.collection("posts").document(postId).collection("stars").document(userId)
+		
+		if isStarred {
+			// Star the post
+			try await starsRef.setData([
+				"userId": userId,
+				"starredAt": Timestamp()
+			])
+			
+			// Add to user's starredPostIds
+			let userRef = db.collection("users").document(userId)
+			try await userRef.updateData([
+				"starredPostIds": FieldValue.arrayUnion([postId])
+			])
+		} else {
+			// Unstar the post
+			try await starsRef.delete()
+			
+			// Remove from user's starredPostIds
+			let userRef = db.collection("users").document(userId)
+			try await userRef.updateData([
+				"starredPostIds": FieldValue.arrayRemove([postId])
+			])
+		}
+		
+		// Post notification to update UI
+		Task { @MainActor in
+			NotificationCenter.default.post(
+				name: NSNotification.Name(isStarred ? "PostStarred" : "PostUnstarred"),
+				object: postId,
+				userInfo: ["userId": userId]
+			)
+		}
+	}
+	
+	// Check if current user has starred a post
+	func isPostStarred(postId: String) async throws -> Bool {
+		guard let userId = Auth.auth().currentUser?.uid else { return false }
+		
+		let db = Firestore.firestore()
+		let starDoc = try await db.collection("posts")
+			.document(postId)
+			.collection("stars")
+			.document(userId)
+			.getDocument()
+		
+		return starDoc.exists
+	}
+	
+	// Get comment count for a post
+	func getCommentCount(postId: String) async throws -> Int {
+		let db = Firestore.firestore()
+		let snapshot = try await db.collection("posts")
+			.document(postId)
+			.collection("comments")
+			.getDocuments()
+		
+		return snapshot.documents.count
+	}
+	
+	// Download post media (returns URL for download)
+	func downloadPostMedia(postId: String) async throws -> [URL] {
+		let db = Firestore.firestore()
+		let postDoc = try await db.collection("posts").document(postId).getDocument()
+		
+		guard let data = postDoc.data(),
+			  let mediaItems = data["mediaItems"] as? [[String: Any]] else {
+			throw NSError(domain: "PostService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Post not found or has no media"])
+		}
+		
+		var downloadURLs: [URL] = []
+		for mediaItem in mediaItems {
+			if let imageURL = mediaItem["imageURL"] as? String, !imageURL.isEmpty,
+			   let url = URL(string: imageURL) {
+				downloadURLs.append(url)
+			} else if let videoURL = mediaItem["videoURL"] as? String, !videoURL.isEmpty,
+					  let url = URL(string: videoURL) {
+				downloadURLs.append(url)
+			}
+		}
+		
+		return downloadURLs
+	}
+	
+	// Get tagged users for a post
+	func getTaggedUsers(postId: String) async throws -> [UserService.AppUser] {
+		let db = Firestore.firestore()
+		let postDoc = try await db.collection("posts").document(postId).getDocument()
+		
+		guard let data = postDoc.data(),
+			  let taggedUserIds = data["taggedUsers"] as? [String] else {
+			return []
+		}
+		
+		var taggedUsers: [UserService.AppUser] = []
+		for userId in taggedUserIds {
+			if let user = try? await UserService.shared.getUser(userId: userId) {
+				taggedUsers.append(user)
+			}
+		}
+		
+		return taggedUsers
+	}
+	
+	// Check if user allows downloads (from user settings)
+	func getUserDownloadEnabled() async throws -> Bool {
+		guard let userId = Auth.auth().currentUser?.uid else { return false }
+		
+		let db = Firestore.firestore()
+		let userDoc = try await db.collection("users").document(userId).getDocument()
+		
+		if let data = userDoc.data() {
+			return data["allowDownload"] as? Bool ?? false
+		}
+		
+		return false
+	}
 }
 

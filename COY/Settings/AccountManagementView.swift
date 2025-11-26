@@ -5,7 +5,8 @@ struct AccountManagementView: View {
 	@Environment(\.presentationMode) var presentationMode
 	
 	var body: some View {
-		ScrollView {
+		PhoneSizeContainer {
+			ScrollView {
 			VStack(alignment: .leading, spacing: 24) {
 				HStack {
 					Button(action: { presentationMode.wrappedValue.dismiss() }) {
@@ -30,6 +31,7 @@ struct AccountManagementView: View {
 			}
 		}
 		.background(colorScheme == .dark ? Color.black : Color.white)
+			}
 		.navigationBarBackButtonHidden(true)
 		.navigationTitle("")
 		.toolbar(.hidden, for: .tabBar)

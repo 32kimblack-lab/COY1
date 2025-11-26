@@ -35,8 +35,11 @@ struct CollectionPost: Identifiable {
 	var firstMediaItem: MediaItem? // For backward compatibility
 	var mediaItems: [MediaItem] // All media items for swipeable carousel
 	var isPinned: Bool = false
+	var pinnedAt: Date? // Timestamp when post was pinned (for sorting)
 	var caption: String?
 	var allowReplies: Bool = true // Default to true
+	var allowDownload: Bool = false // Whether post author allows downloads
+	var taggedUsers: [String] = [] // Array of user IDs who are tagged in this post
 }
 
 struct MediaItem {
@@ -59,4 +62,10 @@ struct Comment: Identifiable {
 	var parentCommentId: String?
 	var replyCount: Int = 0
 }
+
+// MARK: - Chat Models
+// Note: ChatRoomModel, MessageModel, and FriendRequestModel are defined in separate files:
+// - ChatRoomModel.swift
+// - MessageModel.swift
+// - FriendRequestModel.swift
 

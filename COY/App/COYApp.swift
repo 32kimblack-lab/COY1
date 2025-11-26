@@ -8,6 +8,13 @@ struct COYApp: App {
 
 	init() {
 		FirebaseApp.configure()
+		
+		// Request push notification permission on app launch
+		Task {
+			_ = await PushNotificationManager.shared.requestPermission()
+			// Sync token after permission is granted
+			await PushNotificationManager.shared.syncTokenForCurrentUser()
+		}
 	}
 
 	var body: some Scene {

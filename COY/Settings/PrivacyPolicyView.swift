@@ -5,7 +5,8 @@ struct PrivacyPolicyView: View {
 	@Environment(\.presentationMode) var presentationMode
 	
 	var body: some View {
-		ScrollView {
+		PhoneSizeContainer {
+			ScrollView {
 			VStack(alignment: .leading, spacing: 24) {
 				HStack {
 					Button(action: { presentationMode.wrappedValue.dismiss() }) {
@@ -140,6 +141,7 @@ struct PrivacyPolicyView: View {
 				.padding(.horizontal, 20)
 				
 				Spacer(minLength: 40)
+			}
 			}
 		}
 		.background(colorScheme == .dark ? Color.black : Color.white)

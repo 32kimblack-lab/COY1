@@ -1,0 +1,51 @@
+import SwiftUI
+import AVKit
+
+struct FullScreenVideoView: View {
+	let videoURL: String
+	@Environment(\.dismiss) var dismiss
+	@State private var player: AVPlayer?
+	
+	var body: some View {
+		ZStack {
+			Color.black.ignoresSafeArea()
+			
+			if URL(string: videoURL) != nil {
+				if let player = player {
+					VideoPlayer(player: player)
+						.ignoresSafeArea()
+				} else {
+					ProgressView()
+						.tint(.white)
+				}
+			}
+			
+			VStack {
+				HStack {
+					Spacer()
+					Button(action: {
+						player?.pause()
+						dismiss()
+					}) {
+						Image(systemName: "xmark.circle.fill")
+							.font(.system(size: 30))
+							.foregroundColor(.white)
+							.padding()
+					}
+				}
+				Spacer()
+			}
+		}
+		.onAppear {
+			if let url = URL(string: videoURL) {
+				player = AVPlayer(url: url)
+				player?.play()
+			}
+		}
+		.onDisappear {
+			player?.pause()
+			player = nil
+		}
+	}
+}
+

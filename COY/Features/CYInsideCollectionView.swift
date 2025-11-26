@@ -14,6 +14,7 @@ struct CYInsideCollectionView: View {
 	@State private var showPhotoPicker = false
 	@State private var selectedMedia: [CreatePostMediaItem] = []
 	@State private var isProcessingMedia = false
+	@State private var isNavigatingToCreatePost = false // Prevent duplicate navigation
 	@State private var showCustomMenu = false
 	@State private var showDeleteAlert = false
 	@State private var isDeleting = false
@@ -25,8 +26,9 @@ struct CYInsideCollectionView: View {
 	@State private var showEditCollection = false
 	@State private var showAccessView = false
 	@State private var showFollowersView = false
+	@State private var showMembersView = false
 	@State private var isFollowing: Bool = false
-	@State private var hasPendingRequest: Bool = false
+	// Request state is managed by CollectionRequestStateManager.shared
 	@State private var selectedOwnerId: String?
 	
 	// Sort/Organization states
@@ -44,28 +46,90 @@ struct CYInsideCollectionView: View {
 	}
 	
 	var body: some View {
-		mainContentView
+		PhoneSizeContainer {
+			mainContentView
+		}
 			.navigationBarTitleDisplayMode(.inline)
 			.navigationBarBackButtonHidden(true)
 			.toolbar {
 				toolbarContent
 			}
+			.navigationDestination(isPresented: $showMembersView) {
+				CollectionMembersView(collection: collection)
+					.environmentObject(authService)
+			}
 			.onAppear {
 				loadCollectionData()
 				loadPosts()
 				setupPostListener()
+				// Initialize shared request state manager
+				Task {
+					await CollectionRequestStateManager.shared.initializeState()
+					// Then update follow state
+					await updateFollowState()
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+				// Refresh request state when app comes to foreground
+				Task {
+					await CollectionRequestStateManager.shared.initializeState()
+				}
+			}
+			.onChange(of: collection.id) { oldId, newId in
+				// When collection changes, state is already managed by CollectionRequestStateManager
+				// No action needed - the manager handles all collections
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUpdated"))) { notification in
 				handleCollectionUpdated(notification)
 			}
+			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionFollowed"))) { notification in
+				if let collectionId = notification.object as? String,
+				   collectionId == collection.id,
+				   let userId = notification.userInfo?["userId"] as? String,
+				   userId == authService.user?.uid {
+					Task {
+						await updateFollowState()
+						loadCollectionData()
+					}
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUnfollowed"))) { notification in
+				if let collectionId = notification.object as? String,
+				   collectionId == collection.id,
+				   let userId = notification.userInfo?["userId"] as? String,
+				   userId == authService.user?.uid {
+					Task {
+						await updateFollowState()
+						loadCollectionData()
+					}
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionJoined"))) { _ in
+				// Reload collection data when user joins
+				loadCollectionData()
+			}
+			// Request state is managed by CollectionRequestStateManager.shared
+			// No need for notification listeners here - the manager handles it
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostCreated"))) { notification in
 				handlePostCreated(notification)
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { _ in
+				// Refresh posts when a user is blocked
+				loadPosts()
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { _ in
+				// Refresh posts when a user is unblocked
+				loadPosts()
 			}
 			.sheet(isPresented: $showPhotoPicker) {
 				photoPickerSheet
 			}
 			.sheet(isPresented: createPostBinding) {
 				createPostSheet
+					.onAppear {
+						// Reset navigation flag when sheet appears
+						isNavigatingToCreatePost = false
+					}
 			}
 			.confirmationDialog("Collection Options", isPresented: $showCustomMenu, titleVisibility: .hidden) {
 				collectionOptionsDialog
@@ -75,6 +139,9 @@ struct CYInsideCollectionView: View {
 			}
 			.sheet(isPresented: $showAccessView) {
 				accessViewSheet
+			}
+			.sheet(isPresented: $showFollowersView) {
+				followersViewSheet
 			}
 			.alert("Delete Collection", isPresented: $showDeleteAlert) {
 				deleteCollectionAlert
@@ -110,15 +177,25 @@ struct CYInsideCollectionView: View {
 						emptyStateView
 							.padding()
 					} else {
-						PinterestPostGrid(
-							posts: sortedPosts,
-							collection: collection,
-							isIndividualCollection: collection.type == "Individual",
-							currentUserId: Auth.auth().currentUser?.uid
-						)
+					PinterestPostGrid(
+						posts: sortedPosts,
+						collection: collection,
+						isIndividualCollection: collection.type == "Individual",
+						currentUserId: Auth.auth().currentUser?.uid,
+						onPinPost: { post in
+							Task {
+								await handlePinPost(post)
+							}
+						},
+						onDeletePost: { post in
+							postToDelete = post
+							showPostDeleteAlert = true
+						}
+					)
 					}
 				}
 			}
+			.coordinateSpace(name: "scroll")
 			.background(colorScheme == .dark ? Color.black : Color.white)
 			
 			sortMenuOverlay
@@ -151,10 +228,17 @@ struct CYInsideCollectionView: View {
 	
 	private var createPostBinding: Binding<Bool> {
 		Binding(
-			get: { !selectedMedia.isEmpty && !showPhotoPicker },
+			get: { 
+				// Only show if we have media, photo picker is dismissed, and we're not already navigating
+				!selectedMedia.isEmpty && !showPhotoPicker && !isNavigatingToCreatePost
+			},
 			set: { newValue in
 				if !newValue {
 					selectedMedia = []
+					isNavigatingToCreatePost = false
+				} else {
+					// Mark as navigating to prevent duplicate triggers
+					isNavigatingToCreatePost = true
 				}
 			}
 		)
@@ -167,10 +251,15 @@ struct CYInsideCollectionView: View {
 			isProcessingMedia: $isProcessingMedia,
 			onPost: { _ in
 				selectedMedia = []
+				isNavigatingToCreatePost = false
 				loadPosts()
 			},
 			isFromCamera: false
 		)
+		.onDisappear {
+			// Reset navigation flag when sheet is dismissed
+			isNavigatingToCreatePost = false
+		}
 	}
 	
 	@ViewBuilder
@@ -186,6 +275,9 @@ struct CYInsideCollectionView: View {
 				showFollowersView = true
 			}
 		} else if !isCurrentUserOwnerOrMember {
+			Button("Hide Collection") {
+				hideCollection()
+			}
 			Button("Report Collection", role: .destructive) { }
 		}
 		Button("Cancel", role: .cancel) {}
@@ -201,6 +293,11 @@ struct CYInsideCollectionView: View {
 	
 	private var accessViewSheet: some View {
 		CYAccessView(collection: collection)
+			.environmentObject(authService)
+	}
+	
+	private var followersViewSheet: some View {
+		CYFollowersView(collection: collection)
 			.environmentObject(authService)
 	}
 	
@@ -263,11 +360,20 @@ struct CYInsideCollectionView: View {
 						.fontWeight(.bold)
 						.foregroundColor(.primary)
 					
-					HStack(spacing: 4) {
-						Text(collection.type == "Individual" ? "Individual" : "\(collection.memberCount) members")
-							.font(.subheadline)
-							.foregroundColor(.secondary)
+					Button(action: {
+						showMembersView = true
+					}) {
+						HStack(spacing: 4) {
+							Text(collection.type == "Individual" ? "Individual" : "\(collection.memberCount) members")
+								.font(.subheadline)
+								.foregroundColor(.secondary)
+							
+							Image(systemName: "chevron.right")
+								.font(.system(size: 10, weight: .semibold))
+								.foregroundColor(.secondary)
+						}
 					}
+					.buttonStyle(.plain)
 				}
 				
 				Spacer()
@@ -574,6 +680,13 @@ struct CYInsideCollectionView: View {
 		let pinnedPosts = posts.filter { $0.isPinned }
 		let unpinnedPosts = posts.filter { !$0.isPinned }
 		
+		// Sort pinned posts by pinnedAt (most recently pinned first)
+		let sortedPinned = pinnedPosts.sorted { post1, post2 in
+			let date1 = post1.pinnedAt ?? post1.createdAt
+			let date2 = post2.pinnedAt ?? post2.createdAt
+			return date1 > date2 // Most recent first
+		}
+		
 		// Sort unpinned posts based on sort option
 		let sortedUnpinned: [CollectionPost]
 		switch sortOption {
@@ -608,15 +721,7 @@ struct CYInsideCollectionView: View {
 			sortedUnpinned = unpinnedPosts.sorted { $0.createdAt > $1.createdAt }
 		}
 		
-		// Sort pinned posts by most recently pinned first
-		// Use pinOrder tracking (when available) for accurate ordering
-		let sortedPinned = pinnedPosts.sorted { post1, post2 in
-			let date1 = pinOrder[post1.id] ?? post1.createdAt
-			let date2 = pinOrder[post2.id] ?? post2.createdAt
-			return date1 > date2 // Most recently pinned first
-		}
-		
-		// Return pinned posts first, then sorted unpinned posts
+		// Return pinned posts first (sorted by pinnedAt), then sorted unpinned posts
 		return sortedPinned + sortedUnpinned
 	}
 	
@@ -655,7 +760,7 @@ struct CYInsideCollectionView: View {
 		// Not a member - show Request or Join based on collection type
 		switch collection.type {
 		case "Request":
-			return hasPendingRequest ? "Requested" : "Request"
+			return CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id) ? "Requested" : "Request"
 		case "Open":
 			return "Join"
 		default:
@@ -667,7 +772,7 @@ struct CYInsideCollectionView: View {
 		if isCurrentUserOwner {
 			return .red
 		}
-		if collection.type == "Request" && hasPendingRequest {
+		if collection.type == "Request" && CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id) {
 			return .blue
 		}
 		return .primary
@@ -677,7 +782,7 @@ struct CYInsideCollectionView: View {
 		if isCurrentUserOwner {
 			return .red.opacity(0.1)
 		}
-		if collection.type == "Request" && hasPendingRequest {
+		if collection.type == "Request" && CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id) {
 			return Color.blue.opacity(0.1)
 		}
 		return Color.gray.opacity(0.2)
@@ -687,7 +792,7 @@ struct CYInsideCollectionView: View {
 		if isCurrentUserOwner {
 			return .red
 		}
-		if collection.type == "Request" && hasPendingRequest {
+		if collection.type == "Request" && CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id) {
 			return .blue
 		}
 		return .clear
@@ -696,6 +801,17 @@ struct CYInsideCollectionView: View {
 	// MARK: - Functions
 	private func loadCollectionData() {
 		Task {
+			// Load collection data to get updated info
+			do {
+				if let updatedCollection = try await CollectionService.shared.getCollection(collectionId: collection.id) {
+					await MainActor.run {
+						collection = updatedCollection
+					}
+				}
+			} catch {
+				print("Error loading collection data: \(error)")
+			}
+			
 			// Load owner profile image
 			do {
 				if let ownerUser = try await UserService.shared.getUser(userId: collection.ownerId) {
@@ -707,16 +823,30 @@ struct CYInsideCollectionView: View {
 				print("Error loading owner profile: \(error)")
 			}
 			
-			// Reload collection to get latest data
-			do {
-				if let updatedCollection = try await CollectionService.shared.getCollection(collectionId: collection.id) {
-					await MainActor.run {
-						collection = updatedCollection
-					}
-				}
-			} catch {
-				print("Error reloading collection: \(error)")
+			// Check if current user is following
+			await updateFollowState()
+			
+			// Request state is managed by CollectionRequestStateManager.shared
+			// Initialize it if needed
+			await CollectionRequestStateManager.shared.initializeState()
+		}
+	}
+	
+	// Request state is now managed by CollectionRequestStateManager.shared
+	// No need for updateRequestState() - the manager handles all state updates
+	
+	private func updateFollowState() async {
+		guard let currentUserId = authService.user?.uid else {
+			await MainActor.run {
+				isFollowing = false
 			}
+			return
+		}
+		
+		// Check if user is in collection's followers array
+		let following = collection.followers.contains(currentUserId)
+		await MainActor.run {
+			isFollowing = following
 		}
 	}
 	
@@ -725,7 +855,9 @@ struct CYInsideCollectionView: View {
 		Task {
 			do {
 				// Fetch directly from Firebase (source of truth)
-				let firebasePosts = try await fetchPostsFromFirebase()
+				var firebasePosts = try await fetchPostsFromFirebase()
+				// Filter out posts from hidden collections and blocked users
+				firebasePosts = await CollectionService.filterPosts(firebasePosts)
 				await MainActor.run {
 					posts = firebasePosts
 					
@@ -810,6 +942,7 @@ struct CYInsideCollectionView: View {
 						firstMediaItem: firstMediaItem,
 						mediaItems: allMediaItems,
 						isPinned: isPinned,
+						pinnedAt: (data["pinnedAt"] as? Timestamp)?.dateValue(),
 						caption: caption
 					)
 				}
@@ -818,14 +951,114 @@ struct CYInsideCollectionView: View {
 	}
 	
 	private func handleFollowAction() async {
-		// TODO: Implement follow/unfollow
-		await MainActor.run {
-			isFollowing.toggle()
+		guard let currentUserId = authService.user?.uid else { return }
+		
+		do {
+			if isFollowing {
+				// Unfollow the collection
+				try await CollectionService.shared.unfollowCollection(
+					collectionId: collection.id,
+					userId: currentUserId
+				)
+				await MainActor.run {
+					isFollowing = false
+				}
+			} else {
+				// Follow the collection
+				try await CollectionService.shared.followCollection(
+					collectionId: collection.id,
+					userId: currentUserId
+				)
+				await MainActor.run {
+					isFollowing = true
+				}
+			}
+			
+			// Reload collection data to get updated follower count
+			loadCollectionData()
+		} catch {
+			print("❌ Error following/unfollowing collection: \(error.localizedDescription)")
 		}
 	}
 	
 	private func handleCollectionAction() async {
-		// TODO: Implement request/join/leave
+		guard authService.user?.uid != nil else { return }
+		
+		// Handle Request/Unrequest toggle for Request-type collections
+		if collection.type == "Request" && !isCurrentUserMember && !isCurrentUserOwner {
+			// Get current state from shared manager
+			let wasRequested = CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id)
+			
+			// Post notification immediately for synchronization (same pattern as follow button)
+			if let currentUserId = authService.user?.uid {
+				if wasRequested {
+					// Post cancellation notification immediately
+					NotificationCenter.default.post(
+						name: NSNotification.Name("CollectionRequestCancelled"),
+						object: collection.id,
+						userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+					)
+				} else {
+					// Post request notification immediately
+					NotificationCenter.default.post(
+						name: NSNotification.Name("CollectionRequestSent"),
+						object: collection.id,
+						userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+					)
+				}
+			}
+			
+			do {
+				if wasRequested {
+					// Cancel/unrequest
+					try await CollectionService.shared.cancelCollectionRequest(collectionId: collection.id)
+				} else {
+					// Send request
+				try await CollectionService.shared.sendCollectionRequest(collectionId: collection.id)
+				}
+			} catch {
+				print("Error \(wasRequested ? "cancelling" : "sending") collection request: \(error.localizedDescription)")
+				// Revert the notification on error
+				if let currentUserId = authService.user?.uid {
+					if wasRequested {
+						NotificationCenter.default.post(
+							name: NSNotification.Name("CollectionRequestSent"),
+							object: collection.id,
+							userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+						)
+					} else {
+						NotificationCenter.default.post(
+							name: NSNotification.Name("CollectionRequestCancelled"),
+							object: collection.id,
+							userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+						)
+					}
+				}
+			}
+		}
+		// Handle Join action for Open collections
+		else if collection.type == "Open" && !isCurrentUserMember && !isCurrentUserOwner {
+			// Update local state immediately for instant feedback
+			let currentUserId = Auth.auth().currentUser?.uid ?? ""
+			if !collection.members.contains(currentUserId) {
+				collection.members.append(currentUserId)
+				collection.memberCount += 1
+			}
+			
+			do {
+				try await CollectionService.shared.joinCollection(collectionId: collection.id)
+				// Reload collection data to get fresh state from server
+				loadCollectionData()
+			} catch {
+				print("Error joining collection: \(error.localizedDescription)")
+				// Revert local state on error
+				if let index = collection.members.firstIndex(of: currentUserId) {
+					collection.members.remove(at: index)
+					collection.memberCount = max(0, collection.memberCount - 1)
+				}
+			}
+		}
+		// Handle Leave action (already implemented in handleLeaveCollection)
 	}
 	
 	private func deleteCollection() {
@@ -876,41 +1109,50 @@ struct CYInsideCollectionView: View {
 		}
 	}
 	
-	// MARK: - Pin and Delete Functions
-	private func togglePin(post: CollectionPost) async {
-		// Only owners/admins can pin/unpin posts (any post), members cannot pin
-		guard isCollectionOwnerOrAdmin() else { return }
-		
-		// If trying to pin, check if we already have 4 pinned posts
-		if !post.isPinned {
-			let pinnedCount = posts.filter { $0.isPinned }.count
-			if pinnedCount >= 4 {
+	private func hideCollection() {
+		Task {
+			do {
+				try await CYServiceManager.shared.hideCollection(collectionId: collection.id)
+				// Dismiss the view after hiding
 				await MainActor.run {
-					// Show alert that max 4 posts can be pinned
-					let alert = UIAlertController(
-						title: "Pin Limit Reached",
-						message: "You can only pin up to 4 posts. Please unpin another post first.",
-						preferredStyle: .alert
-					)
-					alert.addAction(UIAlertAction(title: "OK", style: .default))
-					if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-					   let rootViewController = windowScene.windows.first?.rootViewController {
-						rootViewController.present(alert, animated: true)
-					}
+					dismiss()
 				}
-				return
+			} catch {
+				print("❌ CYInsideCollectionView: Error hiding collection: \(error)")
+				await MainActor.run {
+					deleteErrorMessage = error.localizedDescription
+					showDeleteError = true
+				}
 			}
+		}
+	}
+	
+	// MARK: - Pin and Delete Functions
+	private func handlePinPost(_ post: CollectionPost) async {
+		// Check permissions
+		let isOwner = collection.ownerId == authService.user?.uid
+		let isAdmin = collection.owners.contains(authService.user?.uid ?? "")
+		let isIndividual = collection.type == "Individual"
+		let isPostAuthor = post.authorId == authService.user?.uid
+		
+		// Individual collections: user can pin their own posts
+		// Multi-member collections: only owner/admin can pin
+		if isIndividual {
+			guard isPostAuthor else { return }
+		} else {
+			guard isOwner || isAdmin else { return }
 		}
 		
 		isProcessing = true
 		do {
-			try await CollectionService.shared.togglePostPin(postId: post.id, isPinned: !post.isPinned)
+			let newPinState = !post.isPinned
+			try await CollectionService.shared.togglePostPin(postId: post.id, isPinned: newPinState)
 			print("✅ Post pin toggled successfully")
 			
 			// Update pin order tracking
 			await MainActor.run {
-				if !post.isPinned {
-					// Post is being pinned - record current time as pin order
+				if newPinState {
+					// Post is being pinned - record current time as pin order (most recent first)
 					self.pinOrder[post.id] = Date()
 				} else {
 					// Post is being unpinned - remove from pin order
@@ -920,13 +1162,19 @@ struct CYInsideCollectionView: View {
 				// Reload posts to get updated pin status
 				loadPosts()
 				
-				// Post notification to refresh the collection view
+				// Post notification to refresh views
+				NotificationCenter.default.post(name: NSNotification.Name("PostCreated"), object: nil)
 				NotificationCenter.default.post(name: NSNotification.Name("CollectionUpdated"), object: post.collectionId)
 			}
 		} catch {
 			print("❌ Error toggling post pin: \(error)")
 		}
 		isProcessing = false
+	}
+	
+	// Legacy function name for compatibility
+	private func togglePin(post: CollectionPost) async {
+		await handlePinPost(post)
 	}
 	
 	private func deletePost(post: CollectionPost) async {
@@ -1021,15 +1269,18 @@ struct CYInsideCollectionView: View {
 						firstMediaItem: firstMediaItem,
 						mediaItems: allMediaItems,
 						isPinned: isPinned,
+						pinnedAt: (data["pinnedAt"] as? Timestamp)?.dateValue(),
 						caption: caption
 					)
 				}
 				.sorted { $0.createdAt > $1.createdAt }
 				
 				Task { @MainActor in
-					posts = loadedPosts
+					// Filter out posts from hidden collections and blocked users
+					let filteredPosts = await CollectionService.filterPosts(loadedPosts)
+					posts = filteredPosts
 					isLoadingPosts = false
-					print("✅ Real-time update: Loaded \(loadedPosts.count) posts")
+					print("✅ Real-time update: Loaded \(filteredPosts.count) posts")
 				}
 			}
 	}

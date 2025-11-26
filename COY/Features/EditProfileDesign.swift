@@ -129,12 +129,8 @@ struct EditProfileDesign: View {
 								.frame(width: 70, height: 70)
 								.clipShape(Circle())
 						} else {
-							// Default profile icon - white, not translucent
-							Image(systemName: "person.crop.circle.fill")
-								.resizable()
-								.scaledToFill()
-								.frame(width: 70, height: 70)
-								.foregroundColor(.white)
+							// Default profile icon
+							DefaultProfileImageView(size: 70)
 						}
 						
 						// Edit Profile Image Button overlay

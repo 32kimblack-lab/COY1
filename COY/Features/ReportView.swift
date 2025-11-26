@@ -101,6 +101,7 @@ struct ReportView: View {
 	
 	var body: some View {
 		NavigationStack {
+			PhoneSizeContainer {
 			ScrollView {
 				VStack(alignment: .leading, spacing: 24) {
 					// Header info
@@ -202,6 +203,7 @@ struct ReportView: View {
 				}
 			} message: {
 				Text(viewModel.errorMessage ?? "")
+				}
 			}
 		}
 	}

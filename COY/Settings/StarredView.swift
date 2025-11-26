@@ -13,7 +13,9 @@ struct StarredView: View {
 	]
 	
 	var body: some View {
-		mainContentView
+		PhoneSizeContainer {
+			mainContentView
+		}
 			.background(backgroundColor)
 			.navigationBarBackButtonHidden(true)
 			.navigationTitle("")

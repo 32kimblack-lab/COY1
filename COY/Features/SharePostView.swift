@@ -39,91 +39,97 @@ struct SharePostView: View {
 		}
 	}
 	
-	var body: some View {
-		NavigationStack {
-			VStack(spacing: 0) {
-				// Search bar
-				HStack {
-					Image(systemName: "magnifyingglass")
-						.foregroundColor(.gray)
-					TextField("Search friends...", text: $searchText)
-						.textFieldStyle(PlainTextFieldStyle())
+	private var mainContentView: some View {
+		VStack(spacing: 0) {
+			// Search bar
+			HStack {
+				Image(systemName: "magnifyingglass")
+					.foregroundColor(.gray)
+				TextField("Search friends...", text: $searchText)
+					.textFieldStyle(PlainTextFieldStyle())
+			}
+			.padding(.horizontal, 12)
+			.padding(.vertical, 10)
+			.background(Color(.systemGray5))
+			.cornerRadius(12)
+			.padding(.horizontal)
+			.padding(.vertical, 8)
+			
+			// Users list
+			if isLoading {
+				Spacer()
+				ProgressView()
+				Spacer()
+			} else if allUsers.isEmpty {
+				Spacer()
+				VStack(spacing: 16) {
+					Image(systemName: "person.2")
+						.font(.system(size: 48))
+						.foregroundColor(.secondary)
+					Text("No friends or contacts found")
+						.font(.headline)
+						.foregroundColor(.secondary)
+					Text("Add friends to share posts with them")
+						.font(.subheadline)
+						.foregroundColor(.secondary)
 				}
-				.padding(.horizontal, 12)
-				.padding(.vertical, 10)
-				.background(Color(.systemGray5))
-				.cornerRadius(12)
-				.padding(.horizontal)
-				.padding(.vertical, 8)
-				
-				// Users list
-				if isLoading {
-					Spacer()
-					ProgressView()
-					Spacer()
-				} else if allUsers.isEmpty {
-					Spacer()
-					VStack(spacing: 16) {
-						Image(systemName: "person.2")
-							.font(.system(size: 48))
-							.foregroundColor(.secondary)
-						Text("No friends or contacts found")
-							.font(.headline)
-							.foregroundColor(.secondary)
-						Text("Add friends to share posts with them")
-							.font(.subheadline)
-							.foregroundColor(.secondary)
-					}
-					Spacer()
-				} else {
-					ScrollView {
-						LazyVStack(spacing: 0) {
-							ForEach(allUsers) { user in
-								ShareUserRow(
-									user: user,
-									isSelected: selectedUsers.contains(user.userId),
-									onToggle: {
-										if selectedUsers.contains(user.userId) {
-											selectedUsers.remove(user.userId)
-										} else {
-											selectedUsers.insert(user.userId)
-										}
+				Spacer()
+			} else {
+				ScrollView {
+					LazyVStack(spacing: 0) {
+						ForEach(allUsers) { user in
+							ShareUserRow(
+								user: user,
+								isSelected: selectedUsers.contains(user.userId),
+								onToggle: {
+									if selectedUsers.contains(user.userId) {
+										selectedUsers.remove(user.userId)
+									} else {
+										selectedUsers.insert(user.userId)
 									}
-								)
-							}
+								}
+							)
 						}
 					}
-				}
-				
-				// Share button
-				if !selectedUsers.isEmpty {
-					VStack(spacing: 0) {
-						Divider()
-						Button(action: {
-							Task {
-								await sharePost()
-							}
-						}) {
-							if isSharing {
-								ProgressView()
-									.progressViewStyle(CircularProgressViewStyle(tint: .white))
-									.frame(maxWidth: .infinity)
-									.frame(height: 50)
-							} else {
-								Text("Share with \(selectedUsers.count) \(selectedUsers.count == 1 ? "friend" : "friends")")
-									.font(.headline)
-									.foregroundColor(.white)
-									.frame(maxWidth: .infinity)
-									.frame(height: 50)
-							}
-						}
-						.background(selectedUsers.isEmpty ? Color.gray : Color.blue)
-						.disabled(selectedUsers.isEmpty || isSharing)
-					}
-					.background(colorScheme == .dark ? Color.black : Color.white)
 				}
 			}
-			.background(colorScheme == .dark ? Color.black : Color.white)
+			
+			// Share button
+			if !selectedUsers.isEmpty {
+				VStack(spacing: 0) {
+					Divider()
+					Button(action: {
+						Task {
+							await sharePost()
+						}
+					}) {
+						if isSharing {
+							ProgressView()
+								.progressViewStyle(CircularProgressViewStyle(tint: .white))
+								.frame(maxWidth: .infinity)
+								.frame(height: 50)
+						} else {
+							Text("Share with \(selectedUsers.count) \(selectedUsers.count == 1 ? "friend" : "friends")")
+								.font(.headline)
+								.foregroundColor(.white)
+								.frame(maxWidth: .infinity)
+								.frame(height: 50)
+						}
+					}
+					.background(selectedUsers.isEmpty ? Color.gray : Color.blue)
+					.disabled(selectedUsers.isEmpty || isSharing)
+				}
+				.background(colorScheme == .dark ? Color.black : Color.white)
+			}
+		}
+		.background(colorScheme == .dark ? Color.black : Color.white)
+	}
+	
+	var body: some View {
+		NavigationStack {
+			PhoneSizeContainer {
+				mainContentView
+			}
 			.navigationTitle("Share Post")
 			.navigationBarTitleDisplayMode(.inline)
 			.toolbar {
@@ -402,14 +408,7 @@ struct ShareUserRow: View {
 							.frame(width: 50, height: 50)
 							.clipShape(Circle())
 					} else {
-						Circle()
-							.fill(Color.gray.opacity(0.3))
-							.frame(width: 50, height: 50)
-							.overlay(
-								Text(user.name.prefix(1).uppercased())
-									.font(.headline)
-									.foregroundColor(.gray)
-							)
+						DefaultProfileImageView(size: 50)
 					}
 				}
 				

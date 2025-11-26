@@ -53,11 +53,20 @@ struct DefaultProfileImageView: View {
 	@Environment(\.colorScheme) var colorScheme
 	
 	var body: some View {
-		Image(systemName: "person.crop.circle.fill")
+		ZStack {
+			// Light gray background circle
+			Circle()
+				.fill(Color(red: 0.85, green: 0.85, blue: 0.85)) // Light gray
+				.frame(width: size, height: size)
+			
+			// White solid person silhouette (not transparent)
+			Image(systemName: "person.fill")
 			.resizable()
-			.scaledToFill()
+				.scaledToFit()
+				.frame(width: size * 0.5, height: size * 0.5)
+				.foregroundColor(.white)
+		}
 			.frame(width: size, height: size)
-			.foregroundColor(.white)
 	}
 }
 

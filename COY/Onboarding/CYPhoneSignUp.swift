@@ -1,0 +1,292 @@
+import SwiftUI
+
+struct CYPhoneSignUp: View {
+
+	@EnvironmentObject var authService: AuthService
+	@StateObject private var authViewModel = AuthViewModel.shared
+	@Environment(\.dismiss) private var dismiss
+	
+	@State private var navigateToProfile = false
+	@State private var isSigningUp = false
+	@State private var phoneNumber: String = ""
+	
+	let months = ["January", "February", "March", "April", "May", "June", "July",
+				  "August", "September", "October", "November", "December"]
+	@Environment(\.colorScheme) var colorScheme
+	
+	private var textColor: Color {
+		return colorScheme == .dark ? .white : .black
+	}
+	
+	var body: some View {
+		NavigationStack {
+			VStack(spacing: 20) {
+				
+				// Logo
+				CombinedIconView()
+					.offset(y: 60)
+					.offset(x: 20)
+				
+				// Input Fields
+				VStack(alignment: .leading, spacing: 15) {
+					
+					// Phone Number
+					VStack(alignment: .leading, spacing: 5) {
+						HStack(spacing: 10) {
+							Image(systemName: "phone")
+								.foregroundColor(.secondary)
+							TextField("Phone Number", text: $phoneNumber)
+								.keyboardType(.phonePad)
+								.textContentType(.telephoneNumber)
+								.autocorrectionDisabled()
+								.foregroundColor(textColor)
+						}
+						.padding()
+						.background(
+							RoundedRectangle(cornerRadius: 10)
+								.stroke(Color.gray.opacity(0.4), lineWidth: 1)
+						)
+					}
+					
+					// Name
+					TKTextField(text: $authViewModel.name, placeholder: "Name", image: "person")
+						.frame(maxWidth: .infinity)
+						.foregroundColor(textColor)
+					
+					// Username
+					VStack(alignment: .leading, spacing: 5) {
+						TKTextField(text: $authViewModel.username, placeholder: "Username", image: "at")
+							.frame(maxWidth: .infinity)
+							.foregroundColor(textColor)
+							.onChange(of: authViewModel.username) { _, _ in
+								authViewModel.validateUsername()
+							}
+						
+						if !authViewModel.usernameError.isEmpty {
+							Text(authViewModel.usernameError)
+								.foregroundColor(.red)
+								.font(.caption)
+								.padding(.horizontal, 5)
+						}
+					}
+					
+					// Date of Birth
+					VStack(alignment: .leading, spacing: 5) {
+						HStack(spacing: 10) {
+							// Month Dropdown
+							Menu {
+								ForEach(months, id: \.self) { month in
+									Button(month) {
+										authViewModel.birthMonth = month
+										authViewModel.validateBirthday()
+									}
+								}
+							} label: {
+								HStack(spacing: 10) {
+									Image(systemName: "calendar")
+										.foregroundColor(.secondary)
+									Text(authViewModel.birthMonth == "Month" ? "Month" : authViewModel.birthMonth)
+										.foregroundColor(authViewModel.birthMonth == "Month" ? .secondary : textColor)
+										.frame(maxWidth: .infinity, alignment: .leading)
+										.fixedSize(horizontal: false, vertical: true)
+										.lineLimit(1)
+									Image(systemName: "chevron.down")
+										.foregroundColor(.secondary)
+										.font(.caption)
+								}
+								.padding()
+								.frame(maxWidth: .infinity)
+								.background(
+									RoundedRectangle(cornerRadius: 10)
+										.stroke(Color.gray.opacity(0.4), lineWidth: 1)
+								)
+							}
+							.frame(minWidth: 180, idealWidth: 200, maxWidth: .infinity)
+							
+							// Day Field - shows actual numbers, not masked
+							HStack(spacing: 10) {
+								Image(systemName: "calendar")
+									.foregroundColor(.secondary)
+								TextField("DD", text: $authViewModel.birthDay)
+									.keyboardType(.numberPad)
+									.textContentType(.none)
+									.autocorrectionDisabled()
+									.foregroundColor(textColor)
+									.onChange(of: authViewModel.birthDay) { _, newValue in
+										// Ensure only numbers are entered
+										let filtered = newValue.filter { $0.isNumber }
+										if filtered != newValue {
+											authViewModel.birthDay = filtered
+										}
+										authViewModel.validateBirthday()
+									}
+							}
+							.padding()
+							.background(
+								RoundedRectangle(cornerRadius: 10)
+									.stroke(Color.gray.opacity(0.4), lineWidth: 1)
+							)
+							.frame(minWidth: 70, idealWidth: 75, maxWidth: 80)
+							
+							// Year Field - shows actual numbers, not masked or dots
+							HStack(spacing: 10) {
+								Image(systemName: "calendar")
+									.foregroundColor(.secondary)
+								TextField("YYYY", text: $authViewModel.birthYear)
+									.keyboardType(.numberPad)
+									.textContentType(.none)
+									.autocorrectionDisabled()
+									.foregroundColor(textColor)
+									.onChange(of: authViewModel.birthYear) { _, newValue in
+										// Ensure only numbers are entered and limit to 4 digits
+										let filtered = newValue.filter { $0.isNumber }
+										let limited = String(filtered.prefix(4))
+										if limited != newValue {
+											authViewModel.birthYear = limited
+										}
+										authViewModel.validateBirthday()
+									}
+							}
+							.padding()
+							.background(
+								RoundedRectangle(cornerRadius: 10)
+									.stroke(Color.gray.opacity(0.4), lineWidth: 1)
+							)
+							.frame(minWidth: 90, idealWidth: 95, maxWidth: 100)
+						}
+						
+						if !authViewModel.birthdayError.isEmpty {
+							Text(authViewModel.birthdayError)
+								.foregroundColor(.red)
+								.font(.caption)
+								.padding(.horizontal, 5)
+						}
+					}
+				}
+				.padding(.horizontal, 20)
+				.padding(.bottom, 40)
+				.offset(y: 130)
+				
+				Spacer()
+				
+				// Error Message
+				if !authViewModel.errorMessage.isEmpty {
+					Text(authViewModel.errorMessage)
+						.foregroundStyle(.red)
+						.font(.caption)
+						.padding(.horizontal, 20)
+				}
+				
+				// Sign Up Button
+				Button(action: {
+					Task {
+						await MainActor.run {
+							isSigningUp = true
+						}
+						
+						// Validate all fields
+						authViewModel.validateBirthday()
+						await authViewModel.validateUsernameAsync()
+						
+						// Small delay to ensure UI updates
+						try? await Task.sleep(nanoseconds: 100_000_000)
+						
+						// Check if there are any validation errors
+						if !authViewModel.usernameError.isEmpty || 
+						   !authViewModel.birthdayError.isEmpty {
+							await MainActor.run {
+								isSigningUp = false
+							}
+							return
+						}
+						
+						// For phone number sign up, we'll create a temporary email
+						// In a real implementation, you'd use Firebase Phone Auth
+						let tempEmail = "\(phoneNumber)@phone.temp"
+						authViewModel.email = tempEmail
+						authViewModel.password = "temp_password_\(UUID().uuidString)"
+						authViewModel.confirmPassword = authViewModel.password
+						
+						// Set signup flow flag
+						authService.setInSignUpFlow(true)
+						UserDefaults.standard.set(true, forKey: "profileSaveInProgress")
+						
+						// Create Firebase Auth account
+						let success = await authViewModel.register()
+						if success {
+							await MainActor.run {
+								isSigningUp = false
+								navigateToProfile = true
+							}
+						} else {
+							authService.setInSignUpFlow(false)
+							UserDefaults.standard.removeObject(forKey: "profileSaveInProgress")
+							await MainActor.run {
+								isSigningUp = false
+							}
+						}
+					}
+				}) {
+					HStack {
+						if isSigningUp {
+							ProgressView()
+								.progressViewStyle(CircularProgressViewStyle(tint: .white))
+								.scaleEffect(0.8)
+						}
+						Text(isSigningUp ? "Signing Up..." : "Sign Up")
+							.fontWeight(.semibold)
+					}
+					.frame(maxWidth: .infinity)
+					.padding(.vertical, 14)
+					.background(isSigningUp ? Color.accentColor.opacity(0.7) : Color.accentColor)
+					.foregroundColor(.white)
+					.cornerRadius(10)
+				}
+				.disabled(isSigningUp || 
+						 authService.isLoading || 
+						 !authViewModel.usernameError.isEmpty || 
+						 !authViewModel.birthdayError.isEmpty)
+				.padding()
+				.offset(y: -20)
+			}
+			.padding()
+			.background(textColor == .white ? Color.black : Color.white)
+			.edgesIgnoringSafeArea(.all)
+			.fullScreenCover(isPresented: $navigateToProfile) {
+				CYSignupProfileView(
+					name: authViewModel.name,
+					username: authViewModel.username,
+					email: authViewModel.email,
+					birthday: "\(authViewModel.birthMonth) \(authViewModel.birthDay), \(authViewModel.birthYear)",
+					password: authViewModel.password
+				)
+				.environmentObject(authService)
+			}
+			.navigationBarBackButtonHidden(true)
+			.toolbar {
+				ToolbarItem(placement: .navigationBarLeading) {
+					Button("Back") {
+						dismiss()
+					}
+				}
+			}
+			.onTapGesture {
+				hideKeyboard()
+			}
+			.onAppear {
+				// Clear all sign up fields when view appears
+				authViewModel.clearAllFields()
+				phoneNumber = ""
+			}
+			.onDisappear {
+				// Also clear when view disappears to ensure clean state
+				authViewModel.clearAllFields()
+			}
+		}
+	}
+	
+	private func hideKeyboard() {
+		UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+	}
+}
+

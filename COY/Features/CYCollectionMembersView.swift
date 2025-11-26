@@ -247,13 +247,11 @@ struct CYCollectionMembersView: View {
 			
 			Spacer()
 			
-			// Action Buttons (only Owner and Admins can see these)
-			if canCurrentUserManageMembers {
+			// Action Buttons (only Owner can see these buttons on Members)
 				// Only show actions for Members (not Owner or Admins)
-				if role == .member {
+			if role == .member && isCurrentUserOwner {
 					HStack(spacing: 12) {
-						// Only Owner can promote to Admin
-						if isCurrentUserOwner {
+					// Admin button - only Owner can promote members to admin
 							Button(action: {
 								selectedUserToPromote = user
 								showPromoteToAdminAlert = true
@@ -269,9 +267,8 @@ struct CYCollectionMembersView: View {
 									)
 							}
 							.disabled(isProcessingAction)
-						}
 						
-						// Owner and Admins can remove members
+					// Remove button - only Owner can remove members
 						Button(action: {
 							selectedUserToRemove = user
 							showRemoveAlert = true
@@ -287,7 +284,6 @@ struct CYCollectionMembersView: View {
 								)
 						}
 						.disabled(isProcessingAction)
-					}
 				}
 			}
 		}

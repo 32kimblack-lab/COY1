@@ -19,6 +19,9 @@
 		B245C9542EC9CF400051EF90 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9532EC9CF400051EF90 /* FirebaseAuth */; };
 		B245C9562EC9CF4C0051EF90 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9552EC9CF4C0051EF90 /* FirebaseFirestore */; };
 		B245C9582EC9D0310051EF90 /* FirebaseStorage in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9572EC9D0310051EF90 /* FirebaseStorage */; };
+		B245C9642EC9D1000051EF90 /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9622EC9D1000051EF90 /* FirebaseMessaging */; };
+		B245C9652EC9D1000051EF90 /* FirebaseFunctions in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9632EC9D1000051EF90 /* FirebaseFunctions */; };
+		B28260D72ED4C9B400B94103 /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9612EC9D1000051EF90 /* GoogleMobileAds */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -38,6 +41,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B28260D72ED4C9B400B94103 /* GoogleMobileAds in Frameworks */,
 				B245C7CB2EC9C2900051EF90 /* FirebaseAnalyticsIdentitySupport in Frameworks */,
 				B245C9542EC9CF400051EF90 /* FirebaseAuth in Frameworks */,
 				B245C6012EC9B1F30051EF90 /* SDWebImage in Frameworks */,
@@ -50,6 +54,8 @@
 				B245C9522EC9CF320051EF90 /* FirebaseCore in Frameworks */,
 				B245C9562EC9CF4C0051EF90 /* FirebaseFirestore in Frameworks */,
 				B245C7C52EC9C2900051EF90 /* FirebaseAILogic in Frameworks */,
+				B245C9642EC9D1000051EF90 /* FirebaseMessaging in Frameworks */,
+				B245C9652EC9D1000051EF90 /* FirebaseFunctions in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +118,9 @@
 				B245C9532EC9CF400051EF90 /* FirebaseAuth */,
 				B245C9552EC9CF4C0051EF90 /* FirebaseFirestore */,
 				B245C9572EC9D0310051EF90 /* FirebaseStorage */,
+				B245C9612EC9D1000051EF90 /* GoogleMobileAds */,
+				B245C9622EC9D1000051EF90 /* FirebaseMessaging */,
+				B245C9632EC9D1000051EF90 /* FirebaseFunctions */,
 			);
 			productName = COY;
 			productReference = B245C4A62EC9A6530051EF90 /* COY.app */;
@@ -145,6 +154,7 @@
 				B245C5FF2EC9B1F30051EF90 /* XCRemoteSwiftPackageReference "SDWebImage" */,
 				B245C6042EC9B2260051EF90 /* XCRemoteSwiftPackageReference "SDWebImageSwiftUI" */,
 				B245C7C12EC9C2900051EF90 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+				B245C9602EC9D1000051EF90 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = B245C4A72EC9A6530051EF90 /* Products */;
@@ -311,17 +321,9 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
-				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_PREPROCESS = NO;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
@@ -358,17 +360,9 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
-				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_PREPROCESS = NO;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
@@ -439,6 +433,14 @@
 				minimumVersion = 12.6.0;
 			};
 		};
+		B245C9602EC9D1000051EF90 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/googleads/swift-package-manager-google-mobile-ads.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 11.0.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -501,6 +503,21 @@
 			isa = XCSwiftPackageProductDependency;
 			package = B245C7C12EC9C2900051EF90 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseStorage;
+		};
+		B245C9612EC9D1000051EF90 /* GoogleMobileAds */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B245C9602EC9D1000051EF90 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */;
+			productName = GoogleMobileAds;
+		};
+		B245C9622EC9D1000051EF90 /* FirebaseMessaging */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B245C7C12EC9C2900051EF90 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseMessaging;
+		};
+		B245C9632EC9D1000051EF90 /* FirebaseFunctions */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B245C7C12EC9C2900051EF90 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseFunctions;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

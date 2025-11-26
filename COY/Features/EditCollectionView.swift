@@ -20,7 +20,6 @@ struct EditCollectionView: View {
 	@State private var isLoading = false
 	@State private var errorMessage: String?
 	@State private var showErrorAlert = false
-	@State private var showMembersView = false
 	
 	init(collection: CollectionData, onSave: (() -> Void)? = nil) {
 		_collection = State(initialValue: collection)
@@ -28,8 +27,9 @@ struct EditCollectionView: View {
 	}
 	
 	var body: some View {
-		ZStack {
-			(colorScheme == .dark ? Color.black : Color.white).ignoresSafeArea()
+		PhoneSizeContainer {
+			ZStack {
+				(colorScheme == .dark ? Color.black : Color.white).ignoresSafeArea()
 			VStack(spacing: 0) {
 				// Header
 				HStack {
@@ -195,34 +195,6 @@ struct EditCollectionView: View {
 							}
 							.padding(.horizontal)
 						}
-						
-						// Members Section (for collections with members)
-						VStack(alignment: .leading, spacing: 8) {
-							Text("Members")
-								.font(.subheadline)
-								.foregroundColor(.secondary)
-							Button(action: {
-								showMembersView = true
-							}) {
-								HStack {
-									if collection.memberCount > 0 {
-										Text("\(collection.memberCount) member\(collection.memberCount == 1 ? "" : "s")")
-											.foregroundColor(.primary)
-									} else {
-										Text("No members yet")
-											.foregroundColor(.secondary)
-									}
-									Spacer()
-									Image(systemName: "chevron.right")
-										.foregroundColor(.gray)
-										.font(.caption)
-								}
-								.padding()
-								.background(colorScheme == .dark ? Color(.systemGray6) : Color(.systemGray6))
-								.cornerRadius(8)
-							}
-						}
-						.padding(.horizontal)
 					}
 					.padding(.bottom, 40)
 				}
@@ -235,15 +207,11 @@ struct EditCollectionView: View {
 			EditCollectionImagePicker(image: $profileImage)
 				.presentationCompactAdaptation(.none)
 		}
+			}
 		.alert("Error", isPresented: $showErrorAlert) {
 			Button("OK", role: .cancel) {}
 		} message: {
 			Text(errorMessage ?? "An error occurred")
-		}
-		.sheet(isPresented: $showMembersView) {
-			CYMembersView(collection: collection)
-				.environmentObject(authService)
-				.presentationCompactAdaptation(.none)
 		}
 	}
 	

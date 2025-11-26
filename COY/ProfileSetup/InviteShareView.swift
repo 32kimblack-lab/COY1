@@ -22,6 +22,7 @@ struct InviteShareView: View {
 	
 	var body: some View {
 		NavigationStack {
+			PhoneSizeContainer {
 			VStack(spacing: 50) {
 				Spacer()
 				
@@ -53,6 +54,7 @@ struct InviteShareView: View {
 				
 				Spacer()
 			}
+				}
 			.navigationBarTitleDisplayMode(.inline)
 			.toolbar {
 				ToolbarItem(placement: .navigationBarTrailing) {

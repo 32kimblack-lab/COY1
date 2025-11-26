@@ -21,6 +21,7 @@ struct ViewerProfileView: View {
 	@State private var collectionsListener: ListenerRegistration?
 	@State private var userSortPreference: String = "Newest to Oldest"
 	@State private var userCustomOrder: [String] = []
+	@State private var pendingRequests: Set<String> = [] // Track collections with pending requests
 	@Environment(\.colorScheme) var colorScheme
 	
 	var isViewingOwnProfile: Bool {
@@ -52,20 +53,22 @@ struct ViewerProfileView: View {
 	}
 	
 	var body: some View {
-		ZStack(alignment: .top) {
-			// Background
-			(colorScheme == .dark ? Color.black : Color.white)
-				.ignoresSafeArea()
-			
-			// Main content
-			VStack(spacing: 0) {
-				// Profile Header Section
-				profileHeaderSection
+		PhoneSizeContainer {
+			ZStack(alignment: .top) {
+				// Background
+				(colorScheme == .dark ? Color.black : Color.white)
+					.ignoresSafeArea()
 				
-				// Collections Section - only show if user is not blocked
-				if !isUserBlocked {
-					userCollectionsSection
-						.padding(.top, -20)
+				// Main content
+				VStack(spacing: 0) {
+					// Profile Header Section
+					profileHeaderSection
+					
+					// Collections Section - only show if user is not blocked
+					if !isUserBlocked {
+						userCollectionsSection
+							.padding(.top, -20)
+					}
 				}
 			}
 		}
@@ -108,6 +111,7 @@ struct ViewerProfileView: View {
 				await loadUserCollections()
 				checkFriendshipStatus()
 				checkBlockedStatus()
+				initializeRequestState()
 			}
 			setupCollectionsListener()
 		}
@@ -182,6 +186,18 @@ struct ViewerProfileView: View {
 				Task {
 					await loadUserCollections(forceFresh: true)
 				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { _ in
+			// Refresh collections when a user is blocked
+			Task {
+				await loadUserCollections(forceFresh: true)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { _ in
+			// Refresh collections when a user is unblocked
+			Task {
+				await loadUserCollections(forceFresh: true)
 			}
 		}
 	}
@@ -360,16 +376,18 @@ struct ViewerProfileView: View {
 							collection: collection,
 							onOwnerProfileTapped: { ownerId in
 								selectedOwnerId = ownerId
+							},
+							hasRequested: pendingRequests.contains(collection.id),
+							onActionTapped: {
+								handleCollectionAction(collection: collection)
+							},
+							onCollectionTapped: { collection in
+								await handleCollectionTap(collection: collection)
 							}
 						)
 						.listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
 						.listRowSeparator(.hidden)
 						.listRowBackground(Color.clear)
-						.onTapGesture {
-							Task {
-								await handleCollectionTap(collection: collection)
-							}
-						}
 					}
 				}
 				.listStyle(PlainListStyle())
@@ -457,8 +475,11 @@ struct ViewerProfileView: View {
 				)
 			}
 			
+			// Filter out hidden collections and collections from blocked users
+			let filteredCollections = await CollectionService.filterCollections(collections)
+			
 			await MainActor.run {
-				self.userCollections = collections
+				self.userCollections = filteredCollections
 				self.isLoadingCollections = false
 				self.profileRefreshTrigger = UUID()
 			}
@@ -473,6 +494,26 @@ struct ViewerProfileView: View {
 	private func setupCollectionsListener() {
 		// TODO: Implement real-time listener if needed
 		// For now, collections are loaded on appear and refresh
+	}
+	
+	private func initializeRequestState() {
+		// Check for existing pending request notifications
+		Task {
+			guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+			do {
+				let notifications = try await NotificationService.shared.getNotifications(userId: currentUserId)
+				await MainActor.run {
+					for notification in notifications {
+						if notification.type == "collection_request" && notification.status == "pending",
+						   let collectionId = notification.collectionId {
+							pendingRequests.insert(collectionId)
+						}
+					}
+				}
+			} catch {
+				print("Error initializing request state: \(error)")
+			}
+		}
 	}
 	
 	private func checkFriendshipStatus() {
@@ -566,26 +607,114 @@ struct ViewerProfileView: View {
 			checkBlockedStatus()
 		}
 	}
+	
+	private func handleFollowTapped(collection: CollectionData) async {
+		guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+		
+		let isCurrentlyFollowing = collection.followers.contains(currentUserId)
+		
+		do {
+			if isCurrentlyFollowing {
+				// Unfollow
+				try await CollectionService.shared.unfollowCollection(
+					collectionId: collection.id,
+					userId: currentUserId
+				)
+			} else {
+				// Follow
+				try await CollectionService.shared.followCollection(
+					collectionId: collection.id,
+					userId: currentUserId
+				)
+			}
+			// Refresh collections to update follow status
+			await loadUserCollections(forceFresh: true)
+		} catch {
+			print("❌ Error following/unfollowing collection: \(error.localizedDescription)")
+		}
+	}
+	
+	private func handleCollectionAction(collection: CollectionData) {
+		guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+		
+		// Check if user is member, owner, or admin
+		let isMember = collection.members.contains(currentUserId)
+		let isOwner = collection.ownerId == currentUserId
+		let isAdmin = collection.owners.contains(currentUserId)
+		
+		// Handle Request action for Request-type collections if user is NOT a member/owner/admin
+		if collection.type == "Request" && !isMember && !isOwner && !isAdmin {
+			Task {
+				do {
+					try await CollectionService.shared.sendCollectionRequest(collectionId: collection.id)
+					_ = await MainActor.run {
+						pendingRequests.insert(collection.id)
+					}
+				} catch {
+					print("Error sending collection request: \(error.localizedDescription)")
+				}
+			}
+		}
+		// Handle Join action for Open collections if user is NOT a member/owner/admin
+		else if collection.type == "Open" && !isMember && !isOwner && !isAdmin {
+			Task {
+				do {
+					try await CollectionService.shared.joinCollection(collectionId: collection.id)
+					// Refresh collections to show updated membership
+					await loadUserCollections(forceFresh: true)
+				} catch {
+					print("Error joining collection: \(error.localizedDescription)")
+				}
+			}
+		}
+		// Handle Leave action for Open collections if user IS a member (but not owner)
+		else if collection.type == "Open" && isMember && !isOwner {
+			Task {
+				do {
+					try await CollectionService.shared.leaveCollection(collectionId: collection.id, userId: currentUserId)
+					// Refresh collections to show updated membership
+					await loadUserCollections(forceFresh: true)
+				} catch {
+					print("Error leaving collection: \(error.localizedDescription)")
+				}
+			}
+		}
+	}
 }
 
 // MARK: - Simple Collection Row
 struct SimpleCollectionRow: View {
 	let collection: CollectionData
 	let onOwnerProfileTapped: ((String) -> Void)?
+	let hasRequested: Bool
+	let onActionTapped: () -> Void
+	let onCollectionTapped: (CollectionData) async -> Void
 	@Environment(\.colorScheme) var colorScheme
 	@State private var recentPosts: [CollectionPost] = []
 	
 	var body: some View {
 		CollectionRowDesign(
 			collection: collection,
-			isFollowing: false,
-			hasRequested: false,
-			isMember: collection.members.contains(Auth.auth().currentUser?.uid ?? ""),
+			isFollowing: collection.followers.contains(Auth.auth().currentUser?.uid ?? ""),
+			hasRequested: hasRequested,
+			isMember: {
+				let currentUserId = Auth.auth().currentUser?.uid ?? ""
+				return collection.members.contains(currentUserId) || collection.owners.contains(currentUserId)
+			}(),
 			isOwner: collection.ownerId == Auth.auth().currentUser?.uid,
-			onFollowTapped: {},
-			onActionTapped: {},
+			onFollowTapped: {
+				Task {
+					await handleFollowTapped(collection: collection)
+				}
+			},
+			onActionTapped: onActionTapped,
 			onProfileTapped: {
 				onOwnerProfileTapped?(collection.ownerId)
+			},
+			onCollectionTapped: {
+				Task {
+					await onCollectionTapped(collection)
+				}
 			}
 		)
 		.onAppear {
@@ -593,10 +722,36 @@ struct SimpleCollectionRow: View {
 		}
 	}
 	
+	private func handleFollowTapped(collection: CollectionData) async {
+		guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+		
+		let isCurrentlyFollowing = collection.followers.contains(currentUserId)
+		
+		do {
+			if isCurrentlyFollowing {
+				// Unfollow
+				try await CollectionService.shared.unfollowCollection(
+					collectionId: collection.id,
+					userId: currentUserId
+				)
+			} else {
+				// Follow
+				try await CollectionService.shared.followCollection(
+					collectionId: collection.id,
+					userId: currentUserId
+				)
+			}
+		} catch {
+			print("❌ Error following/unfollowing collection: \(error.localizedDescription)")
+		}
+	}
+	
 	private func loadPosts() {
 		Task {
 			do {
-				let posts = try await CollectionService.shared.getCollectionPostsFromFirebase(collectionId: collection.id)
+				var posts = try await CollectionService.shared.getCollectionPostsFromFirebase(collectionId: collection.id)
+				// Filter out posts from hidden collections and blocked users
+				posts = await CollectionService.filterPosts(posts)
 				await MainActor.run {
 					// Take first 4 posts for grid preview
 					self.recentPosts = Array(posts.prefix(4))

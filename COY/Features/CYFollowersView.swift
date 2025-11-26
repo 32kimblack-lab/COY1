@@ -21,7 +21,8 @@ struct CYFollowersView: View {
 	}
 	
 	var body: some View {
-		ZStack {
+		PhoneSizeContainer {
+			ZStack {
 			(colorScheme == .dark ? Color.black : Color.white)
 				.ignoresSafeArea()
 			
@@ -75,6 +76,7 @@ struct CYFollowersView: View {
 				}
 			}
 		}
+			}
 		.navigationBarHidden(true)
 		.navigationBarBackButtonHidden(true)
 		.toolbar(.hidden, for: .navigationBar)
@@ -208,20 +210,14 @@ struct CYFollowersView: View {
 	}
 	
 	private func removeFollower(userId: String) async {
-		guard authService.user?.uid != nil else { return }
-		
 		do {
 			print("👤 CYFollowersView: Removing follower \(userId) from collection \(collection.id)")
 			
-			// Remove follower directly from Firebase
-			let db = Firestore.firestore()
-			let collectionRef = db.collection("collections").document(collection.id)
-			
-			// Remove from followers array and decrement followerCount
-			try await collectionRef.updateData([
-				"followers": FieldValue.arrayRemove([userId]),
-				"followerCount": FieldValue.increment(Int64(-1))
-			])
+			// Use CollectionService to remove follower
+			try await CollectionService.shared.removeFollower(
+				collectionId: collection.id,
+				followerId: userId
+			)
 			
 			print("✅ CYFollowersView: Follower removed successfully")
 			

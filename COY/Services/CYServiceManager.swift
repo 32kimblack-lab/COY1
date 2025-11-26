@@ -177,6 +177,29 @@ final class CYServiceManager: ObservableObject {
 		}
 	}
 	
+	func hideCollection(collectionId: String) async throws {
+		guard let currentUserId = Auth.auth().currentUser?.uid else {
+			throw NSError(domain: "CYServiceManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "No authenticated user"])
+		}
+		
+		let db = Firestore.firestore()
+		try await db.collection("users").document(currentUserId).updateData([
+			"blockedCollectionIds": FieldValue.arrayUnion([collectionId])
+		])
+		
+		// Update local state
+		if var user = currentUser {
+			if !user.blockedCollectionIds.contains(collectionId) {
+				user.blockedCollectionIds.append(collectionId)
+			}
+			self.currentUser = user
+		}
+		
+		// Post notification to refresh UI
+		NotificationCenter.default.post(name: Notification.Name("CollectionHidden"), object: collectionId)
+		print("✅ Collection \(collectionId) hidden successfully")
+	}
+	
 	func unhideCollection(collectionId: String) async throws {
 		guard let currentUserId = Auth.auth().currentUser?.uid else { return }
 		
@@ -191,6 +214,14 @@ final class CYServiceManager: ObservableObject {
 		}
 		
 		NotificationCenter.default.post(name: Notification.Name("CollectionUnhidden"), object: collectionId)
+	}
+	
+	func isCollectionHidden(collectionId: String) -> Bool {
+		return currentUser?.blockedCollectionIds.contains(collectionId) ?? false
+	}
+	
+	func getHiddenCollectionIds() -> [String] {
+		return currentUser?.blockedCollectionIds ?? []
 	}
 	
 	func reportPost(postId: String, category: String, additionalDetails: String?) async throws {

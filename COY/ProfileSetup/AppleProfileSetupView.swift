@@ -31,6 +31,7 @@ struct AppleProfileSetupView: View {
 	
 	var body: some View {
 		NavigationStack {
+			PhoneSizeContainer {
 			ScrollView {
 				VStack(spacing: 20) {
 					// Header
@@ -104,15 +105,37 @@ struct AppleProfileSetupView: View {
 							}
 							.frame(width: 130)
 							
-							TKTextField(text: $birthDay, placeholder: "DD", image: "calendar", isSecure: false)
+							HStack(spacing: 10) {
+								Image(systemName: "calendar")
+									.foregroundColor(.secondary)
+								TextField("DD", text: $birthDay)
 								.keyboardType(.numberPad)
+									.textContentType(.none)
+									.autocorrectionDisabled()
+									.foregroundColor(colorScheme == .dark ? .white : .black)
+							}
+							.padding()
+							.background(
+								RoundedRectangle(cornerRadius: 10)
+									.stroke(colorScheme == .dark ? Color.white : Color.gray, lineWidth: 2)
+							)
 								.frame(width: 80)
-								.foregroundColor(colorScheme == .dark ? .white : .black)
 							
-							TKTextField(text: $birthYear, placeholder: "YYYY", image: "calendar", isSecure: false)
+							HStack(spacing: 10) {
+								Image(systemName: "calendar")
+									.foregroundColor(.secondary)
+								TextField("YYYY", text: $birthYear)
 								.keyboardType(.numberPad)
+									.textContentType(.none)
+									.autocorrectionDisabled()
+									.foregroundColor(colorScheme == .dark ? .white : .black)
+							}
+							.padding()
+							.background(
+								RoundedRectangle(cornerRadius: 10)
+									.stroke(colorScheme == .dark ? Color.white : Color.gray, lineWidth: 2)
+							)
 								.frame(width: 100)
-								.foregroundColor(colorScheme == .dark ? .white : .black)
 						}
 					}
 					.padding(.horizontal, 20)
@@ -146,6 +169,7 @@ struct AppleProfileSetupView: View {
 					.padding(.top, 20)
 				}
 				.padding(.bottom, 40)
+				}
 			}
 			.background(colorScheme == .dark ? Color.black : Color.white)
 			.navigationBarTitleDisplayMode(.inline)

@@ -130,12 +130,8 @@ struct CYSignUpOverallProfile: View {
 					.clipShape(Circle())
 					.offset(y: backgroundImage != nil ? 35 : 0)
 			} else {
-				// Default profile icon - white, not translucent
-				Image(systemName: "person.crop.circle.fill")
-					.resizable()
-					.scaledToFill()
-					.frame(width: 70, height: 70)
-					.foregroundColor(.white)
+				// Default profile icon
+				DefaultProfileImageView(size: 70)
 					.offset(y: backgroundImage != nil ? 35 : 0)
 			}
 		}

@@ -1,0 +1,9 @@
+# Run this command:
+firebase init functions
+
+# Then select:
+# 1. Use an existing project
+# 2. Select: coy1-74049
+# 3. Language: JavaScript
+# 4. ESLint: No (or Yes)
+# 5. Install dependencies: Yes
