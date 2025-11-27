@@ -70,18 +70,69 @@ struct DeletedCollectionsView: View {
 				ScrollView {
 					LazyVStack(spacing: 16) {
 						ForEach(deletedCollections, id: \.0.id) { item in
-							DeletedCollectionRow(
-								collection: item.0,
-								deletedAt: item.1,
-								onRestore: {
+							VStack(alignment: .leading, spacing: 12) {
+								// Deleted date and action buttons at the top
+								HStack {
+									Text("Deleted \(formatDate(item.1))")
+										.font(.caption2)
+										.foregroundColor(.secondary)
+									
+									Spacer()
+									
+									// Action Buttons
+									HStack(spacing: 6) {
+										// Restore Button
+										Button(action: {
 									selectedCollection = item.0
 									showRestoreAlert = true
-								},
-								onDeletePermanently: {
+										}) {
+											Text("Restore")
+												.font(.caption)
+												.fontWeight(.medium)
+												.foregroundColor(.white)
+												.padding(.horizontal, 8)
+												.padding(.vertical, 4)
+												.background(Color.blue)
+												.cornerRadius(6)
+										}
+										
+										// Delete Permanently Button
+										Button(action: {
 									selectedCollection = item.0
 									showDeleteAlert = true
+										}) {
+											Text("Delete")
+												.font(.caption)
+												.fontWeight(.medium)
+												.foregroundColor(.white)
+												.padding(.horizontal, 8)
+												.padding(.vertical, 4)
+												.background(Color.red)
+												.cornerRadius(6)
+										}
+									}
 								}
-							)
+								.padding(.horizontal)
+								.padding(.top, 12)
+								
+								CollectionRowDesign(
+									collection: item.0,
+									isFollowing: false,
+									hasRequested: false,
+									isMember: {
+										let currentUserId = Auth.auth().currentUser?.uid ?? ""
+										return item.0.members.contains(currentUserId) || item.0.owners.contains(currentUserId)
+									}(),
+									isOwner: item.0.ownerId == Auth.auth().currentUser?.uid,
+									isDeletedCollection: true, // Mark as deleted collection to skip filtering
+									onFollowTapped: {},
+									onActionTapped: {},
+									onProfileTapped: {},
+									onCollectionTapped: {}
+								)
+							}
+							.background(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.95))
+							.cornerRadius(12)
 							.padding(.horizontal)
 						}
 					}
@@ -178,216 +229,9 @@ struct DeletedCollectionsView: View {
 	}
 }
 
-// MARK: - Deleted Collection Row
-struct DeletedCollectionRow: View {
-	let collection: CollectionData
-	let deletedAt: Date
-	let onRestore: () -> Void
-	let onDeletePermanently: () -> Void
-	@Environment(\.colorScheme) var colorScheme
-	@StateObject private var cyServiceManager = CYServiceManager.shared
-	@State private var previewPosts: [CollectionPost] = []
-	@State private var isLoadingPosts = false
-	
-	var body: some View {
-		VStack(alignment: .leading, spacing: 12) {
-			// Header: Image + Name on left, Buttons on right (on top)
-			HStack(alignment: .top, spacing: 12) {
-				// Left side: Collection Image + Info
-				HStack(spacing: 12) {
-					// Collection Image (non-clickable, with fallback logic)
-					if let imageURL = collection.imageURL, !imageURL.isEmpty {
-						// Use collection's profile image if available
-						CachedProfileImageView(url: imageURL, size: 50)
-							.clipShape(Circle())
-					} else {
-						// Use user's own profile image as default
-						if let userProfileImageURL = cyServiceManager.currentUser?.profileImageURL,
-						   !userProfileImageURL.isEmpty {
-							CachedProfileImageView(url: userProfileImageURL, size: 50)
-								.clipShape(Circle())
-						} else {
-							// Fallback to default icon if user has no profile image
-							DefaultProfileImageView(size: 50)
-						}
-					}
-					
-					// Name + Type/Members
-					VStack(alignment: .leading, spacing: 4) {
-						Text(collection.name)
-							.font(.headline)
-							.foregroundColor(.primary)
-						
-						Text(memberLabel)
-							.font(.caption)
-							.foregroundColor(.secondary)
-						
-						// Show deleted date
-						Text("Deleted \(formatDate(deletedAt))")
-							.font(.caption2)
-							.foregroundColor(.secondary)
-					}
-				}
-				
-				Spacer()
-				
-				// Right side: Action Buttons (small, side by side, on top, more to the right)
-				HStack(spacing: 6) {
-					// Restore Button
-					Button(action: onRestore) {
-						Text("Restore")
-							.font(.caption)
-							.fontWeight(.medium)
-							.foregroundColor(.white)
-							.padding(.horizontal, 8)
-							.padding(.vertical, 4)
-							.background(Color.blue)
-							.cornerRadius(6)
-					}
-					
-					// Delete Permanently Button
-					Button(action: onDeletePermanently) {
-						Text("Delete")
-							.font(.caption)
-							.fontWeight(.medium)
-							.foregroundColor(.white)
-							.padding(.horizontal, 8)
-							.padding(.vertical, 4)
-							.background(Color.red)
-							.cornerRadius(6)
-					}
-				}
-				.padding(.trailing, 8)
-			}
-			.padding(.horizontal)
-			.padding(.top, 12)
-			
-			// Description
-			if !collection.description.isEmpty {
-				Text(collection.description)
-					.font(.caption)
-					.foregroundColor(.secondary)
-					.lineLimit(2)
-					.padding(.horizontal)
-			}
-			
-			// Grid with actual post images
-			HStack(spacing: 8) {
-				ForEach(0..<4, id: \.self) { index in
-					if index < previewPosts.count {
-						// Show actual post image
-						let post = previewPosts[index]
-						let mediaItem = post.firstMediaItem ?? post.mediaItems.first
-						
-						if let mediaItem = mediaItem {
-							// Show image or video thumbnail
-							if let imageURL = mediaItem.imageURL, !imageURL.isEmpty, let url = URL(string: imageURL) {
-								WebImage(url: url)
-									.resizable()
-									.indicator(.activity)
-									.transition(.fade(duration: 0.2))
-									.scaledToFill()
-									.frame(width: 90, height: 130)
-									.clipped()
-									.cornerRadius(8)
-							} else if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty, let url = URL(string: thumbnailURL) {
-								// Video thumbnail
-								ZStack {
-									WebImage(url: url)
-										.resizable()
-										.indicator(.activity)
-										.transition(.fade(duration: 0.2))
-										.scaledToFill()
-										.frame(width: 90, height: 130)
-										.clipped()
-										.cornerRadius(8)
-									
-									// Video play icon overlay
-									Image(systemName: "play.circle.fill")
-										.font(.system(size: 24))
-										.foregroundColor(.white)
-										.shadow(radius: 2)
-								}
-							} else {
-								// Fallback placeholder
-								Rectangle()
-									.fill(Color.gray.opacity(0.2))
-									.frame(width: 90, height: 130)
-									.cornerRadius(8)
-							}
-						} else {
-							// No media item
-							Rectangle()
-								.fill(Color.gray.opacity(0.2))
-								.frame(width: 90, height: 130)
-								.cornerRadius(8)
-						}
-					} else {
-						// Placeholder for missing posts
-						Rectangle()
-							.fill(Color.gray.opacity(0.2))
-							.frame(width: 90, height: 130)
-							.cornerRadius(8)
-					}
-				}
-			}
-			.padding(.horizontal)
-			.padding(.bottom, 12)
-		}
-		.background(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.95))
-		.cornerRadius(12)
-		.onAppear {
-			loadPreviewPosts()
-		}
-	}
-	
-	private var memberLabel: String {
-		if collection.type == "Individual" {
-			return "Individual"
-		} else {
-			return "\(collection.memberCount) member\(collection.memberCount == 1 ? "" : "s")"
-		}
-	}
-	
-	// MARK: - Load Preview Posts
-	private func loadPreviewPosts() {
-		guard !isLoadingPosts else { return }
-		isLoadingPosts = true
-		
-		Task {
-			do {
-				// Fetch posts from collection (prioritize pinned, then most recent)
-				var allPosts = try await CollectionService.shared.getCollectionPostsFromFirebase(collectionId: collection.id)
-				
-				// Filter out posts from hidden collections and blocked users
-				allPosts = await CollectionService.filterPosts(allPosts)
-				
-				// Sort: pinned first, then by date (newest first)
-				let sortedPosts = allPosts.sorted { post1, post2 in
-					if post1.isPinned != post2.isPinned {
-						return post1.isPinned
-					}
-					return post1.createdAt > post2.createdAt
-				}
-				
-				// Take first 4 posts
-				await MainActor.run {
-					previewPosts = Array(sortedPosts.prefix(4))
-					isLoadingPosts = false
-				}
-			} catch {
-				print("Error loading preview posts: \(error.localizedDescription)")
-				await MainActor.run {
-					previewPosts = []
-					isLoadingPosts = false
-				}
-			}
-		}
-	}
-	
+	// Helper function to format deleted date
 	private func formatDate(_ date: Date) -> String {
 		let formatter = RelativeDateTimeFormatter()
 		formatter.unitsStyle = .abbreviated
 		return formatter.localizedString(for: date, relativeTo: Date())
-	}
 }

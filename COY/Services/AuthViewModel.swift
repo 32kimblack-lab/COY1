@@ -3,6 +3,7 @@ import FirebaseAuth
 import FirebaseFirestore
 import FirebaseStorage
 import FirebaseCore
+import FirebaseFunctions
 import Combine
 
 @MainActor
@@ -81,6 +82,11 @@ class AuthViewModel: ObservableObject {
 	
 	// MARK: - Login
 	func login() async throws {
+		// Clear previous error messages
+		await MainActor.run {
+			self.errorMessage = ""
+		}
+		
 		try validateLoginInputs(emailOrUsername: emailOrUsername, password: password)
 		
 		// Trim and normalize the input
@@ -93,87 +99,144 @@ class AuthViewModel: ObservableObject {
 				print("🔐 Attempting login with email: \(trimmedInput)")
 				try await Auth.auth().signIn(withEmail: trimmedInput, password: password)
 				print("✅ Login successful with email")
+				// Clear error message on success
+				await MainActor.run {
+					self.errorMessage = ""
+				}
 			} else {
-				// It's a username, find the associated email first
+				// It's a username, find the associated email first using Firebase Function
 				// Usernames are case-insensitive, so use lowercase and trim
 				let normalizedUsername = trimmedInput.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
 				print("🔐 Attempting login with username: '\(normalizedUsername)'")
 				
-				let userService = UserService.shared
-				
-				// Try to get user by username
+				// Use Firebase Function to look up user email by username
 				do {
-					print("🔍 Looking up user by username: '\(normalizedUsername)'")
-					guard let user = try await userService.getUserByUsername(normalizedUsername) else {
+					print("🔍 Looking up user by username via Firebase Function: '\(normalizedUsername)'")
+					
+					let functions = Functions.functions()
+					let getUserEmailFunction = functions.httpsCallable("getUserEmailByUsername")
+					
+					let result = try await getUserEmailFunction.call([
+						"username": normalizedUsername
+					] as [String: Any])
+					
+					guard let data = result.data as? [String: Any],
+						  let email = data["email"] as? String,
+						  !email.isEmpty else {
 						print("❌ Username not found: '\(normalizedUsername)'")
-						throw AuthError.invalidCredentials("Email or password is incorrect")
+						let errorMsg = "Incorrect username/email or password"
+						await MainActor.run {
+							self.errorMessage = errorMsg
+						}
+						throw AuthError.invalidCredentials(errorMsg)
 					}
 					
-					print("✅ Found user with username '\(normalizedUsername)': email = '\(user.email)'")
-					
-					// Check if user has an email (required for Firebase Auth)
-					guard !user.email.isEmpty else {
-						print("❌ User found but has no email associated")
-						throw AuthError.invalidCredentials("User account has no email associated. Please contact support.")
-					}
+					print("✅ Found user with username '\(normalizedUsername)': email = '\(email)'")
 					
 					// Sign in with the email associated with this username
-					print("🔐 Signing in with email: '\(user.email)'")
-					try await Auth.auth().signIn(withEmail: user.email, password: password)
+					print("🔐 Signing in with email: '\(email)'")
+					try await Auth.auth().signIn(withEmail: email, password: password)
 					print("✅ Login successful with username")
+					// Clear error message on success
+					await MainActor.run {
+						self.errorMessage = ""
+					}
 				} catch let lookupError {
-					// If Firestore query fails (e.g., permissions), provide helpful error
-					if let nsError = lookupError as NSError?,
-					   (nsError.domain == "FIRFirestoreErrorDomain" || 
-						lookupError.localizedDescription.contains("permission") ||
-						lookupError.localizedDescription.contains("Permission")) {
-						print("⚠️ Firestore permissions error during username lookup: \(lookupError.localizedDescription)")
-						// Still throw generic error to user (don't expose internal errors)
-						throw AuthError.invalidCredentials("Email or password is incorrect")
+					// Handle Firebase Function errors
+					if let nsError = lookupError as NSError? {
+						// Check if it's a function error
+						if nsError.domain == "FIRFunctionsErrorDomain" {
+							print("❌ Firebase Function error: \(nsError.localizedDescription)")
+							let errorMsg = "Incorrect username/email or password"
+							await MainActor.run {
+								self.errorMessage = errorMsg
+							}
+							throw AuthError.invalidCredentials(errorMsg)
+						}
+						
+						// Check if it's a Firebase Auth error (wrong password, etc.)
+						if nsError.domain == "FIRAuthErrorDomain" {
+							// Let the outer catch handle Firebase Auth errors
+							throw lookupError
+						}
+						
+						// Network or other errors
+						print("❌ Error during username lookup: \(lookupError.localizedDescription)")
+						let errorMsg = "Incorrect username/email or password"
+						await MainActor.run {
+							self.errorMessage = errorMsg
+						}
+						throw AuthError.invalidCredentials(errorMsg)
 					} else if let authError = lookupError as? AuthError {
-						// Re-throw AuthError as-is
+						// Re-throw AuthError as-is (errorMessage already set)
 						print("❌ AuthError during username lookup: \(authError.localizedDescription)")
 						throw authError
 					} else {
 						// Re-throw other errors
 						print("❌ Error during username lookup: \(lookupError.localizedDescription)")
-						throw AuthError.invalidCredentials("Email or password is incorrect")
+						let errorMsg = "Incorrect username/email or password"
+						await MainActor.run {
+							self.errorMessage = errorMsg
+						}
+						throw AuthError.invalidCredentials(errorMsg)
 					}
 				}
 			}
 		} catch let authError {
+			// If it's already an AuthError, the errorMessage should already be set, but ensure it is
+			if let authErr = authError as? AuthError {
+				// Check if errorMessage is already set, if not set it
+				await MainActor.run {
+					if self.errorMessage.isEmpty {
+						self.errorMessage = authErr.localizedDescription
+					}
+				}
+				throw authErr
+			}
+			
 			// Convert Firebase Auth errors to user-friendly messages
 			if let nsError = authError as NSError? {
 				let errorCode = nsError.code
 				print("❌ Firebase Auth error: code \(errorCode), domain: \(nsError.domain)")
+				
+				let errorMsg: String
 				// Firebase Auth error codes
-				// 17008 = invalid-email, 17009 = wrong-password, 17011 = user-not-found
+				// 17008 = invalid-email, 17009 = wrong-password, 17011 = user-not-found, 17010 = invalid-credential
 				if errorCode == 17008 || errorCode == 17009 || errorCode == 17011 || errorCode == 17010 {
-					throw AuthError.invalidCredentials("Email or password is incorrect")
+					errorMsg = "Incorrect username/email or password"
 				} else if errorCode == 17020 {
-					throw AuthError.invalidCredentials("Network error. Please check your connection.")
+					errorMsg = "Network error. Please check your connection."
 				} else {
 					// For any other Firebase Auth error, show generic message
-					throw AuthError.invalidCredentials("Email or password is incorrect")
+					errorMsg = "Incorrect username/email or password"
 				}
+				
+				await MainActor.run {
+					self.errorMessage = errorMsg
+				}
+				throw AuthError.invalidCredentials(errorMsg)
 			} else {
-				// If it's already an AuthError, rethrow it
-				if let authErr = authError as? AuthError {
-					throw authErr
-				}
 				// Otherwise, convert to generic error
 				print("❌ Unknown error during login: \(authError.localizedDescription)")
-				throw AuthError.invalidCredentials("Email or password is incorrect")
+				let errorMsg = "Incorrect username/email or password"
+				await MainActor.run {
+					self.errorMessage = errorMsg
+				}
+				throw AuthError.invalidCredentials(errorMsg)
 			}
 		}
 	}
 	
 	private func validateLoginInputs(emailOrUsername: String, password: String) throws {
 		guard !emailOrUsername.trimmingCharacters(in: .whitespaces).isEmpty else {
-			throw AuthError.invalidCredentials("Email or username cannot be empty")
+			let errorMsg = "Email or username cannot be empty"
+			self.errorMessage = errorMsg
+			throw AuthError.invalidCredentials(errorMsg)
 		}
 		guard !password.trimmingCharacters(in: .whitespaces).isEmpty else {
-			throw AuthError.invalidCredentials("Password cannot be empty")
+			let errorMsg = "Password cannot be empty"
+			self.errorMessage = errorMsg
+			throw AuthError.invalidCredentials(errorMsg)
 		}
 	}
 	

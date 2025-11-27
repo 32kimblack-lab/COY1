@@ -47,11 +47,37 @@ struct CollectionRowDesign: View {
 	let hasRequested: Bool
 	let isMember: Bool
 	let isOwner: Bool
+	let isDeletedCollection: Bool // Flag to indicate if this is a deleted collection
 	
 	let onFollowTapped: () -> Void
 	let onActionTapped: () -> Void
 	let onProfileTapped: () -> Void
 	let onCollectionTapped: () -> Void
+	
+	// Convenience initializer with default value for backward compatibility
+	init(
+		collection: CollectionData,
+		isFollowing: Bool,
+		hasRequested: Bool,
+		isMember: Bool,
+		isOwner: Bool,
+		isDeletedCollection: Bool = false,
+		onFollowTapped: @escaping () -> Void,
+		onActionTapped: @escaping () -> Void,
+		onProfileTapped: @escaping () -> Void,
+		onCollectionTapped: @escaping () -> Void
+	) {
+		self.collection = collection
+		self.isFollowing = isFollowing
+		self.hasRequested = hasRequested
+		self.isMember = isMember
+		self.isOwner = isOwner
+		self.isDeletedCollection = isDeletedCollection
+		self.onFollowTapped = onFollowTapped
+		self.onActionTapped = onActionTapped
+		self.onProfileTapped = onProfileTapped
+		self.onCollectionTapped = onCollectionTapped
+	}
 	
 	@StateObject private var cyServiceManager = CYServiceManager.shared
 	@State private var previewPosts: [CollectionPost] = []
@@ -113,13 +139,20 @@ struct CollectionRowDesign: View {
 			postGrid
 		}
 		.onAppear {
-			// Check shared cache first
-			if let cached = CollectionPostsCache.shared.getCachedPosts(for: collection.id) {
+			// Always check cache first and use it if available
+			if let cached = CollectionPostsCache.shared.getCachedPosts(for: collection.id), !cached.isEmpty {
+				// Use cached posts immediately - don't reload
 				previewPosts = cached
-				print("✅ CollectionRowDesign: Using cached posts for collection '\(collection.name)' (ID: \(collection.id))")
+				print("✅ CollectionRowDesign: Using cached posts for collection '\(collection.name)' (ID: \(collection.id)) - \(cached.count) posts")
 			} else if previewPosts.isEmpty {
-				// Only load if we don't have cached data
+				// Only load if we have no posts at all (neither cached nor in state)
+				// This ensures posts are always loaded, even for deleted collections
+				print("🔄 CollectionRowDesign: No cached posts found, loading for collection '\(collection.name)' (ID: \(collection.id))")
 				loadPreviewPosts()
+			} else {
+				// If we have posts in state but no cache, update cache to persist them
+				CollectionPostsCache.shared.setCachedPosts(previewPosts, for: collection.id)
+				print("✅ CollectionRowDesign: Persisting existing posts to cache for collection '\(collection.name)' (ID: \(collection.id)) - \(previewPosts.count) posts")
 			}
 			// Set up real-time listener for posts in this collection
 			setupPostListener()
@@ -128,11 +161,13 @@ struct CollectionRowDesign: View {
 			// Reload posts when collection changes
 			if oldId != newId {
 				print("🔄 CollectionRowDesign: Collection ID changed from \(oldId) to \(newId), reloading posts")
-				previewPosts = [] // Clear old posts
-				// Check cache for new collection
-				if let cached = CollectionPostsCache.shared.getCachedPosts(for: newId) {
+				// Check cache for new collection first - don't clear unnecessarily
+				if let cached = CollectionPostsCache.shared.getCachedPosts(for: newId), !cached.isEmpty {
 					previewPosts = cached
+					print("✅ CollectionRowDesign: Using cached posts for new collection (ID: \(newId))")
 				} else {
+					// Only clear if we need to load fresh
+					previewPosts = []
 				loadPreviewPosts()
 				}
 			}
@@ -172,6 +207,52 @@ struct CollectionRowDesign: View {
 			   updatedCollectionId == collection.id {
 				print("🔄 CollectionRowDesign: Real-time posts update for collection '\(collection.name)', reloading preview posts")
 				loadPreviewPosts(forceRefresh: true)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionRestored"))) { notification in
+			// Reload posts when collection is restored from deleted collections
+			if let restoredCollectionId = notification.object as? String,
+			   restoredCollectionId == collection.id {
+				print("🔄 CollectionRowDesign: Collection '\(collection.name)' was restored, reloading preview posts")
+				// Force reload to ensure fresh data after restore
+				// Don't clear cache first - let the reload update it
+				loadPreviewPosts(forceRefresh: true)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionDeleted"))) { notification in
+			// When a collection is deleted, ensure posts are still cached
+			// Posts should still be visible in deleted collections view
+			if let deletedCollectionId = notification.object as? String,
+			   deletedCollectionId == collection.id {
+				print("🔄 CollectionRowDesign: Collection '\(collection.name)' was deleted, ensuring posts are cached")
+				// Don't clear cache - keep posts visible in deleted collections
+				// If we don't have posts loaded, load them now
+				if previewPosts.isEmpty {
+					loadPreviewPosts()
+				} else {
+					// Ensure existing posts are cached
+					CollectionPostsCache.shared.setCachedPosts(previewPosts, for: collection.id)
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+			// When app returns to foreground, restore from cache if available
+			// This is critical for deleted collections - posts must persist
+			if previewPosts.isEmpty {
+				if let cached = CollectionPostsCache.shared.getCachedPosts(for: collection.id), !cached.isEmpty {
+					// Restore from cache
+					previewPosts = cached
+					print("✅ CollectionRowDesign: Restored posts from cache after app return for '\(collection.name)' - \(cached.count) posts")
+				} else {
+					// Cache is empty (lost on app exit), reload from Firebase
+					// This is especially important for deleted collections
+					print("🔄 CollectionRowDesign: App returned to foreground, no cache found, reloading posts for '\(collection.name)' (ID: \(collection.id))")
+					loadPreviewPosts(forceRefresh: true)
+				}
+			} else {
+				// We have posts, ensure they're cached for next time
+				CollectionPostsCache.shared.setCachedPosts(previewPosts, for: collection.id)
+				print("✅ CollectionRowDesign: Ensured posts are cached after app return for '\(collection.name)' - \(previewPosts.count) posts")
 			}
 		}
 		.onDisappear {
@@ -480,15 +561,15 @@ struct CollectionRowDesign: View {
 		}
 		
 		// If we have cached posts and not forcing refresh, use cache
-		if !forceRefresh, let cached = CollectionPostsCache.shared.getCachedPosts(for: collectionId) {
+		if !forceRefresh, let cached = CollectionPostsCache.shared.getCachedPosts(for: collectionId), !cached.isEmpty {
 			previewPosts = cached
-			print("⏭️ CollectionRowDesign: Using cached posts for collection '\(collection.name)' (ID: \(collectionId))")
+			print("⏭️ CollectionRowDesign: Using cached posts for collection '\(collection.name)' (ID: \(collectionId)) - \(cached.count) posts")
 			return 
 		}
 		
-		// Clear existing posts to force fresh load
-		if forceRefresh {
-		previewPosts = []
+		// Only clear existing posts if forcing refresh AND we have no posts in state
+		// This prevents clearing posts that are already displayed
+		if forceRefresh && previewPosts.isEmpty {
 			CollectionPostsCache.shared.clearCache(for: collectionId)
 		}
 		
@@ -501,23 +582,32 @@ struct CollectionRowDesign: View {
 				var allPosts = try await CollectionService.shared.getCollectionPostsFromFirebase(collectionId: collection.id)
 				print("📦 CollectionRowDesign: Fetched \(allPosts.count) posts from Firebase")
 				
-				// Filter out posts from hidden collections and blocked users
+				// For deleted collections, skip filtering - user should see all posts
+				// For regular collections, filter out posts from hidden collections and blocked users
+				if !isDeletedCollection {
 				allPosts = await CollectionService.filterPosts(allPosts)
 				print("📦 CollectionRowDesign: After filtering: \(allPosts.count) posts remaining")
+				} else {
+					print("📦 CollectionRowDesign: Skipping filtering for deleted collection - showing all \(allPosts.count) posts")
+				}
 				
-				// Sort: pinned first (by pinnedAt, most recent first), then by date (newest first)
-				let sortedPosts = allPosts.sorted { post1, post2 in
-					if post1.isPinned != post2.isPinned {
-						return post1.isPinned
-					}
-					if post1.isPinned && post2.isPinned {
-						// Both pinned: sort by pinnedAt (most recent first)
+				// Sort EXACTLY like CYInsideCollectionView: pinned first (by pinnedAt, most recent first), then by date (newest first)
+				// Separate pinned and unpinned posts
+				let pinnedPosts = allPosts.filter { $0.isPinned }
+				let unpinnedPosts = allPosts.filter { !$0.isPinned }
+				
+				// Sort pinned posts by pinnedAt (most recently pinned first)
+				let sortedPinned = pinnedPosts.sorted { post1, post2 in
 						let date1 = post1.pinnedAt ?? post1.createdAt
 						let date2 = post2.pinnedAt ?? post2.createdAt
-						return date1 > date2
-					}
-					return post1.createdAt > post2.createdAt
+					return date1 > date2 // Most recent first
 				}
+				
+				// Sort unpinned posts by date (newest first) - matching CYInsideCollectionView default "Newest to Oldest"
+				let sortedUnpinned = unpinnedPosts.sorted { $0.createdAt > $1.createdAt }
+				
+				// Combine: pinned first, then unpinned
+				let sortedPosts = sortedPinned + sortedUnpinned
 				
 				// Take first 4 posts for the grid (pinned first, then most recent)
 				let displayPosts = Array(sortedPosts.prefix(4))
@@ -545,15 +635,16 @@ struct CollectionRowDesign: View {
 				}
 				
 				await MainActor.run {
-					// Cache the posts
+					// Always cache the posts first to ensure persistence
 					CollectionPostsCache.shared.setCachedPosts(displayPosts, for: collection.id)
 					
-					// Always update to ensure UI refreshes
+					// Update previewPosts - this ensures they persist even if view refreshes
 					previewPosts = displayPosts
 					CollectionPostsCache.shared.setLoading(false, for: collection.id)
 					postGridRefreshId = UUID() // Force UI refresh
 					print("✅ CollectionRowDesign: Updated previewPosts array with \(displayPosts.count) posts")
 					print("   🔍 Current previewPosts count: \(self.previewPosts.count)")
+					print("   💾 Posts cached for collection '\(collection.name)' (ID: \(collection.id))")
 					for (idx, post) in self.previewPosts.enumerated() {
 						// Check what image URL will be used
 						var foundImageURL: String? = nil

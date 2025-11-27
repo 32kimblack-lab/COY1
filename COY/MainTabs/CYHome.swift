@@ -57,6 +57,7 @@ struct CYHome: View {
 	@State private var showNotifications = false
 	@State private var unreadNotificationCount = 0
 	@State private var currentPostIndex = 0
+	@State private var friendRequestCount = 0
 	
 	private let pageSize = 20
 	
@@ -83,25 +84,33 @@ struct CYHome: View {
 								.font(.system(size: 28, weight: .bold))
 								.foregroundColor(colorScheme == .dark ? .white : .black)
 							
-							if let uiImage = UIImage(named: "Icon") {
-								Image(uiImage: uiImage)
-									.resizable()
-									.scaledToFit()
-									.frame(width: 40, height: 40)
-									.padding(.leading, -15)
-							} else {
-								EmptyView()
-							}
+							Image("SplashIcon")
+								.resizable()
+								.scaledToFit()
+								.frame(width: 40, height: 40)
 						}
 						
 						Spacer()
 						
 						HStack(spacing: 15) {
 							NavigationLink(destination: AddFriendsScreen()) {
+								ZStack(alignment: .topTrailing) {
 								Image(systemName: "person.badge.plus")
 									.resizable()
 									.frame(width: 25, height: 25)
 									.foregroundColor(colorScheme == .dark ? .white : .black)
+									
+									if friendRequestCount > 0 {
+										Text("\(friendRequestCount)")
+											.font(.caption2)
+											.fontWeight(.bold)
+											.foregroundColor(.white)
+											.padding(4)
+											.background(Color.blue)
+											.clipShape(Circle())
+											.offset(x: 8, y: -8)
+									}
+								}
 							}
 							
 							Button(action: {
@@ -213,6 +222,12 @@ struct CYHome: View {
 			if let userId = notification.userInfo?["userId"] as? String,
 			   userId == authService.user?.uid {
 				loadFollowedCollectionsAndPosts(forceRefresh: true)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FriendRequestCountChanged"))) { notification in
+			if let userInfo = notification.userInfo,
+			   let count = userInfo["count"] as? Int {
+				friendRequestCount = count
 			}
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostCreated"))) { notification in
@@ -613,8 +628,6 @@ struct PostDetailCard: View {
 	
 	@ViewBuilder
 	private func mediaItemView(_ mediaItem: MediaItem, index: Int, containerHeight: CGFloat) -> some View {
-		let mediaItems = post.mediaItems.isEmpty ? (post.firstMediaItem.map { [$0] } ?? []) : post.mediaItems
-		
 		if mediaItem.isVideo, let videoURL = mediaItem.videoURL {
 			// Video view - matching CYPostDetailView exactly
 			videoItemView(mediaItem: mediaItem, index: index, containerHeight: containerHeight, videoURL: videoURL)

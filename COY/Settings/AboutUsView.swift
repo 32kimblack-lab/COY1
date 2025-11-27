@@ -30,7 +30,7 @@ struct AboutUsView: View {
 							.font(.system(size: 32, weight: .bold))
 							.foregroundColor(colorScheme == .dark ? .white : .black)
 						
-						Image("Icon")
+						Image("SplashIcon")
 							.resizable()
 							.scaledToFit()
 							.frame(width: 50, height: 50)

@@ -54,7 +54,6 @@ struct CYPostDetailView: View {
 	}
 	
 	var body: some View {
-		NavigationView {
 			ZStack {
 				backgroundColor.ignoresSafeArea()
 				
@@ -106,7 +105,6 @@ struct CYPostDetailView: View {
 				}
 			} message: {
 				Text("Are you sure you want to delete this post? This action cannot be undone.")
-			}
 		}
 		.onAppear {
 			loadInitialData()

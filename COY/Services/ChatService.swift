@@ -1,6 +1,7 @@
 import Foundation
 import FirebaseFirestore
 import FirebaseAuth
+import FirebaseFunctions
 import Combine
 
 @MainActor
@@ -466,7 +467,7 @@ class ChatService {
 	// MARK: - Message Actions
 	
 	func deleteMessage(chatId: String, messageId: String) async throws {
-		guard currentUid != nil else {
+		guard let currentUid = currentUid else {
 			throw ChatServiceError.notAuthenticated
 		}
 		
@@ -479,7 +480,9 @@ class ChatService {
 		let messageDoc = try await messageRef.getDocument()
 		guard let messageData = messageDoc.data(),
 			  let messageType = messageData["type"] as? String,
-			  let messageContent = messageData["content"] as? String else {
+			  let messageContent = messageData["content"] as? String,
+			  let messageTimestamp = messageData["timestamp"] as? Timestamp,
+			  let senderUid = messageData["senderUid"] as? String else {
 			throw ChatServiceError.chatRoomNotFound
 		}
 		
@@ -487,56 +490,130 @@ class ChatService {
 		let chatRef = db.collection("chat_rooms").document(chatId)
 		let chatDoc = try await chatRef.getDocument()
 		guard let chatData = chatDoc.data(),
-			  let lastMessageTs = chatData["lastMessageTs"] as? Timestamp,
-			  let messageTimestamp = messageData["timestamp"] as? Timestamp else {
+			  let lastMessageTs = chatData["lastMessageTs"] as? Timestamp else {
 			throw ChatServiceError.chatRoomNotFound
 		}
 		
 		let isLastMessage = lastMessageTs.dateValue() == messageTimestamp.dateValue()
 		
-		// Update message and chat room FIRST for immediate UI feedback
-		let batch = db.batch()
-		batch.updateData([
-			"isDeleted": true,
-			"content": "This message has been deleted"
-		], forDocument: messageRef)
+		// Delete media file from Storage first (for media types)
+		let mediaTypes = ["image", "video", "photo"]
+		if mediaTypes.contains(messageType) && !messageContent.isEmpty {
+			do {
+				try await StorageService.shared.deleteFile(from: messageContent)
+				print("✅ ChatService: Storage file deleted successfully for message \(messageId)")
+			} catch {
+				print("⚠️ ChatService: Error deleting media file: \(error.localizedDescription)")
+				// Continue with message deletion even if Storage deletion fails
+			}
+		}
 		
+		let batch = db.batch()
+		
+		// Delete the original message from Firestore
+		batch.deleteDocument(messageRef)
+		
+		// Create a replacement "deleted" message that both users can see
+		// Use the same timestamp so it appears in the same position
+		let deletedMessageId = "\(messageId)_deleted"
+		let deletedMessageRef = db.collection("chat_rooms")
+			.document(chatId)
+			.collection("messages")
+			.document(deletedMessageId)
+		
+		let deletedContent = (messageType == "text") ? "This message was deleted" : "This media was deleted"
+		
+		// Store original media URL for later deletion (when both users clear chat)
+		var deletedMessageData: [String: Any] = [
+			"chatId": chatId,
+			"senderUid": senderUid,
+			"content": deletedContent,
+			"type": messageType,
+			"timestamp": messageTimestamp,
+			"isDeleted": true,
+			"deletedBy": currentUid,
+			"deletedAt": Timestamp(date: Date()),
+			"originalMessageId": messageId
+		]
+		
+		// Store original media URL if it's a media type (so we can delete it when both users clear)
+		if mediaTypes.contains(messageType) && !messageContent.isEmpty {
+			deletedMessageData["originalMediaURL"] = messageContent
+		}
+		
+		batch.setData(deletedMessageData, forDocument: deletedMessageRef)
+		
+		// If this was the last message, update chat room to show the deleted message
+		// The deleted message will be created with the same timestamp, so it becomes the new last message
 		if isLastMessage {
+			// Update chat room to show the deleted message as the last message
 			batch.updateData([
-				"lastMessage": "This message has been deleted",
-				"lastMessageType": "text"
+				"lastMessage": deletedContent,
+				"lastMessageType": messageType,
+				"lastMessageTs": messageTimestamp
 			], forDocument: chatRef)
 		}
 		
-		// Commit immediately for instant UI update
+		// Commit the deletion and replacement
 		try await batch.commit()
-		
-		// Delete media file from Storage in background (for all media types)
-		// This includes: image, video, photo, voice, audio
-		let mediaTypes = ["image", "video", "photo", "voice", "audio"]
-		if mediaTypes.contains(messageType) && !messageContent.isEmpty {
-			Task {
-				do {
-					try await StorageService.shared.deleteFile(from: messageContent)
-					print("✅ ChatService: Successfully deleted \(messageType) file from Storage")
-				} catch {
-					print("⚠️ ChatService: Error deleting \(messageType) file from Storage: \(error)")
-					// Continue - message is already marked as deleted in Firestore
-				}
-			}
-		}
+		print("✅ ChatService: Successfully deleted message \(messageId) from Firestore and created replacement")
 	}
 	
 	func editMessage(chatId: String, messageId: String, newText: String) async throws {
-		try await db.collection("chat_rooms")
+		// Get current message to check edit count
+		let messageRef = db.collection("chat_rooms")
 			.document(chatId)
 			.collection("messages")
 			.document(messageId)
-			.updateData([
-				"content": newText,
-				"isEdited": true,
-				"editedAt": Timestamp(date: Date())
-			])
+		
+		let messageDoc = try await messageRef.getDocument()
+		guard messageDoc.exists,
+			  let messageData = messageDoc.data(),
+			  let timestamp = messageData["timestamp"] as? Timestamp else {
+			throw ChatServiceError.chatRoomNotFound
+		}
+		
+		let currentEditCount = messageData["editCount"] as? Int ?? 0
+		
+		// Check if message can still be edited (max 2 times)
+		guard currentEditCount < 2 else {
+			throw ChatServiceError.messageCannotBeEdited
+		}
+		
+		let chatRef = db.collection("chat_rooms").document(chatId)
+		
+		// Use batch to update both message and chat room atomically
+		let batch = db.batch()
+		
+		// Update message with incremented edit count
+		batch.updateData([
+			"content": newText,
+			"isEdited": true,
+			"editedAt": Timestamp(date: Date()),
+			"editCount": currentEditCount + 1
+		], forDocument: messageRef)
+		
+		// Update chat room's lastMessage if this is the last message
+		// Check if this message's timestamp matches the chat room's lastMessageTs
+		// Use a small tolerance (1 second) to account for timestamp precision differences
+		let chatDoc = try await chatRef.getDocument()
+		if let chatData = chatDoc.data(),
+		   let lastMessageTs = chatData["lastMessageTs"] as? Timestamp {
+			let messageTime = timestamp.dateValue()
+			let lastMessageTime = lastMessageTs.dateValue()
+			let timeDifference = abs(messageTime.timeIntervalSince(lastMessageTime))
+			
+			// If timestamps match (within 1 second tolerance), this is the last message
+			if timeDifference <= 1.0 {
+				// This is the last message, update chat room
+				batch.updateData([
+					"lastMessage": newText,
+					"lastMessageType": messageData["type"] as? String ?? "text"
+				], forDocument: chatRef)
+			}
+		}
+		
+		try await batch.commit()
 	}
 	
 	func addReaction(chatId: String, messageId: String, emoji: String) async throws {
@@ -544,8 +621,18 @@ class ChatService {
 			throw ChatServiceError.notAuthenticated
 		}
 		
-		let messageRef = db.collection("chat_rooms")
-			.document(chatId)
+		// Verify user is a participant in the chat room
+		let chatRoomRef = db.collection("chat_rooms").document(chatId)
+		let chatRoomDoc = try await chatRoomRef.getDocument()
+		
+		guard chatRoomDoc.exists,
+			  let chatRoomData = chatRoomDoc.data(),
+			  let participants = chatRoomData["participants"] as? [String],
+			  participants.contains(currentUid) else {
+			throw ChatServiceError.chatRoomNotFound
+		}
+		
+		let messageRef = chatRoomRef
 			.collection("messages")
 			.document(messageId)
 		
@@ -559,8 +646,18 @@ class ChatService {
 			throw ChatServiceError.notAuthenticated
 		}
 		
-		let messageRef = db.collection("chat_rooms")
-			.document(chatId)
+		// Verify user is a participant in the chat room
+		let chatRoomRef = db.collection("chat_rooms").document(chatId)
+		let chatRoomDoc = try await chatRoomRef.getDocument()
+		
+		guard chatRoomDoc.exists,
+			  let chatRoomData = chatRoomDoc.data(),
+			  let participants = chatRoomData["participants"] as? [String],
+			  participants.contains(currentUid) else {
+			throw ChatServiceError.chatRoomNotFound
+		}
+		
+		let messageRef = chatRoomRef
 			.collection("messages")
 			.document(messageId)
 		
@@ -580,6 +677,47 @@ class ChatService {
 	// MARK: - Clear Chat (One-sided with shared deletion)
 	
 	func clearChatForMe(chatId: String) async throws {
+		guard currentUid != nil else {
+			throw ChatServiceError.notAuthenticated
+		}
+		
+		// Use Cloud Function to clear chat (bypasses Firestore security rules)
+		let functions = Functions.functions()
+		let clearChatFunction = functions.httpsCallable("clearChat")
+		
+		do {
+			let result = try await clearChatFunction.call([
+				"chatId": chatId
+			])
+			
+			// Check if the function call was successful
+			if let data = result.data as? [String: Any],
+			   let success = data["success"] as? Bool,
+			   success {
+				print("✅ ChatService: Successfully cleared chat via Cloud Function")
+				return
+			} else {
+				// If success is false or data is malformed, throw a generic error
+				throw ChatServiceError.chatRoomNotFound
+			}
+		} catch {
+			// If Cloud Function fails (e.g., not deployed), try fallback to direct Firestore update
+			print("⚠️ ChatService: Cloud Function clearChat failed, trying fallback: \(error.localizedDescription)")
+			
+			// Fallback: Use deletedFor array approach (one-sided clear)
+			// This will work but requires both users to clear for full deletion
+			do {
+				try await clearChatForMeFallback(chatId: chatId)
+				print("✅ ChatService: Successfully cleared chat via fallback method")
+			} catch {
+				print("❌ ChatService: Fallback clear chat also failed: \(error.localizedDescription)")
+				throw error
+			}
+		}
+	}
+	
+	// Fallback method for clearing chat when Cloud Function is not available
+	private func clearChatForMeFallback(chatId: String) async throws {
 		guard let currentUid = currentUid else {
 			throw ChatServiceError.notAuthenticated
 		}
@@ -593,14 +731,11 @@ class ChatService {
 			throw ChatServiceError.chatRoomNotFound
 		}
 		
-		// Get the other participant
-		let otherParticipant = participants.first { $0 != currentUid } ?? participants[0]
-		
-		// OPTIMIZATION: Process in batches of 500 (Firestore batch limit)
-		// This prevents loading all messages at once which is expensive
+		// Process messages in batches
 		let batchSize = 500
 		var lastDocument: DocumentSnapshot?
 		var hasMore = true
+		var isFirstBatch = true
 		
 		while hasMore {
 			var query = db.collection("chat_rooms")
@@ -614,114 +749,48 @@ class ChatService {
 			
 			let messagesSnapshot = try await query.getDocuments()
 			
-			// Separate batches for updates and deletes (can't mix in same batch)
-			let updateBatch = db.batch()
-			let deleteBatch = db.batch()
+			if messagesSnapshot.documents.isEmpty {
+				hasMore = false
+				break
+			}
+			
+			let batch = db.batch()
 			var updateCount = 0
-			var deleteCount = 0
-			var messagesToDelete: [(DocumentReference, [String: Any])] = []
 			
 			for doc in messagesSnapshot.documents {
 				let data = doc.data()
 				let currentDeletedFor = data["deletedFor"] as? [String] ?? []
 				
-				// Check if current user already cleared this message
-				if currentDeletedFor.contains(currentUid) {
-					// Current user already cleared - check if other user also cleared
-					if currentDeletedFor.contains(otherParticipant) {
-						// Both users cleared - delete from Firebase
-						let messageType = data["type"] as? String ?? "text"
-						let messageContent = data["content"] as? String ?? ""
-						
-						messagesToDelete.append((doc.reference, [
-							"type": messageType,
-							"content": messageContent
-						]))
-						
-						if deleteCount < 500 {
-							deleteBatch.deleteDocument(doc.reference)
-							deleteCount += 1
-						}
-					}
-					// If only current user cleared, do nothing (already marked)
-					continue
-				}
-				
-				// Current user hasn't cleared yet - add them to deletedFor
-				var newDeletedFor = currentDeletedFor
-				if !newDeletedFor.contains(currentUid) {
-					newDeletedFor.append(currentUid)
-				}
-				
-				// Check if BOTH participants have now cleared this message
-				let bothCleared = newDeletedFor.contains(currentUid) && newDeletedFor.contains(otherParticipant)
-				
-				if bothCleared {
-					// Both users cleared - delete from Firebase
-					let messageType = data["type"] as? String ?? "text"
-					let messageContent = data["content"] as? String ?? ""
-					
-					messagesToDelete.append((doc.reference, [
-						"type": messageType,
-						"content": messageContent
-					]))
-					
-					if deleteCount < 500 {
-						deleteBatch.deleteDocument(doc.reference)
-						deleteCount += 1
-					}
-				} else {
-					// Only current user cleared - just update deletedFor
-					if updateCount < 500 {
-						updateBatch.updateData([
+				// Add current user to deletedFor if not already there
+				if !currentDeletedFor.contains(currentUid) && updateCount < 500 {
+					batch.updateData([
 							"deletedFor": FieldValue.arrayUnion([currentUid])
 						], forDocument: doc.reference)
 						updateCount += 1
-					}
 				}
 			}
 			
 			// Update chat room only once (on first batch)
-			if lastDocument == nil {
-				updateBatch.updateData([
+			if isFirstBatch {
+				batch.updateData([
 					"lastMessage": "",
 					"lastMessageTs": Timestamp(date: Date()),
 					"lastMessageType": "text"
 				], forDocument: chatRef)
+				isFirstBatch = false
 			}
 			
-			// Commit update batch first
+			// Commit batch
 			if updateCount > 0 {
-				try await updateBatch.commit()
-			}
-			
-			// Delete media files for messages being deleted
-			for (_, messageData) in messagesToDelete {
-				let messageType = messageData["type"] as? String ?? "text"
-				let messageContent = messageData["content"] as? String ?? ""
-				
-				// Delete media file if it's an image or video
-				if (messageType == "image" || messageType == "video" || messageType == "photo") && !messageContent.isEmpty {
-					Task {
-						do {
-							try await StorageService.shared.deleteFile(from: messageContent)
-						} catch {
-							print("⚠️ ChatService: Error deleting media file during clear chat: \(error)")
-							// Continue with message deletion even if storage deletion fails
-						}
-					}
-				}
-			}
-			
-			// Commit delete batch
-			if deleteCount > 0 {
-				try await deleteBatch.commit()
+				try await batch.commit()
 			}
 			
 			// Check if there are more messages
 			hasMore = messagesSnapshot.documents.count == batchSize
 			lastDocument = messagesSnapshot.documents.last
 		}
+		
+		print("✅ ChatService: Successfully cleared chat via fallback (messages marked in deletedFor)")
 	}
 	
 	// MARK: - Mark as Read
@@ -781,6 +850,7 @@ enum ChatServiceError: LocalizedError {
 	case notAuthenticated
 	case invalidParticipants
 	case chatRoomNotFound
+	case messageCannotBeEdited
 	
 	var errorDescription: String? {
 		switch self {
@@ -790,7 +860,10 @@ enum ChatServiceError: LocalizedError {
 			return "Chat room must have exactly 2 participants"
 		case .chatRoomNotFound:
 			return "Chat room not found"
+		case .messageCannotBeEdited:
+			return "Message has already been edited 2 times and cannot be edited again"
 		}
 	}
 }
+
 

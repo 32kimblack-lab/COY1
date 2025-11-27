@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= escapeHtml(user.name || user.username) %> - COY</title>
+  <meta name="description" content="View <%= escapeHtml(user.name || user.username) %>'s profile on COY">
+  <meta property="og:title" content="<%= escapeHtml(user.name || user.username) %> - COY">
+  <meta property="og:description" content="<%= escapeHtml(user.bio || `View ${user.name || user.username}'s profile on COY`) %>">
+  <!-- Use preview image URL that shows full profile view -->
+  <meta property="og:image" content="https://coy.services/preview/<%= escapeHtml(user.username) %>">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:type" content="profile">
+  <meta property="og:url" content="https://coy.services/<%= escapeHtml(user.username) %>">
+  <meta property="profile:username" content="<%= escapeHtml(user.username) %>">
+  <meta property="profile:first_name" content="<%= escapeHtml(user.name || '') %>">
+  <!-- Twitter Card tags for better previews -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="<%= escapeHtml(user.name || user.username) %> - COY">
+  <meta name="twitter:description" content="<%= escapeHtml(user.bio || `View ${user.name || user.username}'s profile on COY`) %>">
+  <meta name="twitter:image" content="https://coy.services/preview/<%= escapeHtml(user.username) %>">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background-color: #000;
+      color: #fff;
+      line-height: 1.6;
+    }
+    
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 20px;
+    }
+    
+    /* Header/Profile Section */
+    .profile-header {
+      position: relative;
+      margin-bottom: 40px;
+    }
+    
+    .background-image {
+      width: 100%;
+      height: 300px;
+      object-fit: cover;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    .profile-content {
+      position: relative;
+      margin-top: -80px;
+      padding: 0 20px;
+    }
+    
+    .profile-info {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+    }
+    
+    .profile-image {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      border: 4px solid #000;
+      object-fit: cover;
+      background: #333;
+      margin-bottom: 16px;
+    }
+    
+    .profile-name {
+      font-size: 28px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    
+    .profile-username {
+      font-size: 16px;
+      color: #999;
+      margin-bottom: 12px;
+    }
+    
+    .profile-bio {
+      font-size: 16px;
+      color: #ccc;
+      max-width: 600px;
+      margin-bottom: 20px;
+    }
+    
+    /* Collections Section */
+    .collections-section {
+      margin-top: 60px;
+    }
+    
+    .section-title {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 24px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #333;
+    }
+    
+    .collections-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 24px;
+      margin-bottom: 40px;
+    }
+    
+    .collection-card {
+      background: #111;
+      border-radius: 12px;
+      overflow: hidden;
+      transition: transform 0.2s, box-shadow 0.2s;
+      cursor: pointer;
+    }
+    
+    .collection-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+    
+    .collection-preview {
+      position: relative;
+      width: 100%;
+      height: 200px;
+      background: #222;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      grid-template-rows: repeat(2, 1fr);
+      gap: 2px;
+    }
+    
+    .collection-preview-item {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #333;
+    }
+    
+    .collection-preview-placeholder {
+      width: 100%;
+      height: 100%;
+      background: #222;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #666;
+      font-size: 12px;
+    }
+    
+    .collection-info {
+      padding: 16px;
+    }
+    
+    .collection-name {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    
+    .collection-description {
+      font-size: 14px;
+      color: #999;
+      margin-bottom: 8px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    
+    .collection-meta {
+      font-size: 12px;
+      color: #666;
+    }
+    
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: #666;
+    }
+    
+    .empty-state-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+    
+    .empty-state-text {
+      font-size: 16px;
+    }
+    
+    /* Responsive */
+    @media (max-width: 768px) {
+      .collections-grid {
+        grid-template-columns: 1fr;
+      }
+      
+      .profile-name {
+        font-size: 24px;
+      }
+      
+      .background-image {
+        height: 200px;
+      }
+      
+      .profile-content {
+        margin-top: -60px;
+      }
+      
+      .profile-image {
+        width: 100px;
+        height: 100px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Profile Header -->
+    <div class="profile-header">
+      <% if (user.backgroundImageURL) { %>
+        <img src="<%= escapeHtml(user.backgroundImageURL) %>" alt="Background" class="background-image" onerror="this.style.display='none'">
+      <% } else { %>
+        <div class="background-image"></div>
+      <% } %>
+      
+      <div class="profile-content">
+        <div class="profile-info">
+          <% if (user.profileImageURL) { %>
+            <img src="<%= escapeHtml(user.profileImageURL) %>" alt="<%= escapeHtml(user.name || user.username) %>" class="profile-image" onerror="this.style.display='none'">
+          <% } else { %>
+            <div class="profile-image"></div>
+          <% } %>
+          
+          <h1 class="profile-name"><%= escapeHtml(user.name || user.username) %></h1>
+          
+          <% if (user.username) { %>
+            <div class="profile-username">@<%= escapeHtml(user.username) %></div>
+          <% } %>
+          
+          <% if (user.bio) { %>
+            <p class="profile-bio"><%= escapeHtml(user.bio) %></p>
+          <% } %>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Collections Section -->
+    <div class="collections-section">
+      <h2 class="section-title">Public Collections</h2>
+      
+      <% if (collections.length === 0) { %>
+        <div class="empty-state">
+          <div class="empty-state-icon">📁</div>
+          <div class="empty-state-text">No public collections yet</div>
+        </div>
+      <% } else { %>
+        <div class="collections-grid">
+          <% collections.forEach(collection => { %>
+            <div class="collection-card">
+              <div class="collection-preview">
+                <% if (collection.previewPosts.length > 0) { %>
+                  <% collection.previewPosts.forEach((post, index) => { %>
+                    <img src="<%= escapeHtml(post.imageURL) %>" alt="Post preview" class="collection-preview-item" onerror="this.parentElement.innerHTML='<div class=\\'collection-preview-placeholder\\'>No image</div>'">
+                  <% }) %>
+                  <% for (let i = collection.previewPosts.length; i < 4; i++) { %>
+                    <div class="collection-preview-placeholder"></div>
+                  <% } %>
+                <% } else { %>
+                  <% for (let i = 0; i < 4; i++) { %>
+                    <div class="collection-preview-placeholder"></div>
+                  <% } %>
+                <% } %>
+              </div>
+              
+              <div class="collection-info">
+                <h3 class="collection-name"><%= escapeHtml(collection.name) %></h3>
+                <% if (collection.description) { %>
+                  <p class="collection-description"><%= escapeHtml(collection.description) %></p>
+                <% } %>
+                <div class="collection-meta">
+                  <%= collection.postCount %> <%= collection.postCount === 1 ? 'post' : 'posts' %>
+                  <% if (collection.createdAt) { %>
+                    • <%= formatDate(collection.createdAt) %>
+                  <% } %>
+                </div>
+              </div>
+            </div>
+          <% }) %>
+        </div>
+      <% } %>
+    </div>
+  </div>
+</body>
+</html>
+

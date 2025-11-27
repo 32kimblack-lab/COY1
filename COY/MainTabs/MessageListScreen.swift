@@ -20,6 +20,12 @@ struct ChatScreenWrapper: View {
 	}
 }
 
+// Chat navigation info for programmatic navigation
+struct ChatNavigationInfo: Hashable {
+	let chatId: String
+	let otherUserId: String
+}
+
 struct MessageListScreen: View {
 	private let chatService = ChatService.shared
 	private let friendService = FriendService.shared
@@ -30,10 +36,14 @@ struct MessageListScreen: View {
 	@State private var chatRoomsListener: ListenerRegistration? // Real-time chat rooms listener
 	@State private var unseenFriendRequestCount = 0
 	@State private var friendRequestListener: ListenerRegistration?
+	@State private var userDocumentListener: ListenerRegistration? // Real-time user document listener
 	@State private var hasLoadedDataOnce = false // Track if data has been loaded once
+	@State private var hasSetupListeners = false // Track if listeners have been set up
+	@State private var isLoadingChatRooms = false // Prevent concurrent loadChatRooms calls
 	@State private var friendsSet: Set<String> = [] // Cache of friends list for filtering
 	@State private var blockedUsersSet: Set<String> = [] // Cache of blocked users for filtering
 	@State private var blockedByUsersSet: Set<String> = [] // Cache of users who blocked me
+	@State private var selectedChat: ChatNavigationInfo?
 	
 	// Calculate total unread count across all chat rooms
 	var totalUnreadCount: Int {
@@ -215,16 +225,23 @@ struct MessageListScreen: View {
 						// Show all friends and previous friends
 						List {
 							ForEach(chatsToShow) { chat in
-								ChatRowViewModern(chat: chat)
+								ChatRowViewModern(chat: chat, onTap: {
+									guard let currentUid = Auth.auth().currentUser?.uid else { return }
+									let otherUid = chat.participants.first { $0 != currentUid } ?? chat.participants[0]
+									selectedChat = ChatNavigationInfo(chatId: chat.chatId, otherUserId: otherUid)
+								})
 							}
 						}
 						.listStyle(PlainListStyle())
 						.scrollContentBackground(.hidden)
 					}
 				}
-			}
-			.navigationBarHidden(true)
-			.onAppear {
+		}
+		.navigationBarHidden(true)
+		.navigationDestination(item: $selectedChat) { chatInfo in
+			ChatScreenWrapper(chatId: chatInfo.chatId, otherUserId: chatInfo.otherUserId, isChatScreenVisible: .constant(false))
+		}
+		.onAppear {
 				print("📱 MessageListScreen: onAppear called")
 				
 				// Load friends list first (needed for filtering and creating chat rooms)
@@ -249,9 +266,14 @@ struct MessageListScreen: View {
 					}
 				}
 				
+				// Only set up listeners once to prevent infinite loops
+				if !hasSetupListeners {
 				setupOutgoingRequestListener()
 				setupChatRoomsListener()
 				setupFriendRequestListener()
+					setupUserDocumentListener()
+					hasSetupListeners = true
+				}
 			}
 			.refreshable {
 				// Force refresh when user pulls to refresh (like Instagram)
@@ -433,7 +455,23 @@ struct MessageListScreen: View {
 	}
 	
 	private func loadChatRooms() {
+		// Prevent concurrent calls to avoid infinite loops
+		guard !isLoadingChatRooms else {
+			print("⚠️ MessageListScreen: loadChatRooms() already in progress, skipping...")
+			return
+		}
+		
 		Task {
+			await MainActor.run {
+				isLoadingChatRooms = true
+			}
+			
+			defer {
+				Task { @MainActor in
+					isLoadingChatRooms = false
+				}
+			}
+			
 			print("📱 MessageListScreen: loadChatRooms() called")
 			print("📱 MessageListScreen: Current friendsSet has \(friendsSet.count) friends: \(Array(friendsSet))")
 			
@@ -628,6 +666,53 @@ struct MessageListScreen: View {
 				let count = snapshot.documents.count
 				Task { @MainActor in
 					self.unseenFriendRequestCount = count
+					// Notify MainTabView of friend request count change
+					NotificationCenter.default.post(
+						name: NSNotification.Name("FriendRequestCountChanged"),
+						object: nil,
+						userInfo: ["count": count]
+					)
+				}
+			}
+	}
+	
+	// MARK: - Real-time User Document Listener
+	private func setupUserDocumentListener() {
+		guard let currentUid = Auth.auth().currentUser?.uid else { return }
+		let db = Firestore.firestore()
+		
+		// Remove existing listener
+		userDocumentListener?.remove()
+		
+		// Listen to current user's document for real-time updates to blockedUsers and blockedByUsers
+		userDocumentListener = db.collection("users").document(currentUid)
+			.addSnapshotListener { [self] snapshot, error in
+				if let error = error {
+					print("❌ MessageListScreen: User document listener error: \(error.localizedDescription)")
+					return
+				}
+				
+				guard let snapshot = snapshot, snapshot.exists,
+					  let data = snapshot.data() else {
+					return
+				}
+				
+				// Update blocked users sets in real-time
+				let blockedUsers = (data["blockedUsers"] as? [String]) ?? []
+				let blockedByUsers = (data["blockedByUsers"] as? [String]) ?? []
+				
+				Task { @MainActor in
+					let oldBlockedCount = self.blockedUsersSet.count
+					let oldBlockedByCount = self.blockedByUsersSet.count
+					
+					self.blockedUsersSet = Set(blockedUsers)
+					self.blockedByUsersSet = Set(blockedByUsers)
+					print("✅ MessageListScreen: Updated blocked users in real-time - blocked: \(blockedUsers.count), blockedBy: \(blockedByUsers.count)")
+					
+					// Only reload chat rooms if blocked users actually changed (to prevent loops)
+					if oldBlockedCount != blockedUsers.count || oldBlockedByCount != blockedByUsers.count {
+						loadChatRooms()
+					}
 				}
 			}
 	}
@@ -824,6 +909,7 @@ struct MessageListScreen: View {
 // MARK: - Modern Chat Row View
 struct ChatRowViewModern: View {
 	let chat: ChatRoomModel
+	let onTap: () -> Void
 	@State private var otherUser: UserService.AppUser?
 	@Environment(\.colorScheme) var colorScheme
 	
@@ -854,7 +940,7 @@ struct ChatRowViewModern: View {
 	}
 	
 	var body: some View {
-		NavigationLink(destination: ChatScreenWrapper(chatId: chat.chatId, otherUserId: otherUid, isChatScreenVisible: .constant(false))) {
+		Button(action: onTap) {
 			HStack(spacing: 16 * scaleFactor) {
 				// Profile Image
 				ZStack(alignment: .bottomTrailing) {
@@ -907,6 +993,7 @@ struct ChatRowViewModern: View {
 					}
 				}
 			}
+			.frame(maxWidth: .infinity, alignment: .leading)
 			.padding(.horizontal, 16 * scaleFactor)
 			.padding(.vertical, 12 * scaleFactor)
 			.background(
@@ -915,8 +1002,8 @@ struct ChatRowViewModern: View {
 				Color.clear
 			)
 			.contentShape(Rectangle())
-			}
-		.buttonStyle(PlainButtonStyle())
+		}
+		.buttonStyle(.plain)
 		.listRowInsets(EdgeInsets())
 		.listRowSeparator(.hidden)
 		.listRowBackground(Color.clear)
@@ -968,9 +1055,9 @@ struct ChatRowViewModern: View {
 			return "Added new"
 		}
 		
-		// Show "Message deleted" if the message is deleted
-		if message == "Message deleted" {
-			return "Message deleted"
+		// Show deleted message text if the message is deleted
+		if message == "This message was deleted" || message == "This media was deleted" {
+			return message
 		}
 		
 		if message.count > 60 {
@@ -988,8 +1075,6 @@ struct ChatRowViewModern: View {
 			return "photo.fill"
 		case "video":
 			return "video.fill"
-		case "audio", "voice":
-			return "waveform"
 		default:
 			return "text.bubble"
 		}

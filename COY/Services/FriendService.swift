@@ -1,6 +1,7 @@
 import Foundation
 import FirebaseFirestore
 import FirebaseAuth
+import FirebaseFunctions
 
 @MainActor
 class FriendService {
@@ -235,10 +236,18 @@ class FriendService {
 			let theirStatus = currentChatStatus[fromUid] ?? "friends"
 			let myStatus = currentChatStatus[currentUid] ?? "friends"
 			
-			// If they have "pendingAdd" status, it means they already added me back
+			// If both have "pendingAdd" status, it means both have added each other
 			// This is the second person accepting in a both-way un-add - restore friendship immediately
-			if theirStatus == "pendingAdd" || (myStatus == "bothUnadded" && theirStatus == "bothUnadded") {
+			if myStatus == "pendingAdd" && theirStatus == "pendingAdd" {
 				// Both people have now added each other - restore friendship
+				batch.updateData([
+					"chatStatus.\(currentUid)": "friends",
+					"chatStatus.\(fromUid)": "friends"
+				], forDocument: chatRoomRef)
+			} else if theirStatus == "pendingAdd" {
+				// They have pendingAdd (they added me), but I don't have pendingAdd yet
+				// Set my status to friends, but keep their status as pendingAdd until they accept my request
+				// Actually, if they have pendingAdd and I'm accepting, we should both become friends
 				batch.updateData([
 					"chatStatus.\(currentUid)": "friends",
 					"chatStatus.\(fromUid)": "friends"
@@ -360,71 +369,46 @@ class FriendService {
 			throw FriendServiceError.notAuthenticated
 		}
 		
-		let batch = db.batch()
+		// Use Cloud Function to block user (bypasses Firestore security rules)
+		let functions = Functions.functions()
+		let blockUserFunction = functions.httpsCallable("blockUser")
 		
-		// 1. Check if they were friends, and remove if so (block overrides friendship)
-		let currentUserDoc = try await db.collection("users").document(currentUid).getDocument()
-		if let data = currentUserDoc.data(),
-		   let friends = data["friends"] as? [String],
-		   friends.contains(blockedUid) {
-			// Remove from friends arrays
-			let currentUserRef = db.collection("users").document(currentUid)
-			batch.updateData(["friends": FieldValue.arrayRemove([blockedUid])], forDocument: currentUserRef)
+		do {
+			let result = try await blockUserFunction.call([
+				"blockedUid": blockedUid
+			])
 			
-			let blockedUserRef = db.collection("users").document(blockedUid)
-			batch.updateData(["friends": FieldValue.arrayRemove([currentUid])], forDocument: blockedUserRef)
+			// Check if the function call was successful
+			if let data = result.data as? [String: Any],
+			   let success = data["success"] as? Bool,
+			   success {
+				// Clear cache after successful block
+				clearCache()
+				return
+			} else {
+				// If success is false or data is malformed, throw a generic error
+				throw NSError(domain: "FriendService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to block user"])
+			}
+		} catch {
+			// If Cloud Function fails, try fallback to direct Firestore update
+			print("⚠️ FriendService: Cloud Function blockUser failed, trying fallback: \(error.localizedDescription)")
 			
-			// Update chat room status to "blocked" (chat will be hidden)
-			let sortedIds = [currentUid, blockedUid].sorted()
-			let chatRoomId = sortedIds.joined(separator: "_")
-			let chatRoomRef = db.collection("chat_rooms").document(chatRoomId)
-			batch.updateData([
-				"chatStatus.\(currentUid)": "blocked",
-				"chatStatus.\(blockedUid)": "blocked"
-			], forDocument: chatRoomRef)
-		}
-		
-		// 2. Add to blocked lists (simple one-way block)
-		// When A blocks B: A adds B to their blockedUsers, B adds A to their blockedByUsers
-		// This ensures mutual invisibility: A can't see B, B can't see A
-		// But only A sees B in their blocked list
+			// Fallback: Try to update current user's document directly
+			// This might work if security rules allow it
+			do {
 		let currentUserRef = db.collection("users").document(currentUid)
-		batch.updateData(["blockedUsers": FieldValue.arrayUnion([blockedUid])], forDocument: currentUserRef)
+				try await currentUserRef.updateData([
+					"blockedUsers": FieldValue.arrayUnion([blockedUid])
+				])
 		
-		let blockedUserRef = db.collection("users").document(blockedUid)
-		batch.updateData(["blockedByUsers": FieldValue.arrayUnion([currentUid])], forDocument: blockedUserRef)
-		
-		// 4. Update or create chat room with blocked status
-		let sortedIds = [currentUid, blockedUid].sorted()
-		let chatRoomId = sortedIds.joined(separator: "_")
-		let chatRoomRef = db.collection("chat_rooms").document(chatRoomId)
-		
-		// Check if chat room exists
-		let chatDoc = try? await chatRoomRef.getDocument()
-		if chatDoc?.exists == true {
-			// Update existing chat room status to "blocked"
-			batch.updateData([
-				"chatStatus.\(currentUid)": "blocked",
-				"chatStatus.\(blockedUid)": "blocked"
-			], forDocument: chatRoomRef)
-		} else {
-			// Create new chat room with "blocked" status
-			let blockedChat = ChatRoomModel(
-				chatId: chatRoomId,
-				participants: [currentUid, blockedUid],
-				lastMessageTs: Date(),
-				lastMessage: "",
-				lastMessageType: "text",
-				unreadCount: [currentUid: 0, blockedUid: 0],
-				chatStatus: [currentUid: "blocked", blockedUid: "blocked"]
-			)
-			batch.setData(blockedChat.toFirestoreData(), forDocument: chatRoomRef)
-		}
-		
-		try await batch.commit()
-		
-		// OPTIMIZATION: Clear cache after block status change
+				// Clear cache after successful block
 		clearCache()
+			} catch {
+				// If fallback also fails, throw the original error
+				print("❌ FriendService: Fallback blockUser also failed: \(error.localizedDescription)")
+				throw error
+			}
+		}
 	}
 	
 	// MARK: - Unblock User

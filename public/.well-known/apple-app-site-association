@@ -1,0 +1,16 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appID": "3EL64UJG2C.Camera.COY",
+        "paths": [
+          "*",
+          "/",
+          "/*"
+        ]
+      }
+    ]
+  }
+}
+

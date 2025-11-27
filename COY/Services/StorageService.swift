@@ -21,40 +21,74 @@ final class StorageService {
 	
 	/// Delete a file from Firebase Storage by its URL
 	func deleteFile(from urlString: String) async throws {
-		guard !urlString.isEmpty else { return }
+		guard !urlString.isEmpty else {
+			print("⚠️ StorageService: Empty URL string provided")
+			throw StorageError.uploadFailed
+		}
+		
+		print("🗑️ StorageService: Attempting to delete file from URL: \(urlString)")
 		
 		// Firebase Storage URLs look like: https://firebasestorage.googleapis.com/v0/b/PROJECT.appspot.com/o/PATH%2FTO%2FFILE?alt=media&token=...
-		guard let url = URL(string: urlString),
-			  url.host?.contains("firebasestorage.googleapis.com") == true else {
-			print("⚠️ StorageService: Invalid Firebase Storage URL: \(urlString)")
-			return
+		guard let url = URL(string: urlString) else {
+			print("❌ StorageService: Could not parse URL: \(urlString)")
+			throw StorageError.uploadFailed
+		}
+		
+		// Check if it's a Firebase Storage URL
+		guard url.host?.contains("firebasestorage.googleapis.com") == true else {
+			print("❌ StorageService: Not a Firebase Storage URL: \(urlString)")
+			print("   Host: \(url.host ?? "nil")")
+			throw StorageError.uploadFailed
 		}
 		
 		// Extract the path from the URL
-		// The path is after /o/ in the path components
-		// Example: /v0/b/PROJECT.appspot.com/o/chat_media%2Fimage.jpg?alt=media&token=...
+		// Firebase Storage URLs format: https://firebasestorage.googleapis.com/v0/b/BUCKET/o/PATH%2FTO%2FFILE?alt=media&token=...
+		// The path might be URL-encoded (e.g., "chat_media%2Fimage.jpg")
 		let pathComponents = url.pathComponents
+		print("📋 StorageService: URL path components: \(pathComponents)")
+		
+		// Find the index of "o" in path components
 		guard let oIndex = pathComponents.firstIndex(of: "o"),
 			  oIndex + 1 < pathComponents.count else {
-			print("⚠️ StorageService: Could not find path in URL: \(urlString)")
-			return
+			print("❌ StorageService: Could not find 'o' in path components")
+			print("   Path components: \(pathComponents)")
+			print("   Full URL: \(urlString)")
+			throw StorageError.uploadFailed
 		}
 		
-		// Get the path component after "o" and decode it
-		// The path might be URL-encoded (e.g., chat_media%2Fimage.jpg)
-		let encodedPath = pathComponents[oIndex + 1]
+		// Reconstruct the full path by joining all components after "o"
+		// This handles URL-encoded paths that were split into multiple components
+		let pathParts = pathComponents[(oIndex + 1)...]
+		let encodedPath = pathParts.joined(separator: "/")
+		
+		// Decode the path (it might be URL-encoded like "chat_media%2Fimage.jpg")
 		let decodedPath = encodedPath.removingPercentEncoding ?? encodedPath
+		
+		print("📁 StorageService: Extracted path: \(decodedPath)")
+		print("   Encoded: \(encodedPath)")
+		print("   Decoded: \(decodedPath)")
 		
 		let storageRef = storage.reference()
 		let fileRef = storageRef.child(decodedPath)
 		
+		// Attempt to delete the file directly
+		// Note: Firebase Storage delete() will succeed even if file doesn't exist
+		// So we don't need to check existence first
 		do {
 			try await fileRef.delete()
-			print("✅ StorageService: File deleted successfully: \(decodedPath)")
-		} catch {
-			print("❌ StorageService: Error deleting file from Storage: \(error.localizedDescription)")
-			// Don't throw - deletion of storage file is best effort
-			// The message is already marked as deleted in Firestore
+			print("✅ StorageService: File deleted successfully from Storage!")
+			print("   Path: \(decodedPath)")
+			print("   Full URL: \(urlString)")
+		} catch let error as NSError {
+			print("❌ StorageService: CRITICAL ERROR - Failed to delete file from Storage")
+			print("   Error domain: \(error.domain)")
+			print("   Error code: \(error.code)")
+			print("   Error description: \(error.localizedDescription)")
+			print("   User info: \(error.userInfo)")
+			print("   File path: \(decodedPath)")
+			print("   Full URL: \(urlString)")
+			// Re-throw the error so caller knows deletion failed
+			throw error
 		}
 	}
 	
@@ -214,24 +248,6 @@ final class StorageService {
 		}
 		
 		return outputURL
-	}
-	
-	func uploadChatAudio(_ audioURL: URL, path: String) async throws -> String {
-		guard Auth.auth().currentUser != nil else {
-			throw StorageError.unauthorized
-		}
-		
-		let storageRef = storage.reference()
-		let audioRef = storageRef.child(path)
-		
-		let metadata = StorageMetadata()
-		metadata.contentType = "audio/m4a"
-		
-		// Upload from file URL directly
-		let _ = try await audioRef.putFileAsync(from: audioURL, metadata: metadata)
-		let downloadURL = try await audioRef.downloadURL()
-		
-		return downloadURL.absoluteString
 	}
 }
 

@@ -40,8 +40,6 @@ class MessageNotificationService {
 		// Format notification body based on message type
 		let notificationBody: String
 		switch messageType {
-		case "voice":
-			notificationBody = "Voice message"
 		case "image", "photo":
 			notificationBody = "Sent photo"
 		case "video":

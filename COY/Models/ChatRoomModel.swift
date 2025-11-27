@@ -7,7 +7,7 @@ struct ChatRoomModel: Identifiable, Codable {
 	var participants: [String]
 	var lastMessageTs: Date
 	var lastMessage: String
-	var lastMessageType: String // "text", "image", "video", "live_photo", "voice"
+	var lastMessageType: String // "text", "image", "video", "live_photo"
 	var unreadCount: [String: Int] // [uid: count]
 	var chatStatus: [String: String] // [uid: "friends" | "unadded" | "pending"] - tracks friendship status per user
 	

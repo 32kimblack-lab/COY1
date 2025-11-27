@@ -1,4 +1,5 @@
 import SwiftUI
+import SafariServices
 
 struct TKTextField: View {
 	@Binding var text: String
@@ -58,11 +59,46 @@ struct TKButton: View {
 struct CombinedIconView: View {
 	var body: some View {
 		HStack(spacing: 8) {
-			Image(systemName: "triangle.fill")
 			Text("COY")
 				.font(.title)
 				.fontWeight(.bold)
+			Image("SplashIcon")
+				.resizable()
+				.scaledToFit()
+				.frame(width: 40, height: 40)
 		}
+	}
+}
+
+// MARK: - Keyboard Dismissal Modifier
+struct DismissKeyboardModifier: ViewModifier {
+	func body(content: Content) -> some View {
+		content
+			.simultaneousGesture(
+				TapGesture()
+					.onEnded { _ in
+						UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+					}
+			)
+	}
+}
+
+extension View {
+	func dismissKeyboardOnTap() -> some View {
+		modifier(DismissKeyboardModifier())
+	}
+}
+
+// MARK: - Safari View Controller Wrapper
+struct SafariViewController: UIViewControllerRepresentable {
+	let url: URL
+	
+	func makeUIViewController(context: Context) -> SFSafariViewController {
+		return SFSafariViewController(url: url)
+	}
+	
+	func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {
+		// No update needed
 	}
 }
 

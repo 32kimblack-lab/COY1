@@ -217,22 +217,12 @@ struct HiddenCollectionRow: View {
 	let collection: CollectionData
 	let onUnhide: () -> Void
 	@Environment(\.colorScheme) var colorScheme
+	@State private var ownerProfileImageURL: String?
 	
 	var body: some View {
 		HStack(spacing: 12) {
-			// Collection image
-			if let imageURL = collection.imageURL, !imageURL.isEmpty {
-				CachedProfileImageView(url: imageURL, size: 60)
-					.clipShape(Circle())
-			} else {
-				Circle()
-					.fill(Color.gray.opacity(0.3))
-					.frame(width: 60, height: 60)
-					.overlay(
-						Image(systemName: "photo")
-							.foregroundColor(.gray)
-					)
-			}
+			// Collection image with fallback to owner's profile image
+			collectionImageView
 			
 			// Collection info
 			VStack(alignment: .leading, spacing: 4) {
@@ -276,6 +266,49 @@ struct HiddenCollectionRow: View {
 		.padding()
 		.background(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.95))
 		.cornerRadius(12)
+		.onAppear {
+			// Load owner's profile image if collection has no imageURL
+			if collection.imageURL?.isEmpty != false {
+				loadOwnerProfileImage()
+			}
+		}
+	}
+	
+	// MARK: - Collection Image View
+	private var collectionImageView: some View {
+		Group {
+			if let imageURL = collection.imageURL, !imageURL.isEmpty {
+				// Use collection's profile image if available
+				CachedProfileImageView(url: imageURL, size: 60)
+					.clipShape(Circle())
+			} else if let ownerImageURL = ownerProfileImageURL, !ownerImageURL.isEmpty {
+				// Use owner's profile image as fallback
+				CachedProfileImageView(url: ownerImageURL, size: 60)
+					.clipShape(Circle())
+			} else {
+				// Fallback to default icon
+				DefaultProfileImageView(size: 60)
+			}
+		}
+	}
+	
+	// MARK: - Load Owner Profile Image
+	private func loadOwnerProfileImage() {
+		// Skip if already loaded
+		if ownerProfileImageURL != nil {
+			return
+		}
+		
+		Task {
+			do {
+				let owner = try await UserService.shared.getUser(userId: collection.ownerId)
+				await MainActor.run {
+					ownerProfileImageURL = owner?.profileImageURL
+				}
+			} catch {
+				print("⚠️ HiddenCollectionRow: Could not load owner profile image: \(error)")
+			}
+		}
 	}
 }
 

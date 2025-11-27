@@ -6,11 +6,21 @@ struct PhoneSizeContainer<Content: View>: View {
 	// Maximum phone width (iPhone 14 Pro Max width)
 	private let maxPhoneWidth: CGFloat = 430
 	
+	// Check if device is iPad
+	private var isIPad: Bool {
+		UIDevice.current.userInterfaceIdiom == .pad
+	}
+	
 	init(@ViewBuilder content: () -> Content) {
 		self.content = content()
 	}
 	
 	var body: some View {
+		if isIPad {
+			// On iPad, just return the content without any constraints
+			content
+		} else {
+			// On iPhone, apply phone size constraints
 		GeometryReader { geometry in
 			let contentWidth = min(geometry.size.width, maxPhoneWidth)
 			let horizontalPadding = (geometry.size.width - contentWidth) / 2
@@ -26,12 +36,13 @@ struct PhoneSizeContainer<Content: View>: View {
 					.frame(width: max(0, horizontalPadding))
 			}
 			.frame(width: geometry.size.width, height: geometry.size.height)
+			}
 		}
 	}
 }
 
 extension View {
-	/// Constrains the view to phone size on tablets, similar to Depop's design
+	/// Constrains the view to phone size on iPhones only. On iPad, uses full width.
 	func phoneSizeContainer() -> some View {
 		PhoneSizeContainer {
 			self

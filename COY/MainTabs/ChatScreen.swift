@@ -3,6 +3,7 @@ import FirebaseAuth
 import FirebaseFirestore
 import UIKit
 import SDWebImageSwiftUI
+import AVFoundation
 
 struct ChatScreen: View {
 	let chatId: String
@@ -28,6 +29,15 @@ struct ChatScreen: View {
 	@State private var oldestMessageId: String?
 	@State private var areActuallyFriends: Bool? = nil // Cache actual friendship status
 	@State private var hasScrolledToBottom = false // Track if we've scrolled to bottom on initial load
+	@State private var showVideoTooLongAlert = false
+	@State private var selectedImageURL: String?
+	@State private var selectedVideoURL: String?
+	@State private var showBlockUserConfirmation = false
+	@State private var showBlockUserError = false
+	@State private var blockUserErrorMessage = ""
+	@State private var showReactionDetails = false
+	@State private var selectedReactionEmoji: String?
+	@State private var selectedReactionMessage: MessageModel?
 	@Environment(\.dismiss) var dismiss
 	@EnvironmentObject var authService: AuthService
 	
@@ -88,15 +98,15 @@ struct ChatScreen: View {
 	}
 	
 	private var profileInfoContent: some View {
-						HStack(spacing: 12) {
-							CachedProfileImageView(url: otherUser?.profileImageURL ?? "", size: 44)
-							VStack(alignment: .leading, spacing: 3) {
+						HStack(spacing: 8) {
+							CachedProfileImageView(url: otherUser?.profileImageURL ?? "", size: 32)
+							VStack(alignment: .leading, spacing: 2) {
 				Text(displayUsername)
-									.font(.system(size: 20, weight: .semibold))
+									.font(.system(size: 16, weight: .semibold))
 									.foregroundColor(.primary)
 								if let name = otherUser?.name, !name.isEmpty {
 									Text(name)
-										.font(.system(size: 16))
+										.font(.system(size: 13))
 										.foregroundColor(.gray)
 						}
 					}
@@ -128,7 +138,7 @@ struct ChatScreen: View {
 					Divider()
 					
 					Button(role: .destructive, action: {
-						blockUser()
+						showBlockUserConfirmation = true
 					}) {
 				Label("Block User", systemImage: "hand.raised.fill")
 					}
@@ -157,26 +167,34 @@ struct ChatScreen: View {
 		}
 	}
 	
-	var body: some View {
+	private var mainContentView: some View {
 		VStack(spacing: 0) {
 			messagesScrollView
 			replyPreviewSection
 			uploadProgressSection
 			chatInputBar
 		}
-		.toolbar {
-			ToolbarItem(placement: .navigationBarLeading) {
-				navigationBarLeadingContent
+	}
+	
+	private var contentWithToolbar: some View {
+		mainContentView
+			.toolbar {
+				ToolbarItem(placement: .navigationBarLeading) {
+					navigationBarLeadingContent
+				}
+				
+				ToolbarItem(placement: .navigationBarTrailing) {
+					navigationBarTrailingContent
+				}
 			}
-			
-			ToolbarItem(placement: .navigationBarTrailing) {
-				navigationBarTrailingContent
-			}
-		}
-		.navigationBarTitleDisplayMode(.inline)
-		.navigationBarBackButtonHidden(true)
-		.toolbar(.hidden, for: .tabBar)
-		.onAppear {
+			.navigationBarTitleDisplayMode(.inline)
+			.navigationBarBackButtonHidden(true)
+			.toolbar(.hidden, for: .tabBar)
+	}
+	
+	var body: some View {
+		contentWithToolbar
+			.onAppear {
 			// Load user data first to show username immediately
 			loadOtherUser()
 			loadCurrentUser()
@@ -299,6 +317,22 @@ struct ChatScreen: View {
 			SearchMessagesScreen(chatId: chatId)
 				.presentationCompactAdaptation(.none)
 		}
+		.fullScreenCover(isPresented: Binding(
+			get: { selectedImageURL != nil },
+			set: { if !$0 { selectedImageURL = nil } }
+		)) {
+			if let imageURL = selectedImageURL {
+				FullScreenImageView(imageURL: imageURL)
+			}
+		}
+		.fullScreenCover(isPresented: Binding(
+			get: { selectedVideoURL != nil },
+			set: { if !$0 { selectedVideoURL = nil } }
+		)) {
+			if let videoURL = selectedVideoURL {
+				FullScreenVideoView(videoURL: videoURL)
+			}
+		}
 		.alert("Clear Chat", isPresented: $showClearChatConfirmation) {
 			Button("Cancel", role: .cancel) { }
 			Button("Clear", role: .destructive) {
@@ -306,6 +340,42 @@ struct ChatScreen: View {
 			}
 		} message: {
 			Text("Are you sure you want to clear this chat? This will permanently delete all messages for you and you won't be able to get them back.")
+		}
+		.alert("Video Too Long", isPresented: $showVideoTooLongAlert) {
+			Button("OK", role: .cancel) { }
+		} message: {
+			Text("Videos must be 2 minutes or shorter. Please select a shorter video.")
+		}
+		.alert("Block User", isPresented: $showBlockUserConfirmation) {
+			Button("Cancel", role: .cancel) { }
+			Button("Block", role: .destructive) {
+				blockUser()
+			}
+		} message: {
+			Text("Are you sure you want to block this user? You won't be able to see each other's messages or profiles.")
+		}
+		.alert("Error Blocking User", isPresented: $showBlockUserError) {
+			Button("OK", role: .cancel) { }
+		} message: {
+			Text(blockUserErrorMessage)
+		}
+		.overlay {
+			if showReactionDetails, let emoji = selectedReactionEmoji, let message = selectedReactionMessage {
+				ReactionDetailsView(
+					message: message,
+					emoji: emoji,
+					onRemoveReaction: { emoji in
+						removeReaction(message: message, emoji: emoji)
+					},
+					onDismiss: {
+						showReactionDetails = false
+						selectedReactionEmoji = nil
+						selectedReactionMessage = nil
+					}
+				)
+				.transition(AnyTransition.opacity.combined(with: .scale(scale: 0.9)))
+				.zIndex(1001)
+			}
 		}
 	}
 	
@@ -417,9 +487,87 @@ struct ChatScreen: View {
 				// Messages come ordered by timestamp descending (newest first from Firestore)
 				for try await messageList in chatService.getMessages(chatId: chatId, limit: 50) {
 					await MainActor.run {
-						// For inverted chat: Store messages in chronological order (oldest first)
-						// This way newest messages appear at the bottom naturally
-						self.messages = messageList.reversed()
+						let reversedList = Array(messageList.reversed())
+						
+						if self.messages.isEmpty {
+							// First load: replace entire array
+							self.messages = reversedList
+						} else {
+							// Subsequent updates: merge changes to preserve optimistic updates
+							var updatedMessages = self.messages
+							let messageDict = Dictionary(uniqueKeysWithValues: reversedList.map { ($0.messageId, $0) })
+							
+							guard let currentUid = currentUid else {
+								// No current user - just use server data
+								self.messages = reversedList
+								return
+							}
+							
+							// Update existing messages - merge server updates intelligently
+							// Preserve optimistic updates until server confirms, but always show real-time updates from others
+							for (index, existingMessage) in updatedMessages.enumerated() {
+								if let serverMessage = messageDict[existingMessage.messageId] {
+									// Check if this is an optimistic edit from current user that hasn't been confirmed yet
+									let localIsEdited = existingMessage.isEdited
+									let serverIsEdited = serverMessage.isEdited
+									let localEditCount = existingMessage.editCount
+									let serverEditCount = serverMessage.editCount
+									let isMyOptimisticEdit = localIsEdited && 
+										existingMessage.senderUid == currentUid &&
+										(!serverIsEdited || localEditCount > serverEditCount)
+									
+									// Check if there are optimistic reactions from current user
+									// Compare reactions: if local has current user's reaction that server doesn't have, it's optimistic
+									let localMyReaction = existingMessage.reactions[currentUid]
+									let serverMyReaction = serverMessage.reactions[currentUid]
+									let hasMyOptimisticReaction = localMyReaction != nil && localMyReaction != serverMyReaction
+									
+									// Always merge reactions from server to show real-time updates from other users
+									// But preserve current user's optimistic reaction if it hasn't been confirmed
+									var mergedReactions = serverMessage.reactions
+									if hasMyOptimisticReaction, let myReaction = localMyReaction {
+										// Keep current user's optimistic reaction until server confirms
+										mergedReactions[currentUid] = myReaction
+									}
+									
+									if isMyOptimisticEdit || hasMyOptimisticReaction {
+										// Keep optimistic update, but merge all other fields from server (including reactions from others)
+										var mergedMessage = existingMessage
+										// Preserve optimistic edit if it's from current user
+										if !isMyOptimisticEdit {
+											mergedMessage.content = serverMessage.content
+											mergedMessage.isEdited = serverMessage.isEdited
+											mergedMessage.editedAt = serverMessage.editedAt
+											mergedMessage.editCount = serverMessage.editCount
+										}
+										// Always use merged reactions (server + optimistic)
+										mergedMessage.reactions = mergedReactions
+										// Always update other fields that might have changed
+										mergedMessage.isDeleted = serverMessage.isDeleted
+										mergedMessage.deletedFor = serverMessage.deletedFor
+										updatedMessages[index] = mergedMessage
+									} else {
+										// No optimistic updates - use server version (includes all real-time updates)
+										updatedMessages[index] = serverMessage
+									}
+								}
+							}
+							
+							// Add any new messages that don't exist yet
+							for newMessage in reversedList {
+								if !updatedMessages.contains(where: { $0.messageId == newMessage.messageId }) {
+									// Insert new message in correct position (maintain chronological order)
+									if let insertIndex = updatedMessages.firstIndex(where: { $0.timestamp > newMessage.timestamp }) {
+										updatedMessages.insert(newMessage, at: insertIndex)
+									} else {
+										updatedMessages.append(newMessage)
+									}
+								}
+							}
+							
+							// Create new array reference to trigger SwiftUI update
+							self.messages = updatedMessages
+						}
 						
 						// Update pagination state
 						// Since we reversed, the first one is now the oldest
@@ -511,6 +659,19 @@ struct ChatScreen: View {
 	private func sendMediaMessage(image: UIImage?, videoURL: URL?) {
 		Task {
 			do {
+				// Validate video duration before processing
+				if let videoURL = videoURL {
+					let duration = await getVideoDuration(url: videoURL)
+					let maxDuration: TimeInterval = 120 // 2 minutes in seconds
+					
+					if duration > maxDuration {
+						await MainActor.run {
+							showVideoTooLongAlert = true
+						}
+						return
+					}
+				}
+				
 				await MainActor.run {
 					isUploadingMedia = true
 					uploadProgress = 0.1 // Start with 10% to show activity
@@ -588,82 +749,122 @@ struct ChatScreen: View {
 		}
 	}
 	
-	private func sendVoiceMessage(audioURL: URL) {
-		Task {
-			do {
-				await MainActor.run {
-					isUploadingMedia = true
-					uploadProgress = 0.1
-				}
-				
-				let storageService = StorageService.shared
-				let audioPath = "chat_media/\(UUID().uuidString).m4a"
-				
-				await MainActor.run {
-					uploadProgress = 0.5
-				}
-				
-				let mediaURL = try await storageService.uploadChatAudio(audioURL, path: audioPath)
-				
-				await MainActor.run {
-					uploadProgress = 0.9
-				}
-				
-				// Send message with audio URL
-				try await chatService.sendMessage(
-					chatId: chatId,
-					type: "voice",
-					content: mediaURL,
-					replyTo: replyToMessage?.messageId
-				)
-				
-				await MainActor.run {
-					uploadProgress = 1.0
-					isUploadingMedia = false
-					uploadProgress = 0.0
-					replyToMessage = nil
-				}
-			} catch {
-				print("Error sending voice message: \(error)")
-				await MainActor.run {
-					isUploadingMedia = false
-					uploadProgress = 0.0
-				}
-			}
-		}
-	}
-	
 	private func deleteMessage(_ message: MessageModel) {
+		// Store original message for potential revert
+		let originalMessage = message
+		let messageIdToDelete = message.messageId
+		
+		// Optimistic update: immediately replace message with deleted version
+		// The backend will delete the original and create a replacement message
+		if let index = messages.firstIndex(where: { $0.messageId == messageIdToDelete }) {
+			var deletedMessage = message
+			deletedMessage.isDeleted = true
+			deletedMessage.content = (deletedMessage.type == "text") ? "This message was deleted" : "This media was deleted"
+			deletedMessage.messageId = "\(messageIdToDelete)_deleted" // Temporary ID until real-time listener updates
+			messages[index] = deletedMessage
+		}
+		
+		showActions = false
+		
 		Task {
 			do {
-				try await chatService.deleteMessage(chatId: chatId, messageId: message.messageId)
-				await MainActor.run {
-					showActions = false
-				}
+				try await chatService.deleteMessage(chatId: chatId, messageId: messageIdToDelete)
+				// Real-time listener will confirm the deletion and replacement message
 			} catch {
 				print("Error deleting message: \(error)")
+				// Revert optimistic update on error - restore original message
+				await MainActor.run {
+					if let index = messages.firstIndex(where: { $0.messageId == "\(messageIdToDelete)_deleted" }) {
+						messages[index] = originalMessage
+					} else if let index = messages.firstIndex(where: { $0.messageId == messageIdToDelete }) {
+						messages[index] = originalMessage
+					}
+				}
 			}
 		}
 	}
 	
 	private func editMessage(_ message: MessageModel, newText: String) {
+		// Check edit count before allowing edit
+		guard message.editCount < 2 else {
+			print("Message has already been edited 2 times")
+			Task { @MainActor in
+				showActions = false
+			}
+			return
+		}
+		
+		// Optimistic update: immediately update local state on main thread
+		Task { @MainActor in
+			withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+				if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+					var updatedMessage = message
+					updatedMessage.content = newText
+					updatedMessage.isEdited = true
+					updatedMessage.editedAt = Date()
+					updatedMessage.editCount = message.editCount + 1
+					
+					// Create a new array to trigger SwiftUI update
+					var updatedMessages = messages
+					updatedMessages[index] = updatedMessage
+					messages = updatedMessages
+				}
+			}
+			
+			showActions = false
+		}
+		
 		Task {
 			do {
 				try await chatService.editMessage(chatId: chatId, messageId: message.messageId, newText: newText)
-				await MainActor.run {
-					showActions = false
-				}
+				// Real-time listener will confirm the update
 			} catch {
 				print("Error editing message: \(error)")
+				// Revert optimistic update on error
+				await MainActor.run {
+					if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+						var updatedMessages = messages
+						updatedMessages[index] = message
+						messages = updatedMessages
+					}
+				}
 			}
 		}
 	}
 	
 	private func reactToMessage(_ message: MessageModel, emoji: String) {
+		guard let currentUid = Auth.auth().currentUser?.uid else { return }
+		
+		// Optimistic update: immediately update local state on main thread
+		Task { @MainActor in
+			withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+				if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+					var updatedMessage = message
+					var updatedReactions = message.reactions
+					
+					if message.reactions[currentUid] == emoji {
+						// Remove reaction if already reacted
+						updatedReactions.removeValue(forKey: currentUid)
+					} else {
+						// Add reaction
+						updatedReactions[currentUid] = emoji
+					}
+					
+					updatedMessage.reactions = updatedReactions
+					
+					// Create a new array to trigger SwiftUI update
+					var updatedMessages = messages
+					updatedMessages[index] = updatedMessage
+					messages = updatedMessages
+				}
+			}
+			
+			showActions = false
+		}
+		
 		Task {
 			do {
 				// Check if user already reacted with this emoji
-				let currentUid = Auth.auth().currentUser?.uid ?? ""
 				if message.reactions[currentUid] == emoji {
 					// Remove reaction if already reacted
 					try await chatService.removeReaction(chatId: chatId, messageId: message.messageId)
@@ -671,21 +872,55 @@ struct ChatScreen: View {
 					// Add reaction
 					try await chatService.addReaction(chatId: chatId, messageId: message.messageId, emoji: emoji)
 				}
-				await MainActor.run {
-					showActions = false
-				}
+				// Real-time listener will confirm the update
 			} catch {
 				print("Error adding/removing reaction: \(error)")
+				// Revert optimistic update on error
+				await MainActor.run {
+					if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+						var updatedMessages = messages
+						updatedMessages[index] = message
+						messages = updatedMessages
+					}
+				}
 			}
 		}
 	}
 	
 	private func removeReaction(message: MessageModel, emoji: String) {
+		guard let currentUid = Auth.auth().currentUser?.uid else { return }
+		
+		// Optimistic update: immediately update local state on main thread
+		Task { @MainActor in
+			withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+				if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+					var updatedMessage = message
+					var updatedReactions = message.reactions
+					updatedReactions.removeValue(forKey: currentUid)
+					updatedMessage.reactions = updatedReactions
+					
+					// Create a new array to trigger SwiftUI update
+					var updatedMessages = messages
+					updatedMessages[index] = updatedMessage
+					messages = updatedMessages
+				}
+			}
+		}
+		
 		Task {
 			do {
 				try await chatService.removeReaction(chatId: chatId, messageId: message.messageId)
+				// Real-time listener will confirm the update
 			} catch {
 				print("Error removing reaction: \(error)")
+				// Revert optimistic update on error
+				await MainActor.run {
+					if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+						var updatedMessages = messages
+						updatedMessages[index] = message
+						messages = updatedMessages
+					}
+				}
 			}
 		}
 	}
@@ -705,10 +940,15 @@ struct ChatScreen: View {
 			do {
 				try await friendService.blockUser(blockedUid: otherUserId)
 				await MainActor.run {
+					// Dismiss the chat screen after successful block
 					dismiss()
 				}
 			} catch {
 				print("Error blocking user: \(error)")
+				await MainActor.run {
+					blockUserErrorMessage = error.localizedDescription
+					showBlockUserError = true
+				}
 			}
 		}
 	}
@@ -856,10 +1096,10 @@ struct ChatScreen: View {
 		}
 		
 		// Both-way un-add: Both have pendingAdd (both sent requests)
-		// Both are waiting - show "You have unadded this user" with Add button
-		// If either clicks Add again or accepts request, friendship is restored
+		// Both are waiting for the other to accept - show "You have been unadded by this user" (no button)
+		// When one accepts the other's request, friendship is restored
 		if myStatus == "pendingAdd" && theirStatus == "pendingAdd" {
-			return .bothUnadded // Show "You have unadded this user" with Add button
+			return .theyUnadded // Show "You have been unadded by this user" (waiting for request acceptance)
 		}
 		
 		// I unadded them (myStatus = "iUnadded", theirStatus = "theyUnadded")
@@ -969,9 +1209,10 @@ struct ChatScreen: View {
 				}
 				
 				// Case 2c: They have pendingAdd (they added first) and I have bothUnadded
-				// I'm adding now - restore friendship immediately (both have now added)
+				// I'm adding now - send request to set my status to pendingAdd
+				// When my request is accepted, it will check if both have pendingAdd and restore friendship
 				if myStatus == "bothUnadded" && theirStatus == "pendingAdd" {
-					try await friendService.restoreFriendship(userId: otherUserId)
+					try await friendService.sendFriendRequest(toUid: otherUserId)
 					await MainActor.run {
 						loadChatRoom()
 						checkFriendshipStatus()
@@ -979,9 +1220,11 @@ struct ChatScreen: View {
 					return
 				}
 				
-				// Case 2d: Both have pendingAdd (both clicked Add at the same time or both sent requests)
-				// Restore friendship immediately (both have now added)
+				// Case 2d: Both have pendingAdd (both clicked Add - both sent requests)
+				// When one accepts the other's request, it will restore friendship
+				// For now, if both have pendingAdd, we can restore immediately since both have added
 				if myStatus == "pendingAdd" && theirStatus == "pendingAdd" {
+					// Both have added each other - restore friendship
 					try await friendService.restoreFriendship(userId: otherUserId)
 					await MainActor.run {
 						loadChatRoom()
@@ -1159,6 +1402,7 @@ struct ChatScreen: View {
 			messageBubbleView(message: message)
 				.id(message.id)
 				.padding(.vertical, 4)
+				.contentShape(Rectangle())
 		}
 	}
 	
@@ -1214,6 +1458,19 @@ struct ChatScreen: View {
 			onReactionTap: { emoji in
 				// Remove reaction if user already reacted with this emoji
 				removeReaction(message: message, emoji: emoji)
+			},
+			onReactionDetailsTap: { emoji in
+				selectedReactionEmoji = emoji
+				selectedReactionMessage = message
+				showReactionDetails = true
+			},
+			onMediaTap: { mediaURL, mediaType in
+				// Set the appropriate URL based on media type
+				if mediaType == "image" {
+					selectedImageURL = mediaURL
+				} else if mediaType == "video" {
+					selectedVideoURL = mediaURL
+				}
 			}
 		)
 	}
@@ -1221,21 +1478,20 @@ struct ChatScreen: View {
 	@ViewBuilder
 	private var replyPreviewSection: some View {
 		if let replyTo = replyToMessage {
-			HStack(alignment: .top, spacing: 12) {
-				// Left border indicator
-				Rectangle()
-					.fill(Color.blue)
-					.frame(width: 3)
-				
-				VStack(alignment: .leading, spacing: 6) {
-					// Sender name
-					Text(replyTo.senderUid == currentUid ? "You" : (otherUser?.username ?? "User"))
-						.font(.system(size: 12, weight: .semibold))
-						.foregroundColor(.blue)
+			HStack(spacing: 12) {
+				// Cancel button (matching MediaPreviewView)
+				Button(action: {
+					replyToMessage = nil
+				}) {
+					Image(systemName: "xmark.circle.fill")
+						.font(.system(size: 24))
+						.foregroundColor(.red)
+				}
 					
-					// Message content preview
+				// Media preview or text preview (matching MediaPreviewView size)
+				Group {
 					if replyTo.isDeleted {
-						Text("This message was deleted")
+						Text(replyTo.type == "text" ? "This message was deleted" : "This media was deleted")
 							.font(.system(size: 12))
 							.italic()
 							.foregroundColor(.secondary)
@@ -1243,70 +1499,43 @@ struct ChatScreen: View {
 					} else {
 						switch replyTo.type {
 						case "text":
+							VStack(alignment: .leading, spacing: 2) {
+								Text(replyTo.senderUid == currentUid ? "You" : (otherUser?.username ?? "User"))
+									.font(.system(size: 10, weight: .semibold))
+									.foregroundColor(.blue)
 							Text(replyTo.content)
-								.font(.system(size: 12))
+									.font(.system(size: 11))
 								.foregroundColor(.primary)
-								.lineLimit(2)
+									.lineLimit(1)
+							}
+							.frame(width: 60, height: 60, alignment: .leading)
 						case "image", "photo":
-							HStack(spacing: 8) {
 								if let url = URL(string: replyTo.content) {
 									WebImage(url: url)
 										.resizable()
 										.indicator(.activity)
 										.scaledToFill()
-										.frame(width: 40, height: 40)
-										.cornerRadius(6)
+									.frame(width: 60, height: 60)
+									.clipShape(RoundedRectangle(cornerRadius: 8))
 										.clipped()
-								}
-								Text("Photo")
-									.font(.system(size: 12))
-									.foregroundColor(.secondary)
 							}
 						case "video":
-							HStack(spacing: 8) {
-								ZStack {
-									RoundedRectangle(cornerRadius: 6)
-										.fill(Color.black.opacity(0.3))
-										.frame(width: 40, height: 40)
-									
-									Image(systemName: "play.circle.fill")
-										.font(.system(size: 20))
-										.foregroundColor(.white)
-								}
-								Text("Video")
-									.font(.system(size: 12))
-									.foregroundColor(.secondary)
-							}
-						case "voice":
-							HStack(spacing: 8) {
-								Image(systemName: "waveform")
-									.font(.system(size: 16))
-									.foregroundColor(.secondary)
-								Text("Voice message")
-									.font(.system(size: 12))
-									.foregroundColor(.secondary)
-							}
+							ReplyVideoThumbnailView(videoURLString: replyTo.content)
 						default:
 							Text("[\(replyTo.type)]")
-								.font(.system(size: 12))
+								.font(.system(size: 11))
 								.foregroundColor(.secondary)
+								.frame(width: 60, height: 60, alignment: .leading)
 						}
 					}
 				}
 				
 				Spacer()
-				
-				Button(action: {
-					replyToMessage = nil
-				}) {
-					Image(systemName: "xmark.circle.fill")
-						.font(.system(size: 20))
-						.foregroundColor(.gray)
-				}
 			}
 			.padding(.horizontal, 12)
-			.padding(.vertical, 10)
+			.padding(.vertical, 8)
 			.background(Color(.systemGray6))
+			.cornerRadius(20)
 			.overlay(
 				Rectangle()
 					.frame(height: 1)
@@ -1341,9 +1570,6 @@ struct ChatScreen: View {
 			},
 			onSendMedia: { image, videoURL in
 				sendMediaMessage(image: image, videoURL: videoURL)
-			},
-			onSendVoice: { audioURL in
-				sendVoiceMessage(audioURL: audioURL)
 			},
 			canMessage: canMessage,
 			friendshipStatus: friendshipStatus,
@@ -1388,6 +1614,74 @@ struct ChatScreen: View {
 		}
 	}
 	
+	// MARK: - Video Duration Helper
+	private func getVideoDuration(url: URL) async -> TimeInterval {
+		let asset = AVAsset(url: url)
+		do {
+			let duration = try await asset.load(.duration)
+			return CMTimeGetSeconds(duration)
+		} catch {
+			print("Error getting video duration: \(error)")
+			return 0
+		}
+	}
+	
+}
+
+// MARK: - Reply Video Thumbnail View
+struct ReplyVideoThumbnailView: View {
+	let videoURLString: String
+	@State private var thumbnail: UIImage?
+	
+	var body: some View {
+		ZStack {
+			if let thumbnail = thumbnail {
+				Image(uiImage: thumbnail)
+					.resizable()
+					.scaledToFill()
+					.frame(width: 60, height: 60)
+					.clipShape(RoundedRectangle(cornerRadius: 8))
+					.clipped()
+			} else {
+				RoundedRectangle(cornerRadius: 8)
+					.fill(Color.gray.opacity(0.3))
+					.frame(width: 60, height: 60)
+					.overlay(
+						ProgressView()
+							.tint(.white)
+					)
+			}
+			
+			// Play icon overlay (matching MediaPreviewView)
+			Image(systemName: "play.circle.fill")
+				.font(.system(size: 24))
+				.foregroundColor(.white)
+		}
+		.frame(width: 60, height: 60)
+		.clipped()
+		.onAppear {
+			generateThumbnail()
+		}
+	}
+	
+	private func generateThumbnail() {
+		guard let url = URL(string: videoURLString) else { return }
+		
+		let asset = AVAsset(url: url)
+		let imageGenerator = AVAssetImageGenerator(asset: asset)
+		imageGenerator.appliesPreferredTrackTransform = true
+		
+		Task {
+			do {
+				let cgImage = try await imageGenerator.image(at: CMTime.zero).image
+				await MainActor.run {
+					thumbnail = UIImage(cgImage: cgImage)
+				}
+			} catch {
+				print("Error generating video thumbnail for reply: \(error)")
+			}
+		}
+	}
 }
 
 

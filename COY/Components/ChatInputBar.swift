@@ -7,32 +7,17 @@ struct ChatInputBar: View {
 	@Binding var replyToMessage: MessageModel?
 	var onSend: () -> Void
 	var onSendMedia: (UIImage?, URL?) -> Void
-	var onSendVoice: (URL) -> Void
 	var canMessage: Bool
 	var friendshipStatus: ChatInputBar.FriendshipStatus
 	var onAddFriend: () -> Void
 	
-	@StateObject private var recorder = AudioRecorderManager.shared
 	@State private var showImagePicker = false
 	@State private var showVideoPicker = false
 	@State private var selectedImage: UIImage?
 	@State private var selectedVideoURL: URL?
-	@State private var waveformPhase: Double = 0
-	@State private var waveformTimer: Timer?
+	@State private var previewImage: UIImage?
+	@State private var previewVideoURL: URL?
 	@Environment(\.colorScheme) var colorScheme
-	
-	private func waveformHeight(for index: Int) -> CGFloat {
-		let baseHeight: CGFloat = 4
-		let maxHeight: CGFloat = 24
-		
-		let phase1 = waveformPhase + Double(index) * 0.3
-		let phase2 = waveformPhase * 1.5 + Double(index) * 0.5
-		
-		let amplitude = (sin(phase1) + sin(phase2 * 0.7)) / 2
-		let normalized = (amplitude + 1) / 2
-		
-		return baseHeight + normalized * (maxHeight - baseHeight)
-	}
 	
 	enum FriendshipStatus {
 		case friends
@@ -46,46 +31,21 @@ struct ChatInputBar: View {
 	
 	var body: some View {
 		VStack(spacing: 0) {
-			// Reply preview if replying to a message
-			if let replyMessage = replyToMessage {
-				HStack {
-					VStack(alignment: .leading, spacing: 4) {
-						Text("Replying to \(replyMessage.senderUid == Auth.auth().currentUser?.uid ? "yourself" : "message")")
-							.font(.caption)
-							.foregroundColor(.secondary)
-						Text(replyMessage.content)
-							.font(.subheadline)
-							.lineLimit(2)
-							.foregroundColor(.primary)
-					}
-					Spacer()
-					Button(action: {
-						replyToMessage = nil
-					}) {
-						Image(systemName: "xmark.circle.fill")
-							.foregroundColor(.secondary)
-					}
-				}
-				.padding(.horizontal, 12)
-				.padding(.vertical, 8)
-				.background(colorScheme == .dark ? Color(.systemGray6) : Color(.systemGray5))
-			}
+			// Reply preview removed - handled in ChatScreen
 			
-			// Voice recording preview (shows when recording is stopped but not yet sent)
-			if !recorder.isRecording && recorder.recordingURL != nil {
-				VoiceRecordingPreviewView(
-					recorder: recorder,
+			// Media preview (shows when photo/video is selected but not yet sent)
+			if previewImage != nil || previewVideoURL != nil {
+				MediaPreviewView(
+					image: previewImage,
+					videoURL: previewVideoURL,
 					onSend: {
-						if let url = recorder.recordingURL {
-							onSendVoice(url)
-							// Clean up after a brief delay to allow upload to start
-							DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-								recorder.cancelRecording()
-							}
-						}
+						onSendMedia(previewImage, previewVideoURL)
+						previewImage = nil
+						previewVideoURL = nil
 					},
 					onCancel: {
-						recorder.cancelRecording()
+						previewImage = nil
+						previewVideoURL = nil
 					}
 				)
 				.padding(.horizontal, 12)
@@ -94,27 +54,8 @@ struct ChatInputBar: View {
 			
 			// Main input bar
 			HStack(spacing: 12) {
-				// Voice recording button (press and hold to record)
-				if canMessage && !recorder.isRecording && recorder.recordingURL == nil {
-					VoiceRecordingButton(
-						recorder: recorder,
-						onRecordingEnded: { shouldSend in
-							if shouldSend, let url = recorder.recordingURL, recorder.recordingDuration > 0.3 {
-								// Auto-send after recording ends
-								onSendVoice(url)
-								DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-									recorder.cancelRecording()
-								}
-							} else {
-								// Show preview for user to confirm or cancel
-								recorder.stopRecording()
-							}
-						}
-					)
-				}
-				
-				// Media picker button
-				if canMessage && !recorder.isRecording && recorder.recordingURL == nil {
+				// Media picker button (only show if no preview is active)
+				if canMessage && previewImage == nil && previewVideoURL == nil {
 					Button(action: {
 						showImagePicker = true
 					}) {
@@ -124,8 +65,8 @@ struct ChatInputBar: View {
 					}
 				}
 				
-				// Text input
-				if canMessage && !recorder.isRecording && recorder.recordingURL == nil {
+				// Text input (only show if no preview is active)
+				if canMessage && previewImage == nil && previewVideoURL == nil {
 					TextField("Message", text: $messageText, axis: .vertical)
 						.textFieldStyle(.plain)
 						.padding(.horizontal, 12)
@@ -138,32 +79,6 @@ struct ChatInputBar: View {
 								onSend()
 							}
 						}
-				} else if recorder.isRecording {
-					// Show recording waveform while recording
-					HStack(spacing: 8) {
-						// Animated waveform
-						HStack(spacing: 2) {
-							ForEach(0..<15, id: \.self) { index in
-								RoundedRectangle(cornerRadius: 1.5)
-									.fill(Color.blue)
-									.frame(width: 3, height: waveformHeight(for: index))
-							}
-						}
-						.frame(height: 30)
-						.onAppear {
-							startWaveformAnimation()
-						}
-						
-						Text(recorder.formattedDuration(recorder.recordingDuration))
-							.font(.system(size: 13, weight: .medium, design: .monospaced))
-							.foregroundColor(.secondary)
-						
-						Spacer()
-					}
-					.padding(.horizontal, 12)
-					.padding(.vertical, 8)
-					.background(colorScheme == .dark ? Color(.systemGray6) : Color(.systemGray5))
-					.cornerRadius(20)
 				} else {
 					// Show appropriate message based on friendship status
 					HStack {
@@ -260,46 +175,15 @@ struct ChatInputBar: View {
 				sourceType: .photoLibrary,
 				mediaTypes: ["public.image", "public.movie"],
 				onSelection: { image, videoURL in
-					if let image = image {
-						onSendMedia(image, nil)
-					} else if let videoURL = videoURL {
-						onSendMedia(nil, videoURL)
-					}
+					// Store in preview instead of immediately sending
+					previewImage = image
+					previewVideoURL = videoURL
+					// Clear the picker selections
+					selectedImage = nil
+					selectedVideoURL = nil
 				}
 			)
 		}
-		.onChange(of: recorder.isRecording) { oldValue, newValue in
-			if newValue {
-				startWaveformAnimation()
-			} else {
-				stopWaveformAnimation()
-			}
-		}
-		.onDisappear {
-			stopWaveformAnimation()
-		}
-	}
-	
-	private func startWaveformAnimation() {
-		waveformTimer?.invalidate()
-		let timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
-			Task { @MainActor in
-				guard recorder.isRecording else {
-					timer.invalidate()
-					return
-				}
-				waveformPhase += 0.2
-				if waveformPhase > Double.pi * 2 {
-					waveformPhase = 0
-				}
-			}
-		}
-		waveformTimer = timer
-	}
-	
-	private func stopWaveformAnimation() {
-		waveformTimer?.invalidate()
-		waveformTimer = nil
 	}
 }
 

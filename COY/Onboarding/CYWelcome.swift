@@ -1,6 +1,7 @@
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
+import SafariServices
 
 struct CYWelcome: View {
 
@@ -13,9 +14,9 @@ struct CYWelcome: View {
 	}
 	@State private var showEmailSignUp = false
 	@State private var showPhoneSignUp = false
-	@State private var navigateToResetPassword = false
-	@State private var navigateToPrivacyPolicy = false
-	@State private var navigateToTermsOfService = false
+	@State private var showResetPassword = false
+	@State private var showPrivacyPolicy = false
+	@State private var showTermsOfService = false
 	@State private var errorMessage: String? = nil
 
 	var body: some View {
@@ -110,7 +111,7 @@ struct CYWelcome: View {
 
 								.onTapGesture {
 
-									navigateToResetPassword = true
+									showResetPassword = true
 
 								}
 
@@ -147,10 +148,15 @@ struct CYWelcome: View {
 										if let authError = error as? AuthError {
 											switch authError {
 											case .invalidCredentials(let message):
+												// Ensure errorMessage is set in both places for consistency
+												authViewModel.errorMessage = message
 												errorMessage = message
 											}
 										} else {
-											errorMessage = "Email or password is incorrect"
+											// Fallback error message
+											let fallbackMsg = "Incorrect username/email or password"
+											authViewModel.errorMessage = fallbackMsg
+											errorMessage = fallbackMsg
 										}
 
 									}
@@ -213,7 +219,7 @@ struct CYWelcome: View {
 
 							Button(action: {
 
-								navigateToPrivacyPolicy = true
+								showPrivacyPolicy = true
 
 							}) {
 
@@ -233,7 +239,7 @@ struct CYWelcome: View {
 
 							Button(action: {
 
-								navigateToTermsOfService = true
+								showTermsOfService = true
 
 							}) {
 
@@ -273,13 +279,18 @@ struct CYWelcome: View {
 			.fullScreenCover(isPresented: $showPhoneSignUp) {
 				CYPhoneSignUp()
 			}
-
-			.navigationDestination(isPresented: $navigateToResetPassword) {
-
+			.fullScreenCover(isPresented: $showResetPassword) {
 				CYRestPassword()
-
-			
-
+			}
+			.sheet(isPresented: $showPrivacyPolicy) {
+				if let url = URL(string: "https://coy.services/privacy") {
+					SafariViewController(url: url)
+				}
+			}
+			.sheet(isPresented: $showTermsOfService) {
+				if let url = URL(string: "https://coy.services/terms") {
+					SafariViewController(url: url)
+				}
 			}
 
 			.onAppear {
@@ -297,5 +308,4 @@ struct CYWelcome: View {
 	}
 	
 }
-
 

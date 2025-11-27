@@ -1,11 +1,14 @@
 import SwiftUI
 import FirebaseFirestore
+import SafariServices
 
 struct CYSettingsView: View {
 	@Environment(\.dismiss) private var dismiss
 	@Environment(\.colorScheme) var colorScheme
 	@EnvironmentObject var authService: AuthService
 	@State private var showLogoutAlert = false
+	@State private var showPrivacyPolicy = false
+	@State private var showTermsOfService = false
 	
 	var body: some View {
 		NavigationStack {
@@ -35,6 +38,16 @@ struct CYSettingsView: View {
 			}
 		} message: {
 			Text("Are you sure you want to log out?")
+		}
+		.sheet(isPresented: $showPrivacyPolicy) {
+			if let url = URL(string: "https://coy.services/privacy") {
+				SafariViewController(url: url)
+			}
+		}
+		.sheet(isPresented: $showTermsOfService) {
+			if let url = URL(string: "https://coy.services/terms") {
+				SafariViewController(url: url)
+			}
 		}
 	}
 	
@@ -94,10 +107,14 @@ struct CYSettingsView: View {
 				NavigationLink(destination: AboutUsView()) {
 					SettingsRow(title: "About Us", icon: "info.circle.fill")
 				}
-				NavigationLink(destination: PrivacyPolicyView()) {
+				Button(action: {
+					showPrivacyPolicy = true
+				}) {
 					SettingsRow(title: "Privacy Policy", icon: "lock.shield.fill")
 				}
-				NavigationLink(destination: TermsOfServiceView()) {
+				Button(action: {
+					showTermsOfService = true
+				}) {
 					SettingsRow(title: "Terms of Service", icon: "doc.text.fill")
 				}
 				Button(action: {
@@ -109,4 +126,3 @@ struct CYSettingsView: View {
 		}
 	}
 }
-

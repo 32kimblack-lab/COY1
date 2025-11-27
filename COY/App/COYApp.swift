@@ -19,16 +19,54 @@ struct COYApp: App {
 
 	var body: some Scene {
 		WindowGroup {
+			RootView()
+				.environmentObject(authService)
+				.onOpenURL { url in
+					print("🔗 COYApp: onOpenURL called with: \(url.absoluteString)")
+					DeepLinkManager.shared.handleCustomURL(url)
+				}
+		}
+	}
+}
+
+struct RootView: View {
+	@EnvironmentObject var authService: AuthService
+	@State private var showSplash = true
+	
+	var body: some View {
+		ZStack {
 			Group {
 				if authService.isLoading {
 					Color(.systemBackground).ignoresSafeArea() // prevent flash while determining auth
 				} else if let _ = authService.user, !authService.isInSignUpFlow {
-					MainTabView()
+					NavigationStack {
+						MainTabView()
+					}
 				} else {
 					CYWelcome()
+						.dismissKeyboardOnTap()
 				}
 			}
-			.environmentObject(authService)
+			
+			// Show splash screen on app launch
+			if showSplash {
+				SplashScreenView()
+					.transition(.opacity)
+					.onAppear {
+						DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+							withAnimation(.easeOut(duration: 0.3)) {
+								showSplash = false
+							}
+						}
+					}
+			}
+		}
+		.onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { userActivity in
+			print("🔗 RootView: Handling universal link activity")
+			if let url = userActivity.webpageURL {
+				print("🔗 RootView: Universal link URL: \(url.absoluteString)")
+				DeepLinkManager.shared.handleUniversalLink(url)
+			}
 		}
 	}
 }

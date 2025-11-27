@@ -112,6 +112,26 @@ struct ProfileView: View {
 			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionUpdated"))) { _ in
 				loadCollectionsForCustomization()
 			}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionDeleted"))) { notification in
+			// Immediately remove deleted collection from the list
+			if let collectionId = notification.object as? String {
+				// Check if this is the current user's collection
+				let ownerId = notification.userInfo?["ownerId"] as? String
+				let isPermanent = notification.userInfo?["permanent"] as? Bool ?? false
+				
+				// If ownerId matches current user, or if it's a permanent delete, remove it
+				if ownerId == authService.user?.uid || isPermanent {
+					// Remove from allCollections (used in customization mode)
+					allCollections.removeAll { $0.id == collectionId }
+					// Also remove from selectedCollections and customOrder if present
+					selectedCollections.remove(collectionId)
+					customOrder.removeAll { $0 == collectionId }
+					print("✅ ProfileView: Removed deleted collection \(collectionId) from allCollections immediately (permanent: \(isPermanent))")
+					// Also trigger UserCollectionsUpdated to refresh the main view
+					NotificationCenter.default.post(name: NSNotification.Name("UserCollectionsUpdated"), object: nil)
+				}
+			}
+		}
 		.overlay(customizeOverlay)
 	}
 	
@@ -1015,6 +1035,21 @@ struct UserCollectionsView: View {
 				requestStatus[collectionId] = false
 				pendingRequests.remove(collectionId)
 				print("✅ UserCollectionsView: Request status updated to false for collection \(collectionId)")
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionDeleted"))) { notification in
+			// Immediately remove deleted collection from the list
+			if let collectionId = notification.object as? String {
+				// Check if this is the current user's collection
+				let ownerId = notification.userInfo?["ownerId"] as? String
+				let isPermanent = notification.userInfo?["permanent"] as? Bool ?? false
+				
+				// If ownerId matches current user, or if it's a permanent delete, remove it
+				if ownerId == authService.user?.uid || isPermanent {
+					// Remove the collection from the list immediately
+					userCollections.removeAll { $0.id == collectionId }
+					print("✅ UserCollectionsView: Removed deleted collection \(collectionId) from list immediately (permanent: \(isPermanent))")
+				}
 			}
 		}
 		.navigationDestination(isPresented: $showingInsideCollection) {

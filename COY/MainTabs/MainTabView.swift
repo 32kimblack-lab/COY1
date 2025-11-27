@@ -5,12 +5,21 @@ struct MainTabView: View {
 	@EnvironmentObject var authService: AuthService
 	@State private var selectedTab = 0
 	@State private var showCreateCollection = false
+	@StateObject private var deepLinkManager = DeepLinkManager.shared
+	@State private var selectedProfileUserId: String?
+	@State private var totalUnreadCount = 0
+	@State private var friendRequestCount = 0
+	
+	private var badgeCount: Int? {
+		totalUnreadCount > 0 ? totalUnreadCount : nil
+	}
 
 	var body: some View {
 		TabView(selection: $selectedTab) {
 			// Home
 			CYHome()
 				.phoneSizeContainer()
+				.dismissKeyboardOnTap()
 				.tabItem {
 					Image(systemName: selectedTab == 0 ? "house.fill" : "house")
 					Text("Home")
@@ -21,6 +30,7 @@ struct MainTabView: View {
 			SearchView()
 				.environmentObject(authService)
 				.phoneSizeContainer()
+				.dismissKeyboardOnTap()
 				.tabItem {
 					Image(systemName: selectedTab == 1 ? "magnifyingglass.circle.fill" : "magnifyingglass.circle")
 					Text("Search")
@@ -38,15 +48,18 @@ struct MainTabView: View {
 			// Messages
 			MessagesView()
 				.phoneSizeContainer()
+				.dismissKeyboardOnTap()
 				.tabItem {
 					Image(systemName: selectedTab == 3 ? "message.fill" : "message")
 					Text("Messages")
 				}
 				.tag(3)
+				.badge(badgeCount ?? 0)
 
 			// Profile
 			ProfileView()
 				.phoneSizeContainer()
+				.dismissKeyboardOnTap()
 				.tabItem {
 					Image(systemName: selectedTab == 4 ? "person.fill" : "person")
 					Text("Profile")
@@ -66,6 +79,43 @@ struct MainTabView: View {
 				.onDisappear {
 					if selectedTab == 2 { selectedTab = 0 }
 				}
+		}
+		.navigationDestination(isPresented: Binding(
+			get: { selectedProfileUserId != nil },
+			set: { if !$0 { selectedProfileUserId = nil; deepLinkManager.clearPendingNavigation() } }
+		)) {
+			if let userId = selectedProfileUserId {
+				ViewerProfileView(userId: userId)
+					.environmentObject(authService)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToUserProfile"))) { notification in
+			if let userId = notification.object as? String {
+				print("🔗 MainTabView: Received NavigateToUserProfile notification for userId: \(userId)")
+				selectedProfileUserId = userId
+			} else if let userInfo = notification.userInfo,
+					  let userId = userInfo["userId"] as? String {
+				print("🔗 MainTabView: Received NavigateToUserProfile notification for userId: \(userId)")
+				selectedProfileUserId = userId
+			}
+		}
+		.onChange(of: deepLinkManager.shouldNavigateToProfile) { oldValue, newValue in
+			if newValue, let userId = deepLinkManager.pendingProfileUserId {
+				print("🔗 MainTabView: DeepLinkManager triggered navigation to userId: \(userId)")
+				selectedProfileUserId = userId
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TotalUnreadCountChanged"))) { notification in
+			if let userInfo = notification.userInfo,
+			   let count = userInfo["count"] as? Int {
+				totalUnreadCount = count
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FriendRequestCountChanged"))) { notification in
+			if let userInfo = notification.userInfo,
+			   let count = userInfo["count"] as? Int {
+				friendRequestCount = count
+			}
 		}
 	}
 }

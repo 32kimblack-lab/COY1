@@ -12,7 +12,7 @@ struct FullScreenVideoView: View {
 			
 			if URL(string: videoURL) != nil {
 				if let player = player {
-					VideoPlayer(player: player)
+					CustomVideoPlayer(player: player)
 						.ignoresSafeArea()
 				} else {
 					ProgressView()
@@ -46,6 +46,21 @@ struct FullScreenVideoView: View {
 			player?.pause()
 			player = nil
 		}
+	}
+}
+
+struct CustomVideoPlayer: UIViewControllerRepresentable {
+	let player: AVPlayer
+	
+	func makeUIViewController(context: Context) -> AVPlayerViewController {
+		let controller = AVPlayerViewController()
+		controller.player = player
+		controller.showsPlaybackControls = false
+		return controller
+	}
+	
+	func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {
+		uiViewController.player = player
 	}
 }
 

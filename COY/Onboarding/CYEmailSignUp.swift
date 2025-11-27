@@ -101,11 +101,13 @@ struct CYEmailSignUp: View {
 							HStack(spacing: 10) {
 								Image(systemName: "calendar")
 									.foregroundColor(.secondary)
-								TextField("DD", text: $authViewModel.birthDay)
+								TextField("", text: $authViewModel.birthDay)
 									.keyboardType(.numberPad)
 									.textContentType(.none)
 									.autocorrectionDisabled()
 									.foregroundColor(textColor)
+									.multilineTextAlignment(.leading)
+									.frame(minWidth: 0, maxWidth: .infinity)
 									.onChange(of: authViewModel.birthDay) { _, newValue in
 										// Ensure only numbers are entered
 										let filtered = newValue.filter { $0.isNumber }
@@ -120,17 +122,19 @@ struct CYEmailSignUp: View {
 								RoundedRectangle(cornerRadius: 10)
 									.stroke(Color.gray.opacity(0.4), lineWidth: 1)
 							)
-							.frame(minWidth: 70, idealWidth: 75, maxWidth: 80)
+							.frame(minWidth: 70, idealWidth: 75, maxWidth: 100)
 							
 							// Year Field - shows actual numbers, not masked or dots
 							HStack(spacing: 10) {
 								Image(systemName: "calendar")
 									.foregroundColor(.secondary)
-								TextField("YYYY", text: $authViewModel.birthYear)
+								TextField("", text: $authViewModel.birthYear)
 									.keyboardType(.numberPad)
 									.textContentType(.none)
 									.autocorrectionDisabled()
 									.foregroundColor(textColor)
+									.multilineTextAlignment(.leading)
+									.frame(minWidth: 0, maxWidth: .infinity)
 									.onChange(of: authViewModel.birthYear) { _, newValue in
 										// Ensure only numbers are entered and limit to 4 digits
 										let filtered = newValue.filter { $0.isNumber }
@@ -146,7 +150,7 @@ struct CYEmailSignUp: View {
 								RoundedRectangle(cornerRadius: 10)
 									.stroke(Color.gray.opacity(0.4), lineWidth: 1)
 							)
-							.frame(minWidth: 90, idealWidth: 95, maxWidth: 100)
+							.frame(minWidth: 90, idealWidth: 95, maxWidth: 120)
 						}
 						
 						if !authViewModel.birthdayError.isEmpty {

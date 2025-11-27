@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct MessageContextMenu: View {
 	let message: MessageModel
@@ -25,8 +26,23 @@ struct MessageContextMenu: View {
 			
 			// Menu
 			VStack(spacing: 0) {
-				// Edit option (only for own messages)
-				if isMine {
+				// React options (first)
+				HStack(spacing: 20) {
+					ForEach(["❤️", "😂", "😮", "😢", "👍", "👎"], id: \.self) { emoji in
+						Button(action: {
+							onReact(emoji)
+							onDismiss()
+						}) {
+							Text(emoji)
+								.font(.system(size: 24))
+						}
+					}
+				}
+				.padding()
+				Divider()
+				
+				// Edit option (only for own text messages, max 2 edits) - second
+				if isMine && message.type == "text" && message.editCount < 2 {
 					Button(action: {
 						editText = message.content
 						showEditSheet = true
@@ -42,7 +58,7 @@ struct MessageContextMenu: View {
 					Divider()
 				}
 				
-				// Reply option
+				// Reply option (third)
 				Button(action: {
 					onReply()
 				}) {
@@ -56,22 +72,8 @@ struct MessageContextMenu: View {
 				}
 				Divider()
 				
-				// React options
-				HStack(spacing: 20) {
-					ForEach(["❤️", "😂", "😮", "😢", "👍", "👎"], id: \.self) { emoji in
-						Button(action: {
-							onReact(emoji)
-							onDismiss()
-						}) {
-							Text(emoji)
-								.font(.system(size: 24))
-						}
-					}
-				}
-				.padding()
-				Divider()
-				
-				// Copy option
+				// Copy option (only for text messages, not photos/videos)
+				if message.type == "text" {
 				Button(action: {
 					onCopy()
 					onDismiss()
@@ -83,6 +85,7 @@ struct MessageContextMenu: View {
 					}
 					.padding()
 					.foregroundColor(.primary)
+					}
 				}
 				
 				// Delete option (only for own messages)
@@ -108,10 +111,34 @@ struct MessageContextMenu: View {
 			.padding()
 		}
 		.sheet(isPresented: $showEditSheet) {
+			EditMessageView(editText: $editText, onSave: {
+				onEdit(editText)
+				showEditSheet = false
+				onDismiss()
+			}, onCancel: {
+				showEditSheet = false
+			})
+		}
+	}
+}
+
+// MARK: - Edit Message View
+struct EditMessageView: View {
+	@Binding var editText: String
+	var onSave: () -> Void
+	var onCancel: () -> Void
+	
+	var body: some View {
 			NavigationStack {
-				VStack {
-					TextEditor(text: $editText)
-						.padding()
+			VStack(spacing: 0) {
+				TextEditorWithKeyboard(text: $editText)
+					.padding(.horizontal, 12)
+					.padding(.vertical, 8)
+					.frame(minHeight: 100, maxHeight: 150)
+					.background(Color(.systemGray6))
+					.cornerRadius(20)
+					.padding(.horizontal, 12)
+					.padding(.vertical, 8)
 					Spacer()
 				}
 				.navigationTitle("Edit Message")
@@ -119,19 +146,60 @@ struct MessageContextMenu: View {
 				.toolbar {
 					ToolbarItem(placement: .navigationBarLeading) {
 						Button("Cancel") {
-							showEditSheet = false
+						onCancel()
 						}
 					}
 					ToolbarItem(placement: .navigationBarTrailing) {
 						Button("Save") {
-							onEdit(editText)
-							showEditSheet = false
-							onDismiss()
+						onSave()
 						}
 						.disabled(editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 					}
 				}
 			}
+		.presentationDetents([.height(200)])
+	}
+}
+
+// MARK: - Text Editor with Auto Keyboard
+struct TextEditorWithKeyboard: UIViewRepresentable {
+	@Binding var text: String
+	
+	func makeUIView(context: Context) -> UITextView {
+		let textView = UITextView()
+		textView.font = UIFont.systemFont(ofSize: 15)
+		textView.delegate = context.coordinator
+		textView.isScrollEnabled = true
+		textView.backgroundColor = .clear
+		return textView
+	}
+	
+	func updateUIView(_ uiView: UITextView, context: Context) {
+		if uiView.text != text {
+			uiView.text = text
+		}
+		
+		// Show keyboard immediately when view appears
+		if !uiView.isFirstResponder {
+			DispatchQueue.main.async {
+				uiView.becomeFirstResponder()
+			}
+		}
+	}
+	
+	func makeCoordinator() -> Coordinator {
+		Coordinator(self)
+	}
+	
+	class Coordinator: NSObject, UITextViewDelegate {
+		var parent: TextEditorWithKeyboard
+		
+		init(_ parent: TextEditorWithKeyboard) {
+			self.parent = parent
+		}
+		
+		func textViewDidChange(_ textView: UITextView) {
+			parent.text = textView.text
 		}
 	}
 }

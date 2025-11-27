@@ -7,16 +7,17 @@ struct MessageModel: Identifiable, Codable, Equatable {
 	var chatId: String
 	var senderUid: String
 	var content: String // text or media URL
-	var type: String // "text", "image", "video", "live_photo", "voice"
+	var type: String // "text", "image", "video", "live_photo"
 	var timestamp: Date
 	var isDeleted: Bool
 	var isEdited: Bool
 	var editedAt: Date?
+	var editCount: Int // Number of times message has been edited (max 2)
 	var reactions: [String: String] // [uid: emoji]
 	var replyToMessageId: String?
 	var deletedFor: [String] // for Clear Chat (one-sided delete)
 	
-	init(messageId: String = UUID().uuidString, chatId: String, senderUid: String, content: String, type: String, timestamp: Date = Date(), isDeleted: Bool = false, isEdited: Bool = false, editedAt: Date? = nil, reactions: [String: String] = [:], replyToMessageId: String? = nil, deletedFor: [String] = []) {
+	init(messageId: String = UUID().uuidString, chatId: String, senderUid: String, content: String, type: String, timestamp: Date = Date(), isDeleted: Bool = false, isEdited: Bool = false, editedAt: Date? = nil, editCount: Int = 0, reactions: [String: String] = [:], replyToMessageId: String? = nil, deletedFor: [String] = []) {
 		self.messageId = messageId
 		self.chatId = chatId
 		self.senderUid = senderUid
@@ -26,6 +27,7 @@ struct MessageModel: Identifiable, Codable, Equatable {
 		self.isDeleted = isDeleted
 		self.isEdited = isEdited
 		self.editedAt = editedAt
+		self.editCount = editCount
 		self.reactions = reactions
 		self.replyToMessageId = replyToMessageId
 		self.deletedFor = deletedFor
@@ -47,6 +49,7 @@ struct MessageModel: Identifiable, Codable, Equatable {
 		self.timestamp = timestamp.dateValue()
 		self.isDeleted = data["isDeleted"] as? Bool ?? false
 		self.isEdited = data["isEdited"] as? Bool ?? false
+		self.editCount = data["editCount"] as? Int ?? 0
 		
 		if let editedTimestamp = data["editedAt"] as? Timestamp {
 			self.editedAt = editedTimestamp.dateValue()
@@ -76,6 +79,7 @@ struct MessageModel: Identifiable, Codable, Equatable {
 			"timestamp": Timestamp(date: timestamp),
 			"isDeleted": isDeleted,
 			"isEdited": isEdited,
+			"editCount": editCount,
 			"reactions": reactions,
 			"deletedFor": deletedFor
 		]

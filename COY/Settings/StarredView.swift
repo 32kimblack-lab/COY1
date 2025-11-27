@@ -1,33 +1,56 @@
+
 import SwiftUI
 import Combine
+import SDWebImageSwiftUI
+import FirebaseFirestore
+import FirebaseAuth
 
 struct StarredView: View {
 	@Environment(\.colorScheme) var colorScheme
 	@Environment(\.presentationMode) var presentationMode
 	@StateObject private var viewModel = StarredViewModel()
 	
-	private let columns = [
-		GridItem(.fixed(135)),
-		GridItem(.fixed(135)),
-		GridItem(.fixed(135))
-	]
+	// Responsive 3-column grid that adapts to screen width
+	private var columns: [GridItem] {
+		let spacing: CGFloat = 2
+		
+		return [
+			GridItem(.flexible(), spacing: spacing),
+			GridItem(.flexible(), spacing: spacing),
+			GridItem(.flexible(), spacing: spacing)
+		]
+	}
 	
 	var body: some View {
 		PhoneSizeContainer {
 			mainContentView
 		}
-			.background(backgroundColor)
-			.navigationBarBackButtonHidden(true)
-			.navigationTitle("")
-			.toolbar(.hidden, for: .tabBar)
-			.onAppear {
-				handleOnAppear()
+		.background(backgroundColor)
+		.navigationBarBackButtonHidden(true)
+		.navigationTitle("")
+		.toolbar(.hidden, for: .tabBar)
+		.navigationDestination(isPresented: Binding(
+			get: { viewModel.selectedPostId != nil },
+			set: { if !$0 { viewModel.selectedPostId = nil } }
+		)) {
+			if let postId = viewModel.selectedPostId,
+			   let post = viewModel.starredPosts.first(where: { $0.id == postId }) {
+				CYPostDetailView(post: post, collection: viewModel.getCollectionForPost(post))
 			}
+		}
+		.onAppear {
+			handleOnAppear()
+			viewModel.setupRealtimeListener()
+		}
+		.onDisappear {
+			viewModel.removeRealtimeListener()
+		}
 			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("PostStarred"))) { _ in
 				Task { await viewModel.loadStarredPosts() }
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("DismissPostDetail"))) { _ in
 				viewModel.selectedPost = nil
+				viewModel.selectedPostId = nil
 			}
 			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("PostUnstarred"))) { _ in
 				Task { await viewModel.loadStarredPosts() }
@@ -70,7 +93,7 @@ struct StarredView: View {
 					.foregroundColor(colorScheme == .dark ? .white : .black)
 			}
 			Spacer()
-			Text("Star")
+			Text("Starred")
 				.font(.title2)
 				.fontWeight(.bold)
 				.foregroundColor(colorScheme == .dark ? .white : .black)
@@ -134,29 +157,32 @@ struct StarredView: View {
 	@ViewBuilder
 	private var postsGridView: some View {
 		ScrollView {
-			LazyVGrid(columns: columns, alignment: .center, spacing: 12) {
+			LazyVGrid(columns: columns, alignment: .center, spacing: 2) {
 				ForEach(viewModel.starredPosts, id: \.id) { post in
 					Button(action: {
 						Task {
-							// Load the actual collection for this post
+							// Ensure collection is loaded first
 							await viewModel.loadCollectionForPost(post)
+							// Verify collection is loaded before navigating
+							let collection = viewModel.getCollectionForPost(post)
+							guard !collection.id.isEmpty else {
+								print("⚠️ StarredView: Collection not loaded for post \(post.id), skipping navigation")
+								return
+							}
+							// Set the selected post ID to trigger navigation
 							await MainActor.run {
 								viewModel.selectedPost = post
+								viewModel.selectedPostId = post.id
 							}
 						}
 					}) {
 						StarredPostThumbnail(post: post)
-							.frame(width: 135, height: 200)
 					}
 					.buttonStyle(PlainButtonStyle())
 				}
 			}
-			.padding(.horizontal, 16)
 			.padding(.top, 16)
 			.frame(maxWidth: .infinity)
-		}
-		.sheet(item: $viewModel.selectedPost) { post in
-			PostDetailView(post: post, collection: viewModel.getCollectionForPost(post))
 		}
 	}
 	
@@ -185,8 +211,10 @@ class StarredViewModel: ObservableObject {
 	@Published var starredPosts: [CollectionPost] = []
 	@Published var isLoading = false
 	@Published var selectedPost: CollectionPost? = nil
+	@Published var selectedPostId: String? = nil
 	
 	private var collectionsCache: [String: CollectionData] = [:]
+	private var userListener: ListenerRegistration?
 	
 	func loadStarredPosts() async {
 		isLoading = true
@@ -202,26 +230,57 @@ class StarredViewModel: ObservableObject {
 		let _ = CYServiceManager.shared.getBlockedUsers() // Track blocked users for filtering
 		let hiddenPostIds = Set(CYServiceManager.shared.currentUser?.hiddenPostIds ?? [])
 		
-		// Load posts in parallel with timeout protection
-		let posts = await withTaskGroup(of: CollectionPost?.self) { group in
-			var results: [CollectionPost] = []
+		// Load posts with their starredAt timestamps in parallel
+		guard let userId = Auth.auth().currentUser?.uid else {
+			starredPosts = []
+			return
+		}
+		
+		let db = Firestore.firestore()
+		let postsWithStarredDates = await withTaskGroup(of: (CollectionPost?, Date?).self) { group in
+			var results: [(post: CollectionPost, starredAt: Date)] = []
 			
 			for postId in starredPostIds {
 				group.addTask {
-					// Add timeout protection to prevent hanging
-					return await self.withTimeout(seconds: 10) {
+					// Load post and starredAt timestamp in parallel
+					async let postTask = self.withTimeout(seconds: 10) {
 						try? await CollectionService.shared.getPostById(postId: postId)
 					}
+					
+					async let starredAtTask: Date? = {
+						do {
+							let starDoc = try await db.collection("posts")
+								.document(postId)
+								.collection("stars")
+								.document(userId)
+								.getDocument()
+							
+							if let data = starDoc.data(),
+							   let timestamp = data["starredAt"] as? Timestamp {
+								return timestamp.dateValue()
+							}
+						} catch {
+							print("Error loading starredAt for post \(postId): \(error)")
+						}
+						return nil
+					}()
+					
+					let post = await postTask
+					let starredAt = await starredAtTask
+					
+					return (post, starredAt)
 				}
 			}
 			
-			for await post in group {
+			for await (post, starredAt) in group {
 				if let post = post {
 					// Include all starred posts (including own posts and blocked users)
 					// Blocked users' posts will show with "User is blocked" overlay
 					// Filter out hidden posts only
 					if !hiddenPostIds.contains(post.id) {
-						results.append(post)
+						// Use starredAt if available, otherwise fall back to post creation date
+						let sortDate = starredAt ?? post.createdAt
+						results.append((post: post, starredAt: sortDate))
 					}
 				}
 			}
@@ -229,8 +288,10 @@ class StarredViewModel: ObservableObject {
 			return results
 		}
 		
-		// Sort by creation date (most recent first)
-		let sortedPosts = posts.sorted { $0.createdAt > $1.createdAt }
+		// Sort by starredAt date (most recently starred first)
+		let sortedPosts = postsWithStarredDates
+			.sorted { $0.starredAt > $1.starredAt }
+			.map { $0.post }
 		
 		starredPosts = sortedPosts
 	}
@@ -300,6 +361,47 @@ class StarredViewModel: ObservableObject {
 		collectionsCache[post.collectionId] = collection
 		return collection
 	}
+	
+	// MARK: - Real-time Listener
+	func setupRealtimeListener() {
+		guard let userId = Auth.auth().currentUser?.uid else { return }
+		
+		// Remove existing listener
+		userListener?.remove()
+		
+		let db = Firestore.firestore()
+		// Listen to user document changes for starredPostIds
+		userListener = db.collection("users").document(userId)
+			.addSnapshotListener { [weak self] snapshot, error in
+				guard let self = self else { return }
+				
+				if let error = error {
+					print("❌ StarredViewModel: Error listening to user document: \(error.localizedDescription)")
+					return
+				}
+				
+				guard let data = snapshot?.data(),
+					  let starredPostIds = data["starredPostIds"] as? [String] else {
+					return
+				}
+				
+				// Check if starredPostIds changed
+				let currentPostIds = Set(self.starredPosts.map { $0.id })
+				let newPostIds = Set(starredPostIds)
+				
+				if currentPostIds != newPostIds {
+					print("🔄 StarredViewModel: Starred posts changed, reloading...")
+					Task {
+						await self.loadStarredPosts()
+					}
+				}
+			}
+	}
+	
+	func removeRealtimeListener() {
+		userListener?.remove()
+		userListener = nil
+	}
 }
 
 struct StarredPostThumbnail: View {
@@ -311,65 +413,87 @@ struct StarredPostThumbnail: View {
 		return CYServiceManager.shared.currentUser?.blockedUsers.contains(post.authorId) ?? false
 	}
 	
+	// Get image URL from post (prioritize thumbnail, then image)
+	private var imageURL: String? {
+		// First try to find thumbnailURL from any mediaItem
+		for mediaItem in post.mediaItems {
+			if let thumbnail = mediaItem.thumbnailURL, !thumbnail.isEmpty {
+				return thumbnail
+			}
+		}
+		
+		// If no thumbnail found, try to find imageURL
+		for mediaItem in post.mediaItems {
+			if let imgURL = mediaItem.imageURL, !imgURL.isEmpty {
+				return imgURL
+			}
+		}
+		
+		// Fallback to firstMediaItem
+		if let firstMedia = post.firstMediaItem {
+			return firstMedia.thumbnailURL ?? firstMedia.imageURL
+		}
+		
+		return nil
+	}
+	
+	// Check if post has video
+	private var hasVideo: Bool {
+		return post.mediaItems.contains { $0.isVideo }
+	}
+	
+	// Get video duration
+	private var videoDuration: Double? {
+		return post.mediaItems.first(where: { $0.isVideo })?.videoDuration
+	}
+	
 	var body: some View {
-		ZStack(alignment: .topLeading) {
-			// Post thumbnail
-			if let firstMediaItem = post.firstMediaItem {
-				if firstMediaItem.isVideo {
-					// Video thumbnail
-					AsyncImage(url: URL(string: firstMediaItem.thumbnailURL ?? "")) { image in
-						image
-							.resizable()
-							.aspectRatio(contentMode: .fill)
-					} placeholder: {
-						Rectangle()
-							.fill(Color.gray.opacity(0.3))
-					}
-					.frame(width: 135, height: 200)
-					.clipped()
-					.overlay(
-						// Video duration overlay
-						VStack {
-							HStack {
-								if let duration = firstMediaItem.videoDuration {
-									Text(formatDuration(duration))
-										.font(.caption2)
-										.foregroundColor(.white)
-										.padding(.horizontal, 6)
-										.padding(.vertical, 2)
-										.background(Color.black.opacity(0.6))
-										.cornerRadius(4)
-								}
-								Spacer()
-							}
+		GeometryReader { geometry in
+			let width = geometry.size.width
+			let height = width * 1.35 // Make it taller (approximately 3:4 aspect ratio)
+			
+			ZStack(alignment: .topLeading) {
+				// Post thumbnail
+				if let finalImageURL = imageURL, !finalImageURL.isEmpty, let url = URL(string: finalImageURL) {
+					WebImage(url: url)
+						.resizable()
+						.indicator(.activity)
+						.transition(.fade(duration: 0.2))
+						.aspectRatio(contentMode: .fill)
+						.frame(width: width, height: height)
+						.clipped()
+				} else {
+					// Fallback
+					Rectangle()
+						.fill(Color.gray.opacity(0.3))
+						.frame(width: width, height: height)
+				}
+				
+				// Video duration overlay (top-left corner)
+				if hasVideo, let duration = videoDuration {
+					VStack {
+						HStack {
+							Text(formatDuration(duration))
+								.font(.caption2)
+								.fontWeight(.semibold)
+								.foregroundColor(.white)
+								.padding(.horizontal, 6)
+								.padding(.vertical, 3)
+								.background(Color.black.opacity(0.7))
+								.cornerRadius(4)
+								.padding(8)
 							Spacer()
 						}
-						.padding(8)
-					)
-				} else {
-					// Image
-					AsyncImage(url: URL(string: firstMediaItem.imageURL ?? "")) { image in
-						image
-							.resizable()
-							.aspectRatio(contentMode: .fill)
-					} placeholder: {
-						Rectangle()
-							.fill(Color.gray.opacity(0.3))
+						Spacer()
 					}
-					.frame(width: 135, height: 200)
-					.clipped()
 				}
-			} else {
-				// Fallback
-				Rectangle()
-					.fill(Color.gray.opacity(0.3))
-					.frame(width: 135, height: 200)
+				
+				// Blocked user overlay
+				blockedUserOverlay(size: width, height: height)
 			}
-			
-			// Blocked user overlay
-			blockedUserOverlay
+			.cornerRadius(4)
 		}
-		.cornerRadius(8)
+		.aspectRatio(1.0 / 1.35, contentMode: .fit) // Taller aspect ratio (approximately 3:4)
 		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { _ in
 			// Trigger view update when user is blocked
 			_ = isPostAuthorBlocked
@@ -385,7 +509,7 @@ struct StarredPostThumbnail: View {
 	}
 	
 	@ViewBuilder
-	private var blockedUserOverlay: some View {
+	private func blockedUserOverlay(size: CGFloat, height: CGFloat) -> some View {
 		if isPostAuthorBlocked {
 			Rectangle()
 				.fill(.ultraThinMaterial)
@@ -400,8 +524,8 @@ struct StarredPostThumbnail: View {
 							.foregroundColor(.white)
 					}
 				)
-				.frame(width: 135, height: 200)
-				.cornerRadius(8)
+				.frame(width: size, height: height)
+				.cornerRadius(4)
 				.allowsHitTesting(false)
 		}
 	}

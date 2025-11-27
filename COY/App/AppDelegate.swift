@@ -77,6 +77,28 @@ import UserNotifications
 		
 		completionHandler()
 	}
+	
+	// MARK: - Universal Links
+	func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
+		print("🔗 AppDelegate: Handling universal link: \(userActivity.activityType)")
+		
+		// Handle universal links (applinks)
+		if userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+		   let url = userActivity.webpageURL {
+			print("🔗 AppDelegate: Universal link URL: \(url.absoluteString)")
+			DeepLinkManager.shared.handleUniversalLink(url)
+			return true
+		}
+		
+		return false
+	}
+	
+	// MARK: - Custom URL Scheme
+	func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey : Any] = [:]) -> Bool {
+		print("🔗 AppDelegate: Handling custom URL: \(url.absoluteString)")
+		DeepLinkManager.shared.handleCustomURL(url)
+		return true
+	}
 }
 
 // MARK: - MessagingDelegate

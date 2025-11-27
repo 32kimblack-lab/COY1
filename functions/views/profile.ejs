@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= escapeHtml(user.name || user.username) %> - COY</title>
+  <meta name="description" content="View <%= escapeHtml(user.name || user.username) %>'s profile on COY">
+  <meta property="og:title" content="<%= escapeHtml(user.name || user.username) %> - COY">
+  <meta property="og:description" content="<%= escapeHtml(user.bio || `View ${user.name || user.username}'s profile on COY`) %>">
+  <!-- Use preview image URL that shows full profile view -->
+  <meta property="og:image" content="https://coy.services/preview/<%= escapeHtml(user.username) %>">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:type" content="profile">
+  <meta property="og:url" content="https://coy.services/<%= escapeHtml(user.username) %>">
+  <meta property="profile:username" content="<%= escapeHtml(user.username) %>">
+  <meta property="profile:first_name" content="<%= escapeHtml(user.name || '') %>">
+  <!-- Twitter Card tags for better previews -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="<%= escapeHtml(user.name || user.username) %> - COY">
+  <meta name="twitter:description" content="<%= escapeHtml(user.bio || `View ${user.name || user.username}'s profile on COY`) %>">
+  <meta name="twitter:image" content="https://coy.services/preview/<%= escapeHtml(user.username) %>">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background-color: #000;
+      color: #fff;
+      line-height: 1.6;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    
+    .container {
+      max-width: 100%;
+      margin: 0;
+      padding: 0;
+      background-color: #000;
+    }
+    
+    /* Profile Header Section - EXACT match to ViewerProfileView */
+    .profile-header {
+      position: relative;
+      width: 100%;
+      height: 200px; /* Total height: 105 (bg) + 35 (half profile) + 60 (username/name area) */
+      overflow: hidden;
+    }
+    
+    .background-image {
+      width: 100%;
+      height: 105px; /* Fixed height from ViewerProfileView line 216 */
+      object-fit: cover;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      display: block;
+    }
+    
+    .profile-image-container {
+      position: absolute;
+      top: 70px; /* 105 - 35 = 70 (half of 70px profile image on background) - matches ViewerProfileView line 283 */
+      left: 50%;
+      transform: translateX(-50%);
+      width: 70px; /* Matches ViewerProfileView line 266 */
+      height: 70px; /* Matches ViewerProfileView line 266 */
+      z-index: 10;
+    }
+    
+    .profile-image {
+      width: 70px; /* Matches ViewerProfileView line 266 */
+      height: 70px; /* Matches ViewerProfileView line 266 */
+      border-radius: 50%;
+      border: 3px solid #000;
+      object-fit: cover;
+      background: #333;
+      display: block;
+    }
+    
+    .profile-info {
+      position: absolute;
+      top: 148px; /* 105 + 35 + 8 = 148 - matches ViewerProfileView line 337 */
+      left: 50%;
+      transform: translateX(-50%);
+      text-align: center;
+      width: 100%;
+      z-index: 10;
+    }
+    
+    .profile-username {
+      font-size: 17px; /* .headline font size */
+      font-weight: 600; /* .headline weight */
+      color: #fff;
+      margin-bottom: 4px; /* spacing: 4 - matches ViewerProfileView line 287 */
+    }
+    
+    .profile-name {
+      font-size: 15px; /* .subheadline font size */
+      font-weight: 400; /* .subheadline weight */
+      color: #fff;
+    }
+    
+    /* Collections Section - EXACT match to ViewerProfileView */
+    .collections-section {
+      margin-top: -20px; /* Matches ViewerProfileView line 70 */
+      padding: 0;
+      background-color: #000;
+    }
+    
+    .collection-row {
+      padding: 8px 16px; /* top: 8, leading: 16, bottom: 8, trailing: 16 - matches ViewerProfileView line 388 */
+      margin-bottom: 0;
+      border-bottom: none;
+      background-color: #000;
+    }
+    
+    .collection-header {
+      display: flex;
+      align-items: center;
+      gap: 12px; /* spacing: 12 - matches CollectionRowDesign line 91 */
+      margin-bottom: 12px; /* VStack spacing: 12 - matches CollectionRowDesign line 89 */
+    }
+    
+    .collection-profile-image {
+      width: 50px; /* size: 50 - matches CollectionRowDesign line 275 */
+      height: 50px; /* size: 50 - matches CollectionRowDesign line 275 */
+      border-radius: 50%;
+      object-fit: cover;
+      background: #333;
+      flex-shrink: 0;
+      display: block;
+    }
+    
+    .collection-name-section {
+      flex: 1;
+      min-width: 0;
+    }
+    
+    .collection-name {
+      font-size: 17px; /* .headline font size - matches CollectionRowDesign line 99 */
+      font-weight: 600; /* .headline weight */
+      color: #fff;
+      margin-bottom: 4px; /* spacing: 4 - matches CollectionRowDesign line 96 */
+    }
+    
+    .collection-meta {
+      font-size: 13px; /* .caption font size - matches CollectionRowDesign line 109 */
+      color: #999; /* .secondary color */
+    }
+    
+    .collection-lock {
+      color: #fff;
+      font-size: 16px;
+      margin-left: 8px;
+    }
+    
+    .collection-description {
+      font-size: 13px; /* .caption font size - matches CollectionRowDesign line 132 */
+      color: #999; /* .secondary color */
+      margin-bottom: 12px; /* VStack spacing: 12 - matches CollectionRowDesign line 89 */
+      padding: 0 16px; /* padding horizontal: 16 - matches CollectionRowDesign line 135 */
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2; /* lineLimit: 2 - matches CollectionRowDesign line 134 */
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    
+    /* Post Grid - EXACT match to CollectionRowDesign */
+    .post-grid {
+      display: flex;
+      gap: 8px; /* spacing: 8 - matches CollectionRowDesign line 452 */
+      padding: 0 16px 12px; /* padding horizontal: 16 - matches CollectionRowDesign line 127 */
+    }
+    
+    .post-thumbnail {
+      flex: 1;
+      width: 90px; /* Matches CollectionRowDesign line 461 */
+      height: 130px; /* Matches CollectionRowDesign line 461 */
+      background: #222;
+      border-radius: 0; /* cornerRadius: 0 - matches CollectionRowDesign line 514 */
+      overflow: hidden;
+      position: relative;
+      flex-shrink: 0;
+    }
+    
+    .post-thumbnail img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    
+    .post-thumbnail-placeholder {
+      width: 100%;
+      height: 100%;
+      background: #222;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: #666;
+    }
+    
+    .empty-state-text {
+      font-size: 16px;
+      color: #999;
+    }
+    
+    /* Responsive - maintain exact measurements on all screen sizes */
+    @media (max-width: 768px) {
+      .profile-header {
+        height: 200px;
+      }
+      
+      .background-image {
+        height: 105px;
+      }
+      
+      .profile-image-container {
+        top: 70px;
+        width: 70px;
+        height: 70px;
+      }
+      
+      .profile-image {
+        width: 70px;
+        height: 70px;
+      }
+      
+      .profile-info {
+        top: 148px;
+      }
+      
+      .post-thumbnail {
+        width: 90px;
+        height: 130px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Profile Header - EXACT match to ViewerProfileView -->
+    <div class="profile-header">
+      <% if (user.backgroundImageURL && user.backgroundImageURL.trim() !== '') { %>
+        <img src="<%- user.backgroundImageURL %>" alt="Background" class="background-image" onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='block';">
+        <div class="background-image" style="display: none; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);"></div>
+      <% } else { %>
+        <div class="background-image" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);"></div>
+      <% } %>
+      
+      <div class="profile-image-container">
+        <% if (user.profileImageURL && user.profileImageURL.trim() !== '') { %>
+          <img src="<%- user.profileImageURL %>" alt="<%= escapeHtml(user.name || user.username) %>" class="profile-image" onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='block';">
+          <div class="profile-image" style="background: #333; display: none;"></div>
+          <% } else { %>
+          <div class="profile-image" style="background: #333;"></div>
+          <% } %>
+        </div>
+      
+      <!-- Profile Info - Username and Name - EXACT positioning -->
+      <div class="profile-info">
+        <div class="profile-username">@<%= escapeHtml(user.username || '') %></div>
+        <div class="profile-name"><%= escapeHtml(user.name || '') %></div>
+      </div>
+    </div>
+    
+    <!-- Collections Section - EXACT match to ViewerProfileView List style -->
+    <div class="collections-section">
+      <% if (collections.length === 0) { %>
+        <div class="empty-state">
+          <div class="empty-state-text">No Collections</div>
+        </div>
+      <% } else { %>
+          <% collections.forEach(collection => { %>
+          <div class="collection-row">
+            <!-- Collection Header - EXACT match to CollectionRowDesign -->
+            <div class="collection-header">
+              <!-- Profile Image - 50x50px -->
+              <% if (collection.profileImageURL && collection.profileImageURL.trim() !== '') { %>
+                <img src="<%- collection.profileImageURL %>" alt="Collection" class="collection-profile-image" onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='block';">
+                <div class="collection-profile-image" style="background: #333; display: none;"></div>
+                <% } else { %>
+                <div class="collection-profile-image" style="background: #333;"></div>
+                  <% } %>
+              
+              <!-- Name + Meta - EXACT spacing -->
+              <div class="collection-name-section">
+                <div class="collection-name"><%= escapeHtml(collection.name) %></div>
+                <div class="collection-meta">Individual</div>
+              </div>
+              
+              <!-- Lock icon for private collections -->
+              <% if (!collection.isPublic) { %>
+                <span class="collection-lock">🔒</span>
+              <% } %>
+            </div>
+            
+            <!-- Description - EXACT match to CollectionRowDesign -->
+                <% if (collection.description) { %>
+              <div class="collection-description"><%= escapeHtml(collection.description) %></div>
+            <% } %>
+            
+            <!-- Post Grid - EXACT match to CollectionRowDesign: 90x130px, spacing 8px -->
+            <div class="post-grid">
+              <% for (let i = 0; i < 4; i++) { %>
+                <% if (i < collection.previewPosts.length && collection.previewPosts[i] && collection.previewPosts[i].imageURL && collection.previewPosts[i].imageURL.trim() !== '') { %>
+                  <div class="post-thumbnail">
+                    <img src="<%- collection.previewPosts[i].imageURL %>" alt="Post preview" onerror="console.error('Post image failed to load:', this.src); this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='block';">
+                    <div class="post-thumbnail-placeholder" style="display: none;"></div>
+                  </div>
+                <% } else { %>
+                  <div class="post-thumbnail">
+                    <div class="post-thumbnail-placeholder"></div>
+                  </div>
+                <% } %>
+                  <% } %>
+              </div>
+            </div>
+          <% }) %>
+      <% } %>
+    </div>
+  </div>
+</body>
+</html>

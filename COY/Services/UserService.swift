@@ -8,6 +8,35 @@ import FirebaseStorage
 final class UserService: ObservableObject {
 	static let shared = UserService()
 	private init() {}
+	
+	// Helper function to add timeout to async operations
+	private func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
+		return try await withThrowingTaskGroup(of: T.self) { group in
+			// Add the actual operation
+			group.addTask {
+				try await operation()
+			}
+			
+			// Add timeout task
+			group.addTask {
+				try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+				throw TimeoutError()
+			}
+			
+			// Get the first completed task
+			guard let result = try await group.next() else {
+				throw TimeoutError()
+			}
+			
+			// Cancel remaining tasks
+			group.cancelAll()
+			return result
+		}
+	}
+	
+	private struct TimeoutError: Error {
+		let localizedDescription = "Request timed out. Please check your internet connection."
+	}
 
 	struct AppUser: Identifiable, Equatable {
 		var id: String { userId }
@@ -61,20 +90,26 @@ final class UserService: ObservableObject {
 		
 		print("🔍 Searching for username: '\(normalizedUsername)'")
 		
-		// First try exact match with lowercase (for new users)
-		let snapshot = try await db.collection("users")
-			.whereField("username", isEqualTo: normalizedUsername)
-			.limit(to: 1)
-			.getDocuments()
+		// Add timeout to prevent hanging on slow/no network
+		do {
+			// First try exact match with lowercase (for new users)
+			let snapshot = try await withTimeout(seconds: 8) {
+				try await db.collection("users")
+					.whereField("username", isEqualTo: normalizedUsername)
+					.limit(to: 1)
+					.getDocuments()
+			}
 		
-		// If not found, try case-insensitive search by getting all users and filtering
-		// (This handles legacy users who might have mixed-case usernames)
-		if snapshot.documents.isEmpty {
-			print("⚠️ Username not found with exact match, trying case-insensitive search...")
-			// Get a larger batch and filter client-side (less efficient but handles edge cases)
-			let allUsersSnapshot = try await db.collection("users")
-				.limit(to: 1000) // Reasonable limit
-				.getDocuments()
+			// If not found, try case-insensitive search by getting all users and filtering
+			// (This handles legacy users who might have mixed-case usernames)
+			if snapshot.documents.isEmpty {
+				print("⚠️ Username not found with exact match, trying case-insensitive search...")
+				// Get a larger batch and filter client-side (less efficient but handles edge cases)
+				let allUsersSnapshot = try await withTimeout(seconds: 8) {
+					try await db.collection("users")
+						.limit(to: 1000) // Reasonable limit
+						.getDocuments()
+				}
 			
 			// Filter for case-insensitive match
 			for doc in allUsersSnapshot.documents {
@@ -96,28 +131,35 @@ final class UserService: ObservableObject {
 				}
 			}
 			
-			print("❌ Username not found even with case-insensitive search")
-			return nil
+				print("❌ Username not found even with case-insensitive search")
+				return nil
+			}
+			
+			guard let doc = snapshot.documents.first else {
+				print("❌ No documents found")
+				return nil
+			}
+			
+			let data = doc.data()
+			print("✅ Found user: \(doc.documentID), email: \(data["email"] as? String ?? "none")")
+			return AppUser(
+				userId: doc.documentID,
+				name: data["name"] as? String ?? "",
+				username: data["username"] as? String ?? "",
+				profileImageURL: data["profileImageURL"] as? String,
+				backgroundImageURL: data["backgroundImageURL"] as? String,
+				birthMonth: data["birthMonth"] as? String ?? "",
+				birthDay: data["birthDay"] as? String ?? "",
+				birthYear: data["birthYear"] as? String ?? "",
+				email: data["email"] as? String ?? ""
+			)
+		} catch is TimeoutError {
+			print("⏱️ Username lookup timed out - network may be slow or unavailable")
+			throw NSError(domain: "FIRFirestoreErrorDomain", code: 14, userInfo: [NSLocalizedDescriptionKey: "Request timed out. Please check your internet connection."])
+		} catch {
+			// Re-throw other errors
+			throw error
 		}
-		
-		guard let doc = snapshot.documents.first else {
-			print("❌ No documents found")
-			return nil
-		}
-		
-		let data = doc.data()
-		print("✅ Found user: \(doc.documentID), email: \(data["email"] as? String ?? "none")")
-		return AppUser(
-			userId: doc.documentID,
-			name: data["name"] as? String ?? "",
-			username: data["username"] as? String ?? "",
-			profileImageURL: data["profileImageURL"] as? String,
-			backgroundImageURL: data["backgroundImageURL"] as? String,
-			birthMonth: data["birthMonth"] as? String ?? "",
-			birthDay: data["birthDay"] as? String ?? "",
-			birthYear: data["birthYear"] as? String ?? "",
-			email: data["email"] as? String ?? ""
-		)
 	}
 
 	func getUser(userId: String) async throws -> AppUser? {

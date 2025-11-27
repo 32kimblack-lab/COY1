@@ -161,6 +161,7 @@ struct AddFriendsScreen: View {
 				}
 			}
 			.navigationBarTitleDisplayMode(.inline)
+			.toolbar(.hidden, for: .tabBar)
 			.onAppear {
 				loadIncomingRequests()
 				loadOutgoingRequests()
@@ -527,6 +528,7 @@ struct AddedYouTile: View {
 	private let userService = UserService.shared
 	@State private var user: UserService.AppUser?
 	@State private var isLoading = true
+	@State private var showProfile = false
 	
 	// Consistent sizing system (scaled for iPad)
 	private var isIPad: Bool {
@@ -538,19 +540,36 @@ struct AddedYouTile: View {
 	
 	var body: some View {
 		HStack(spacing: 12 * scaleFactor) {
+			Button(action: {
+				if user != nil {
+					showProfile = true
+				}
+			}) {
 			if let user = user {
 				CachedProfileImageView(url: user.profileImageURL ?? "", size: 50 * scaleFactor)
 			} else {
 				DefaultProfileImageView(size: 50 * scaleFactor)
 			}
+			}
+			.buttonStyle(.plain)
+			.disabled(user == nil)
 			
+			Button(action: {
+				if user != nil {
+					showProfile = true
+				}
+			}) {
 			VStack(alignment: .leading, spacing: 4 * scaleFactor) {
 				Text(user?.username ?? "Loading...")
 					.font(.system(size: 16 * scaleFactor, weight: .semibold))
+						.foregroundColor(.primary)
 				Text(user?.name ?? "")
 					.font(.system(size: 14 * scaleFactor))
 					.foregroundColor(.secondary)
 			}
+			}
+			.buttonStyle(.plain)
+			.disabled(user == nil)
 			
 			Spacer()
 			
@@ -583,6 +602,11 @@ struct AddedYouTile: View {
 		.padding(.vertical, 4 * scaleFactor)
 		.onAppear {
 			loadUser()
+		}
+		.navigationDestination(isPresented: $showProfile) {
+			if let user = user {
+				ViewerProfileView(userId: user.userId)
+			}
 		}
 	}
 	
@@ -637,6 +661,7 @@ struct UserSearchRow: View {
 	@Binding var outgoingRequestIds: Set<String>
 	private let friendService = FriendService.shared
 	@State private var requestStatus: RequestStatus = .none
+	@State private var showProfile = false
 	
 	// Consistent sizing system (scaled for iPad)
 	private var isIPad: Bool {
@@ -652,21 +677,34 @@ struct UserSearchRow: View {
 	
 	var body: some View {
 		HStack(spacing: 12 * scaleFactor) {
+			Button(action: {
+				showProfile = true
+			}) {
 			CachedProfileImageView(url: user.profileImageURL ?? "", size: 50 * scaleFactor)
+			}
+			.buttonStyle(.plain)
 			
+			Button(action: {
+				showProfile = true
+			}) {
 			VStack(alignment: .leading, spacing: 4 * scaleFactor) {
 				Text(user.username)
 					.font(.system(size: 16 * scaleFactor, weight: .semibold))
+						.foregroundColor(.primary)
 				Text(user.name)
 					.font(.system(size: 14 * scaleFactor))
 					.foregroundColor(.secondary)
 			}
+			}
+			.buttonStyle(.plain)
 			
 			Spacer()
 			
 			if requestStatus == .pending || outgoingRequestIds.contains(user.userId) {
 				Button(action: {
-					undoRequest()
+					Task {
+						await undoRequest()
+					}
 				}) {
 				Text("Pending")
 					.font(.system(size: 14 * scaleFactor))
@@ -676,13 +714,17 @@ struct UserSearchRow: View {
 						.background(Color(.systemGray6))
 					.cornerRadius(8)
 				}
+				.buttonStyle(.plain)
 			} else if requestStatus == .friends {
 				Text("Friends")
 					.font(.system(size: 14 * scaleFactor))
 					.foregroundColor(.secondary)
 			} else {
 				Button(action: {
-					sendRequest()
+					print("🔵 Add button tapped for user: \(user.userId)")
+					Task {
+						await sendRequest()
+					}
 				}) {
 					Text("Add")
 						.font(.system(size: 14 * scaleFactor, weight: .semibold))
@@ -692,11 +734,16 @@ struct UserSearchRow: View {
 						.background(Color.blue.opacity(0.1))
 						.cornerRadius(8 * scaleFactor)
 				}
+				.buttonStyle(.plain)
+				.contentShape(Rectangle())
 			}
 		}
 		.padding(.vertical, 4 * scaleFactor)
 		.onAppear {
 			checkStatus()
+		}
+		.navigationDestination(isPresented: $showProfile) {
+			ViewerProfileView(userId: user.userId)
 		}
 	}
 	
@@ -713,38 +760,44 @@ struct UserSearchRow: View {
 		}
 	}
 	
-	private func sendRequest() {
-		Task {
+	private func sendRequest() async {
+		print("📤 sendRequest() called for user: \(user.userId)")
+		
 			// Check if this is a one-way un-add scenario where we can restore friendship directly
 			let canRestore = await friendService.canRestoreFriendship(userId: user.userId)
+		print("🔄 canRestore: \(canRestore)")
 			
 			if canRestore {
 				// One-way un-add: restore friendship immediately (no friend request needed)
 				do {
+				print("🔄 Attempting to restore friendship...")
 					try await friendService.restoreFriendship(userId: user.userId)
 					await MainActor.run {
+					print("✅ Friendship restored successfully")
 						requestStatus = .friends
 						// Remove from outgoing requests if it was there
 						outgoingRequestIds.remove(user.userId)
 					}
 				} catch {
-					print("Error restoring friendship: \(error)")
+				print("❌ Error restoring friendship: \(error.localizedDescription)")
 				}
 			} else {
 				// Both-way un-add or new friend: send friend request
 				do {
+				print("📨 Attempting to send friend request...")
 					try await friendService.sendFriendRequest(toUid: user.userId)
 					await MainActor.run {
+					print("✅ Friend request sent successfully")
 						requestStatus = .pending
 						outgoingRequestIds.insert(user.userId)
 					}
 				} catch {
-					print("Error sending request: \(error)")
+				print("❌ Error sending request: \(error.localizedDescription)")
 					// If it's a requestAlreadyExists error, check if we can restore instead
 					// This handles edge cases where an old request exists but it's actually a one-way un-add
 					if error.localizedDescription.contains("request already sent") || 
 					   error.localizedDescription.contains("requestAlreadyExists") {
-						Task {
+					print("🔄 Request already exists, checking if we can restore...")
 							let canRestoreNow = await friendService.canRestoreFriendship(userId: user.userId)
 							if canRestoreNow {
 								do {
@@ -754,9 +807,7 @@ struct UserSearchRow: View {
 										outgoingRequestIds.remove(user.userId)
 									}
 								} catch {
-									print("Error restoring friendship after request exists: \(error)")
-								}
-							}
+							print("❌ Error restoring friendship after request exists: \(error.localizedDescription)")
 						}
 					}
 				}
@@ -764,8 +815,7 @@ struct UserSearchRow: View {
 		}
 	}
 	
-	private func undoRequest() {
-		Task {
+	private func undoRequest() async {
 			do {
 				// Cancel the outgoing friend request by deleting it
 				guard let currentUid = Auth.auth().currentUser?.uid else { return }
@@ -779,7 +829,6 @@ struct UserSearchRow: View {
 				}
 			} catch {
 				print("Error undoing request: \(error)")
-			}
 		}
 	}
 }
