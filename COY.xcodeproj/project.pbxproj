@@ -22,10 +22,12 @@
 		B245C9642EC9D1000051EF90 /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9622EC9D1000051EF90 /* FirebaseMessaging */; };
 		B245C9652EC9D1000051EF90 /* FirebaseFunctions in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9632EC9D1000051EF90 /* FirebaseFunctions */; };
 		B28260D72ED4C9B400B94103 /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9612EC9D1000051EF90 /* GoogleMobileAds */; };
+		B2ABA0B12EDA84CC00AFDF61 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2ABA0B02EDA84CC00AFDF61 /* Network.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		B245C4A62EC9A6530051EF90 /* COY.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = COY.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B2ABA0B02EDA84CC00AFDF61 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.1.sdk/System/Library/Frameworks/Network.framework; sourceTree = DEVELOPER_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -41,6 +43,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B2ABA0B12EDA84CC00AFDF61 /* Network.framework in Frameworks */,
 				B28260D72ED4C9B400B94103 /* GoogleMobileAds in Frameworks */,
 				B245C7CB2EC9C2900051EF90 /* FirebaseAnalyticsIdentitySupport in Frameworks */,
 				B245C9542EC9CF400051EF90 /* FirebaseAuth in Frameworks */,
@@ -82,6 +85,7 @@
 		B245C9502EC9CF320051EF90 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				B2ABA0B02EDA84CC00AFDF61 /* Network.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
