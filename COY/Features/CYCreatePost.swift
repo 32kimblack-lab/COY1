@@ -28,6 +28,8 @@ struct CYCreatePost: View {
 	@State private var showError = false
 	@State private var errorMessage = ""
 	@State private var showCollectionPicker = false
+	@State private var uploadProgress: Double = 0.0
+	@State private var uploadStatusMessage = "Ready to post"
 	
 	// Tag friends functionality
 	@State private var taggedFriends: [CYUser] = []
@@ -139,7 +141,7 @@ struct CYCreatePost: View {
 				// Add Media Button (Visible only if less than 5 items are selected)
 				if selectedMedia.count < 5 {
 					Button(action: { 
-						// Ensure we don't exceed 5 items
+						// Ensure we don't exceed 5 items before opening picker
 						guard selectedMedia.count < 5 else { return }
 						showCustomPhotoPicker = true 
 					}) {
@@ -408,7 +410,7 @@ struct CYCreatePost: View {
 			VStack {
 				Divider().background(Color.gray)
 				Toggle(isOn: $allowReplies) {
-					Text("Replies")
+					Text("Allow Comments")
 						.foregroundColor(colorScheme == .dark ? .white : .black)
 				}
 				.toggleStyle(SwitchToggleStyle(tint: .blue))
@@ -419,27 +421,43 @@ struct CYCreatePost: View {
 	
 	// Post Button
 	private var postButton: some View {
-		Button(action: {
-			Task {
-				await createPost()
-			}
-		}) {
-			HStack {
-				if isPosting {
-					ProgressView()
-						.progressViewStyle(CircularProgressViewStyle(tint: colorScheme == .dark ? .white : .black))
-						.padding(.trailing, 5)
+		VStack(spacing: 12) {
+			// Progress indicator
+			if isPosting {
+				VStack(spacing: 8) {
+					ProgressView(value: uploadProgress)
+						.progressViewStyle(LinearProgressViewStyle(tint: .blue))
+						.frame(height: 4)
+					
+					Text(uploadStatusMessage)
+						.font(.caption)
+						.foregroundColor(colorScheme == .dark ? .gray : .secondary)
 				}
-				Text(isPosting ? "Posting..." : (isFromCamera && selectedCollection == nil) ? "Select Collection" : "Post")
-					.font(.headline)
-					.foregroundColor(colorScheme == .dark ? .white : .black)
+				.padding(.horizontal)
 			}
-			.frame(maxWidth: .infinity)
-			.padding()
-			.background(isPosting ? Color.gray : (isFromCamera && selectedCollection == nil) ? Color.gray : Color.blue)
-			.cornerRadius(10)
+			
+			Button(action: {
+				Task {
+					await createPost()
+				}
+			}) {
+				HStack {
+					if isPosting {
+						ProgressView()
+							.progressViewStyle(CircularProgressViewStyle(tint: colorScheme == .dark ? .white : .black))
+							.padding(.trailing, 5)
+					}
+					Text(isPosting ? "Posting..." : (isFromCamera && selectedCollection == nil) ? "Select Collection" : "Post")
+						.font(.headline)
+						.foregroundColor(colorScheme == .dark ? .white : .black)
+				}
+				.frame(maxWidth: .infinity)
+				.padding()
+				.background(isPosting ? Color.gray : (isFromCamera && selectedCollection == nil) ? Color.gray : Color.blue)
+				.cornerRadius(10)
+			}
+			.disabled(isPosting || selectedMedia.isEmpty || (isFromCamera && selectedCollection == nil))
 		}
-		.disabled(isPosting || selectedMedia.isEmpty || (isFromCamera && selectedCollection == nil))
 		.padding(.horizontal)
 		.padding(.bottom, 20)
 	}
@@ -473,6 +491,8 @@ struct CYCreatePost: View {
 		}
 		
 		isPosting = true
+		uploadProgress = 0.0
+		uploadStatusMessage = "Preparing upload..."
 		
 		do {
 			// Use selected collection ID if coming from camera, otherwise use the provided collectionId
@@ -490,16 +510,31 @@ struct CYCreatePost: View {
 			
 			// Create post - saves to Firebase (like profile images)
 			let taggedUserIds = taggedFriends.map { $0.id }
+			
+			print("🔍 CYCreatePost: About to create post with:")
+			print("   - allowDownload: \(allowDownload)")
+			print("   - allowReplies: \(allowReplies)")
+			print("   - State variables: allowDownload=\(allowDownload), allowReplies=\(allowReplies)")
+			
+			// Create post with progress tracking
 			let postId = try await PostService.shared.createPost(
 				collectionId: targetCollectionId,
 				caption: caption.isEmpty ? nil : caption,
 				mediaItems: selectedMedia,
 				taggedUsers: taggedUserIds.isEmpty ? nil : taggedUserIds,
 				allowDownload: allowDownload,
-				allowReplies: allowReplies
+				allowReplies: allowReplies,
+				progressCallback: { progress in
+					// Update UI with progress on main thread
+					Task { @MainActor in
+						self.uploadProgress = progress.overallProgress
+						self.uploadStatusMessage = progress.currentFileName
+					}
+				}
 			)
 			
 			print("✅ Successfully created post in collection '\(collectionName)' with ID: \(postId)")
+			print("🔍 CYCreatePost: Post created with allowDownload=\(allowDownload), allowReplies=\(allowReplies)")
 			
 			// Update UI and dismiss on main thread
 			await MainActor.run {
@@ -742,14 +777,13 @@ struct CustomPhotoPickerView: UIViewControllerRepresentable {
 	
 	class Coordinator: NSObject, PHPickerViewControllerDelegate {
 		let parent: CustomPhotoPickerView
-		private var isProcessing = false // Prevent duplicate processing
+		private var isProcessing = false
 		
 		init(_ parent: CustomPhotoPickerView) {
 			self.parent = parent
 		}
 		
 		func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-			// Prevent duplicate processing if already processing
 			guard !isProcessing else {
 				print("⚠️ CustomPhotoPickerView: Already processing, ignoring duplicate call")
 				return
@@ -763,14 +797,12 @@ struct CustomPhotoPickerView: UIViewControllerRepresentable {
 				}
 				
 				if results.isEmpty {
-					// User cancelled - dismiss picker
 					await MainActor.run {
 						parent.dismiss()
 						parent.isProcessingMedia = false
 						self.isProcessing = false
 					}
 				} else {
-					// User selected media - load the results
 					await loadSelectedResults(results)
 					await MainActor.run {
 						parent.dismiss()
@@ -790,9 +822,35 @@ struct CustomPhotoPickerView: UIViewControllerRepresentable {
 			for (index, result) in results.enumerated() where index < remainingSlots {
 				let mediaItem = await createMediaItem(from: result)
 				
-				// Only add valid media items (videos with valid duration, images, etc.)
-				if mediaItem.image != nil || (mediaItem.videoURL != nil && mediaItem.videoDuration != nil) {
+				// Only add valid media items - reject videos over 2 minutes
+				if mediaItem.image != nil {
+					// Images are always valid
 					newItems.append(mediaItem)
+				} else if mediaItem.videoURL != nil, let duration = mediaItem.videoDuration {
+					// Only add videos that are 2 minutes or less
+					if duration <= 120.0 {
+						newItems.append(mediaItem)
+					} else {
+						// Show simple alert for videos that are too long
+						await MainActor.run {
+							let alert = UIAlertController(
+								title: "Video Too Long",
+								message: "Video must be under 2 minutes",
+								preferredStyle: .alert
+							)
+							alert.addAction(UIAlertAction(title: "OK", style: .default))
+							
+							if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+							   let window = windowScene.windows.first,
+							   let rootVC = window.rootViewController {
+								var topVC = rootVC
+								while let presentedVC = topVC.presentedViewController {
+									topVC = presentedVC
+								}
+								topVC.present(alert, animated: true)
+							}
+						}
+					}
 				}
 			}
 			
@@ -822,36 +880,7 @@ struct CustomPhotoPickerView: UIViewControllerRepresentable {
 				// Only add up to the 5-item limit
 				let itemsToAdd = min(newItems.count, 5 - parent.selectedMedia.count)
 				if itemsToAdd > 0 {
-					// Prevent duplicate items by checking if they already exist
-					let existingIds = Set(parent.selectedMedia.map { item in
-						// Create a unique identifier for each media item
-						if let videoURL = item.videoURL {
-							return videoURL.absoluteString
-						} else if let image = item.image {
-							// Use image data hash as identifier
-							return image.pngData()?.base64EncodedString() ?? UUID().uuidString
-						}
-						return UUID().uuidString
-					})
-					
-					// Filter out duplicates
-					let uniqueNewItems = newItems.filter { item in
-						let itemId: String
-						if let videoURL = item.videoURL {
-							itemId = videoURL.absoluteString
-						} else if let image = item.image {
-							itemId = image.pngData()?.base64EncodedString() ?? UUID().uuidString
-						} else {
-							return false // Skip invalid items
-						}
-						return !existingIds.contains(itemId)
-					}
-					
-					// Only add unique items up to the limit
-					let finalItemsToAdd = min(uniqueNewItems.count, 5 - parent.selectedMedia.count)
-					if finalItemsToAdd > 0 {
-						parent.selectedMedia.append(contentsOf: Array(uniqueNewItems.prefix(finalItemsToAdd)))
-					}
+					parent.selectedMedia.append(contentsOf: Array(newItems.prefix(itemsToAdd)))
 				}
 			}
 		}
@@ -859,77 +888,31 @@ struct CustomPhotoPickerView: UIViewControllerRepresentable {
 		private func createMediaItem(from result: PHPickerResult) async -> CreatePostMediaItem {
 			if result.itemProvider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
 				// Handle video
-				print("🎥 Processing video selection...")
 				return await withCheckedContinuation { continuation in
 					result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, error in
 						if let error = error {
 							print("❌ Error loading video: \(error)")
-							let mediaItem = CreatePostMediaItem(
+							continuation.resume(returning: CreatePostMediaItem(
 								image: nil,
 								videoURL: nil,
 								videoDuration: nil,
 								videoThumbnail: nil
-							)
-							continuation.resume(returning: mediaItem)
+							))
 							return
 						}
 						
 						if let url = url {
-							print("🎥 Video URL received: \(url)")
 							let originalExtension = url.pathExtension.isEmpty ? "mov" : url.pathExtension
 							let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".\(originalExtension)")
 							do {
 								try FileManager.default.copyItem(at: url, to: tempURL)
-								print("🎥 Video copied to temp location: \(tempURL)")
 								
 								Task {
 									let asset = AVURLAsset(url: tempURL)
 									let duration = try? await asset.load(.duration).seconds
-									print("🎥 Video duration: \(duration ?? 0) seconds")
-									
-									// Check if video is longer than 2:00 (120 seconds)
-									if let duration = duration, duration > 120.0 {
-										print("❌ Video too long: \(String(format: "%.2f", duration))s (max: 120s)")
-										
-										// Show alert on main thread
-										await MainActor.run {
-											let minutes = Int(duration) / 60
-											let seconds = Int(duration) % 60
-											let durationText = minutes > 0 ? "\(minutes):\(String(format: "%02d", seconds))" : "\(Int(duration)) seconds"
-											
-											let alert = UIAlertController(
-												title: "Video Too Long",
-												message: "Please select a video that is 2:00 or shorter. This video is \(durationText) long.",
-												preferredStyle: .alert
-											)
-											alert.addAction(UIAlertAction(title: "OK", style: .default))
-											
-											// Find the top view controller to present alert
-											if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-											   let window = windowScene.windows.first,
-											   let rootVC = window.rootViewController {
-												var topVC = rootVC
-												while let presentedVC = topVC.presentedViewController {
-													topVC = presentedVC
-												}
-												topVC.present(alert, animated: true)
-											}
-										}
-										
-										// Return empty media item (video rejected)
-										let mediaItem = CreatePostMediaItem(
-											image: nil,
-											videoURL: nil,
-											videoDuration: nil,
-											videoThumbnail: nil
-										)
-										continuation.resume(returning: mediaItem)
-										return
-									}
 									
 									// Generate thumbnail for preview
 									let thumbnail = try? await generateVideoThumbnail(from: tempURL)
-									print("🎥 Thumbnail generated for preview: \(thumbnail != nil)")
 									
 									let mediaItem = CreatePostMediaItem(
 										image: nil,
@@ -937,28 +920,24 @@ struct CustomPhotoPickerView: UIViewControllerRepresentable {
 										videoDuration: duration,
 										videoThumbnail: thumbnail
 									)
-									print("🎥 MediaItem created with video URL: \(tempURL)")
 									continuation.resume(returning: mediaItem)
 								}
 							} catch {
 								print("❌ Error copying video: \(error)")
-								let mediaItem = CreatePostMediaItem(
+								continuation.resume(returning: CreatePostMediaItem(
 									image: nil,
 									videoURL: nil,
 									videoDuration: nil,
 									videoThumbnail: nil
-								)
-								continuation.resume(returning: mediaItem)
+								))
 							}
 						} else {
-							print("❌ No video URL received")
-							let mediaItem = CreatePostMediaItem(
+							continuation.resume(returning: CreatePostMediaItem(
 								image: nil,
 								videoURL: nil,
 								videoDuration: nil,
 								videoThumbnail: nil
-							)
-							continuation.resume(returning: mediaItem)
+							))
 						}
 					}
 				}
@@ -975,13 +954,12 @@ struct CustomPhotoPickerView: UIViewControllerRepresentable {
 							)
 							continuation.resume(returning: mediaItem)
 						} else {
-							let mediaItem = CreatePostMediaItem(
+							continuation.resume(returning: CreatePostMediaItem(
 								image: nil,
 								videoURL: nil,
 								videoDuration: nil,
 								videoThumbnail: nil
-							)
-							continuation.resume(returning: mediaItem)
+							))
 						}
 					}
 				}

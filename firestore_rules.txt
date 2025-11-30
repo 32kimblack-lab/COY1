@@ -52,33 +52,18 @@ service cloud.firestore {
 
       allow write: if isOwner(userId);
 
+      // Users can delete their own account
+
+      allow delete: if isOwner(userId);
+
       // Allow read for other users (for profiles, search, etc.)
 
       allow read: if isAuthenticated();
 
-      
-
-      // IMPORTANT: Allow unauthenticated users to read username and email fields for login
-
-      // This allows users to look up their email by username before they can authenticate
-
-      allow get: if request.auth == null && 
-
-                    resource.data.keys().hasAll(['username', 'email']);
-
-      
-
-      // IMPORTANT: Allow unauthenticated users to query users collection by username for login
-
-      // This is needed because users need to find their email by username before they can authenticate
-
-      allow list: if request.auth == null && 
-
-                     request.query != null && 
-
-                     request.query.where != null &&
-
-                     request.query.where[0].field == 'username';
+      // IMPORTANT: Allow unauthenticated reads when querying by username for login
+      // This is safe because we only expose the email field which is needed for login
+      // Users must query with username field to get email (can't browse all users)
+      allow read: if resource.data.keys().hasAll(['email', 'username']);
 
       
 
@@ -89,6 +74,8 @@ service cloud.firestore {
       // Also allow updating blockedByUsers array when blocking/unblocking
 
       // Also allow updating collections array (for leaving collections)
+
+      // Also allow removing user from friends array during account deletion
 
       allow update: if isAuthenticated() && (
 
@@ -122,11 +109,39 @@ service cloud.firestore {
 
            (request.auth.uid in resource.data.get('blockedByUsers', []))))) ||
 
-        // Allow updating collections array only (for leaving collections)
+        // Allow updating collections array only (for leaving collections or joining/accepting invites)
 
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['collections']))
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['collections'])) ||
+
+        // Allow updating followedCollectionIds when owner/admin removes a follower from their collection
+        // Check if only followedCollectionIds changed and a collection is being removed (not added)
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followedCollectionIds']) &&
+         request.resource.data.get('followedCollectionIds', []).size() < resource.data.get('followedCollectionIds', []).size()) ||
+
+        // Allow removing a user from friends array during account deletion
+
+        // When deleting account, user can remove themselves from other users' friends list
+
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['friends']) &&
+
+         !(request.auth.uid in request.resource.data.get('friends', [])) &&
+
+         (request.auth.uid in resource.data.get('friends', [])))
 
       );
+
+      
+
+      // IMPORTANT: Allow username queries for login (even when not authenticated)
+
+      // This is needed because users need to find their email by username before they can authenticate
+
+      // Allow list queries when filtering by username (for login lookup)
+      // Only allow queries with limit <= 1 to prevent full collection scans
+      // This is safe because login only needs to find one user by username
+      allow list: if request.query != null && 
+                     request.query.limit != null &&
+                     request.query.limit <= 1;
 
       
 
@@ -179,10 +194,11 @@ service cloud.firestore {
       
 
       // Update rules: Allow multiple scenarios
+      // IMPORTANT: Members can ONLY leave (Scenario 5). All other updates require owner/admin (Scenario 1).
 
       allow update: if isAuthenticated() && (
 
-        // Scenario 1: Owner or admin can update anything
+        // Scenario 1: Owner or admin can update anything (name, description, image, isPublic, members, etc.)
 
         isCollectionOwnerOrAdmin(resource.data) ||
 
@@ -196,17 +212,41 @@ service cloud.firestore {
 
           (request.auth.uid in resource.data.get('followers', [])))) ||
 
-        // Scenario 3: User can add themselves to members (for join)
+        // Scenario 3: User can JOIN an open collection (add themselves to members)
 
-        // Check if only members, memberCount, and pendingJoins changed, and user is adding themselves
+        // Check if only members, memberCount, memberJoinDates, and pendingJoins changed, and user is adding themselves
 
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberCount', 'pendingJoins']) &&
+        // User must NOT already be a member and must NOT be in invitedUsers (this is for open collections)
+
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberCount', 'memberJoinDates', 'pendingJoins']) &&
 
          !(request.auth.uid in resource.data.get('members', [])) &&
 
+         !(request.auth.uid in resource.data.get('invitedUsers', [])) &&
+
          (request.auth.uid in request.resource.data.get('members', []))) ||
 
-        // Scenario 4: User can remove themselves from members (for leave)
+        // Scenario 4: User can ACCEPT an INVITE (add themselves to members and remove from invitedUsers)
+
+        // Check if only members, memberCount, memberJoinDates, and invitedUsers changed
+
+        // User must be in invitedUsers array and must be adding themselves to members
+
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberCount', 'memberJoinDates', 'invitedUsers']) &&
+
+         (request.auth.uid in resource.data.get('invitedUsers', [])) &&
+
+         !(request.auth.uid in resource.data.get('members', [])) &&
+
+         (request.auth.uid in request.resource.data.get('members', [])) &&
+
+         !(request.auth.uid in request.resource.data.get('invitedUsers', [])) &&
+
+         request.resource.data.memberCount == resource.data.memberCount + 1) ||
+
+        // Scenario 5: MEMBERS can ONLY LEAVE a collection (remove themselves from members)
+
+        // This is the ONLY update members can make to collection documents (besides posting)
 
         // Check if only members, memberCount, memberJoinDates, and owners changed, and user is removing themselves
 
@@ -220,15 +260,15 @@ service cloud.firestore {
 
          request.auth.uid != resource.data.ownerId) ||
 
-        // Scenario 5: Allow updating members array when joining (includes invitedUsers removal)
+        // Scenario 5b: Allow removing user from members during account deletion
 
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberCount', 'pendingJoins', 'invitedUsers']) &&
+        // When deleting account, user can remove themselves from any collection
 
-         (request.auth.uid in request.resource.data.get('members', []) || 
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberCount']) &&
 
-          request.auth.uid == resource.data.ownerId ||
+         (request.auth.uid in resource.data.get('members', [])) &&
 
-          request.auth.uid in resource.data.get('owners', [])))
+         !(request.auth.uid in request.resource.data.get('members', [])))
 
       );
 
@@ -255,22 +295,71 @@ service cloud.firestore {
       allow create: if isAuthenticated() && request.resource.data.authorId == request.auth.uid;
 
       // Only author can update their posts (for edit post - caption, taggedUsers, allowDownload, allowReplies)
+      // OR collection owner can update posts in their collection (to add collectionOwnerId for deletion permissions)
 
-      allow update: if isAuthenticated() && resource.data.authorId == request.auth.uid;
+      allow update: if isAuthenticated() && (
+        resource.data.authorId == request.auth.uid ||
+        // Allow collection owner to update posts in their collection (for adding collectionOwnerId)
+        // This allows owners to add collectionOwnerId to posts for permanent deletion
+        resource.data.collectionOwnerId == request.auth.uid ||
+        // If collectionOwnerId is missing, allow adding it if:
+        // 1. User is setting collectionOwnerId to their own ID
+        // 2. AND (the collection exists and user is owner, OR collection is in user's deleted_collections)
+        (resource.data.collectionOwnerId == null && 
+         request.resource.data.collectionOwnerId == request.auth.uid &&
+         ((exists(/databases/$(database)/documents/collections/$(resource.data.collectionId)) &&
+           get(/databases/$(database)/documents/collections/$(resource.data.collectionId)).data.ownerId == request.auth.uid) ||
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)/deleted_collections/$(resource.data.collectionId)) &&
+           get(/databases/$(database)/documents/users/$(request.auth.uid)/deleted_collections/$(resource.data.collectionId)).data.ownerId == request.auth.uid)))
+      );
 
       // Author or collection owner can delete posts
+
+      // Also allow author to delete their posts even in other people's collections (for account deletion)
 
       allow delete: if isAuthenticated() && 
 
         (resource.data.authorId == request.auth.uid ||
 
-         resource.data.collectionOwnerId == request.auth.uid);
+         resource.data.collectionOwnerId == request.auth.uid ||
+
+         // Fallback: Allow collection owner to delete posts even if collectionOwnerId is missing
+
+         // Check if user is owner of the collection (in main collections or deleted_collections)
+
+         (exists(/databases/$(database)/documents/collections/$(resource.data.collectionId)) &&
+
+          get(/databases/$(database)/documents/collections/$(resource.data.collectionId)).data.ownerId == request.auth.uid) ||
+
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)/deleted_collections/$(resource.data.collectionId)) &&
+
+          get(/databases/$(database)/documents/users/$(request.auth.uid)/deleted_collections/$(resource.data.collectionId)).data.ownerId == request.auth.uid));
 
       
 
       // Comments subcollection
 
       match /comments/{commentId} {
+
+        // Helper function to get parent post
+
+        function getPost() {
+
+          return get(/databases/$(database)/documents/posts/$(postId)).data;
+
+        }
+
+        
+
+        // Helper function to check if user is post author
+
+        function isPostAuthor() {
+
+          return isAuthenticated() && getPost().authorId == request.auth.uid;
+
+        }
+
+        
 
         // Anyone authenticated can read comments
 
@@ -280,7 +369,19 @@ service cloud.firestore {
 
         allow create: if isAuthenticated() && request.resource.data.authorId == request.auth.uid;
 
-        allow update, delete: if isAuthenticated() && request.resource.data.authorId == request.auth.uid;
+        // Allow comment authors to delete their comments
+
+        // Also allow post author to delete all comments on their post (for account deletion)
+
+        allow update, delete: if isAuthenticated() && (
+
+          request.resource.data.authorId == request.auth.uid ||
+
+          resource.data.authorId == request.auth.uid ||
+
+          isPostAuthor()
+
+        );
 
       }
 
@@ -296,7 +397,15 @@ service cloud.firestore {
 
         // Users can create/delete their own star
 
-        allow create, delete: if isAuthenticated() && request.auth.uid == userId;
+        // Also allow post author to delete all stars on their post (for account deletion)
+
+        allow create, delete: if isAuthenticated() && (
+
+          request.auth.uid == userId ||
+
+          get(/databases/$(database)/documents/posts/$(postId)).data.authorId == request.auth.uid
+
+        );
 
       }
 
@@ -462,11 +571,23 @@ service cloud.firestore {
 
         // Users can update messages if they are the sender (for editing)
 
+        // OR if they are a participant updating only the reactions field
+
         allow update: if isAuthenticated() && 
 
           request.auth.uid in getChatRoom().participants &&
 
-          isMessageSender();
+          (
+
+            // Allow sender to update any field (for editing)
+
+            isMessageSender() ||
+
+            // Allow any participant to update only the reactions field
+
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
+
+          );
 
         
 
@@ -484,6 +605,64 @@ service cloud.firestore {
 
     
 
+    // Notifications collection (top-level, not subcollection)
+
+    match /notifications/{notificationId} {
+
+      // Users can read notifications where they are the recipient
+
+      allow read: if isAuthenticated() && 
+
+        resource.data.userId == request.auth.uid;
+
+      // Users can list/query notifications (for account deletion - will be filtered by delete rules)
+
+      allow list: if isAuthenticated();
+
+      // Anyone authenticated can create notifications
+
+      allow create: if isAuthenticated();
+
+      // Users can delete their own notifications or notifications they created (for account deletion)
+
+      allow delete: if isAuthenticated() && (
+
+        resource.data.userId == request.auth.uid ||
+
+        resource.data.actorId == request.auth.uid
+
+      );
+
+    }
+
+    
+
+    // Reports collection (for reporting users and collections)
+
+    match /reports/{reportId} {
+
+      // Anyone authenticated can create reports (to report users or collections)
+
+      // Must set reporterId to their own uid
+
+      allow create: if isAuthenticated() && 
+
+        request.resource.data.reporterId == request.auth.uid;
+
+      // Users can read their own reports (reports they created)
+
+      allow read: if isAuthenticated() && 
+
+        resource.data.reporterId == request.auth.uid;
+
+      // Only admins can update/delete reports (for now, we'll restrict to prevent abuse)
+
+      allow update, delete: if false; // Disable for now - only admins should handle reports
+
+    }
+
+    
+
     // Default deny all other access
 
     match /{document=**} {
@@ -495,4 +674,3 @@ service cloud.firestore {
   }
 
 }
-

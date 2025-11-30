@@ -57,6 +57,11 @@ struct BlockedAccountsView: View {
 						.font(.subheadline)
 						.foregroundColor(.gray)
 						.multilineTextAlignment(.center)
+					Text("Note: Users who blocked you won't appear here, but you won't see their content either.")
+						.font(.caption)
+						.foregroundColor(.gray)
+						.multilineTextAlignment(.center)
+						.padding(.horizontal)
 				}
 				Spacer()
 			} else {

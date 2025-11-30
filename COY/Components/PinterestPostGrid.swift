@@ -3,6 +3,8 @@ import SDWebImageSwiftUI
 import SDWebImage
 import FirebaseAuth
 import AVKit
+import GoogleMobileAds
+import Combine
 
 // MARK: - Pinterest Style Post Grid
 struct PinterestPostGrid: View {
@@ -10,81 +12,226 @@ struct PinterestPostGrid: View {
 	let collection: CollectionData?
 	let isIndividualCollection: Bool
 	let currentUserId: String?
+	var postsCollectionMap: [String: CollectionData]? = nil // Map of post IDs to collections
+	var showAds: Bool = true // Whether to show ads (hide on own profile)
+	var adLocation: AdManager.AdLocation = .home // Ad location for proper ad unit ID
+	var roundedCorners: Bool = false // Whether to show rounded corners (true for inside collection, false for home/search)
 	var onPinPost: ((CollectionPost) -> Void)? = nil
 	var onDeletePost: ((CollectionPost) -> Void)? = nil
 	
 	@State private var postHeights: [String: CGFloat] = [:]
 	@StateObject private var videoPlayerManager = VideoPlayerManager.shared
+	@StateObject private var gridVideoManager = GridVideoPlaybackManager.shared
+	@StateObject private var adManager = AdManager.shared
+	@State private var nativeAds: [String: GADNativeAd] = [:]
 	
 	// Pinterest-style measurements
-	private let columns = 2
-	private let horizontalGutter: CGFloat = 16 // Spacing between columns (matches Pinterest)
-	private let verticalSpacing: CGFloat = 20 // Spacing between rows (matches Pinterest) - this is now consistent because each card has bottom padding
+	private var columns: Int {
+		// Use 3 columns on iPad (matching Pinterest), 2 columns on iPhone
+		UIDevice.current.userInterfaceIdiom == .pad ? 3 : 2
+	}
+	private let horizontalGutter: CGFloat = 16 // Spacing between columns (increased for better breathing room)
+	private let verticalSpacing: CGFloat = 28 // Vertical spacing between items (increased for better breathing room)
 	private let horizontalPadding: CGFloat = 16 // Padding from screen edges (matches Pinterest)
-	private let cardBottomPadding: CGFloat = 12 // Consistent bottom padding for each card (ensures uniform spacing)
 	
 	// Computed properties for responsive sizing
 	private var screenWidth: CGFloat {
-		UIScreen.main.bounds.width
+		// Exclude safe area insets for accurate width calculation
+		let bounds = UIScreen.main.bounds
+		if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+		   let window = windowScene.windows.first {
+			let safeAreaInsets = window.safeAreaInsets
+			return bounds.width - safeAreaInsets.left - safeAreaInsets.right
+		}
+		return bounds.width
 	}
 	
 	private var columnWidth: CGFloat {
-		// Calculate column width: (screen width - (padding * 2) - gutter) / columns
-		(screenWidth - (horizontalPadding * 2) - horizontalGutter) / CGFloat(columns)
+		// Calculate column width: (screen width - (padding * 2) - (gutter * (columns - 1))) / columns
+		let totalGutterSpace = horizontalGutter * CGFloat(columns - 1)
+		return (screenWidth - (horizontalPadding * 2) - totalGutterSpace) / CGFloat(columns)
 	}
 	
-	var body: some View {
-		ScrollView {
-			LazyVStack(spacing: verticalSpacing) { // Consistent spacing between rows
-				// Create two columns using HStack
-				ForEach(0..<(posts.count + 1) / 2, id: \.self) { rowIndex in
-					HStack(alignment: .top, spacing: horizontalGutter) {
-						// Left column
-						if rowIndex * 2 < posts.count {
-							PinterestPostCard(
-								post: posts[rowIndex * 2],
-								collection: collection,
-								isIndividualCollection: isIndividualCollection,
-								currentUserId: currentUserId,
-								width: columnWidth,
-								videoPlayerManager: videoPlayerManager,
-								onPinPost: onPinPost,
-								onDeletePost: onDeletePost
-							)
-							.id("post_\(posts[rowIndex * 2].id)")
-						} else {
-							// Empty space to maintain alignment
-							Spacer()
-								.frame(width: columnWidth)
-						}
-						
-						// Right column
-						if rowIndex * 2 + 1 < posts.count {
-							PinterestPostCard(
-								post: posts[rowIndex * 2 + 1],
-								collection: collection,
-								isIndividualCollection: isIndividualCollection,
-								currentUserId: currentUserId,
-								width: columnWidth,
-								videoPlayerManager: videoPlayerManager,
-								onPinPost: onPinPost,
-								onDeletePost: onDeletePost
-							)
-							.id("post_\(posts[rowIndex * 2 + 1].id)")
-						} else {
-							// Empty space to maintain alignment
-							Spacer()
-								.frame(width: columnWidth)
-						}
-					}
-					.padding(.horizontal, horizontalPadding)
+	// Grid item enum to handle both posts and ads
+	enum GridItem: Identifiable {
+		case post(post: CollectionPost, index: Int, itemIndex: Int)
+		case ad(key: String, index: Int)
+		
+		var id: String {
+			switch self {
+			case .post(let post, _, _):
+				return "post_\(post.id)"
+			case .ad(let key, _):
+				return "ad_\(key)"
+			}
+		}
+	}
+	
+
+	private var columnArrays: [[GridItem]] {
+		var columnsArray = Array(repeating: [GridItem](), count: columns)
+		var columnHeights = Array(repeating: CGFloat.zero, count: columns)
+		var itemIndex = 0
+		
+		for (postIndex, post) in posts.enumerated() {
+			// Insert ad every 4 posts (after posts at index 3, 7, 11, etc.) - only if showAds is true
+			if showAds && postIndex > 0 && postIndex % 4 == 0 {
+				// Find shortest column for ad
+			if let shortestColumnIndex = columnHeights.enumerated().min(by: { $0.element < $1.element })?.offset {
+					let adKey = "ad_\(postIndex)"
+					columnsArray[shortestColumnIndex].append(.ad(key: adKey, index: itemIndex))
+				
+					// Estimate ad height (similar to post)
+					let estimatedAdHeight = columnWidth * 1.5 // Ads are typically taller
+					columnHeights[shortestColumnIndex] += estimatedAdHeight + verticalSpacing
+					itemIndex += 1
 				}
 			}
-			.padding(.top, horizontalPadding) // Top padding
-			.padding(.bottom, horizontalPadding) // Bottom padding
+			
+			// Find shortest column for post
+			if let shortestColumnIndex = columnHeights.enumerated().min(by: { $0.element < $1.element })?.offset {
+				columnsArray[shortestColumnIndex].append(.post(post: post, index: postIndex, itemIndex: itemIndex))
+				
+				// Estimate height for this post
+				let estimatedHeight = estimatePostHeight(for: post)
+				columnHeights[shortestColumnIndex] += estimatedHeight + verticalSpacing
+				itemIndex += 1
+			}
 		}
-		.coordinateSpace(name: "scroll")
+		
+		return columnsArray
 	}
+	
+	// Estimate post height before actual calculation (for masonry distribution)
+	private func estimatePostHeight(for post: CollectionPost) -> CGFloat {
+		// Base height for media (estimate based on aspect ratios)
+		var mediaHeight: CGFloat = 0
+		
+		if let firstMedia = post.mediaItems.first {
+			if firstMedia.isVideo {
+				// Default 16:9 for videos
+				mediaHeight = columnWidth * (9.0 / 16.0)
+			} else {
+				// Default 4:3 for images
+				mediaHeight = columnWidth * (3.0 / 4.0)
+			}
+		} else {
+			mediaHeight = columnWidth * (3.0 / 4.0) // Default
+		}
+		
+		// Add height for caption/info section (estimated)
+		let infoHeight: CGFloat = 80 // Approximate height for profile image, name, username, caption
+		
+		return mediaHeight + infoHeight
+	}
+	
+		var body: some View {
+		ScrollView {
+			HStack(alignment: .top, spacing: horizontalGutter) {
+				ForEach(columnArrays.indices, id: \.self) { columnIndex in
+					VStack(spacing: verticalSpacing) {
+						ForEach(columnArrays[columnIndex]) { item in
+							gridItemView(for: item)
+						}
+					}
+					.frame(width: columnWidth)
+				}
+			}
+			.padding(.horizontal, horizontalPadding)
+			.padding(.top, horizontalPadding)
+			.padding(.bottom, horizontalPadding)
+		}
+		.onPreferenceChange(VideoFramesPreferenceKey.self) { frames in
+			// Forward every card's frame and visibility to the grid manager
+			for info in frames {
+				// Only forward if it looks like a real video (non-empty url)
+				guard !info.videoURL.isEmpty else {
+					gridVideoManager.removeVideo(playerId: info.playerId)
+					continue
+				}
+				gridVideoManager.updateVideoVisibility(
+					postId: info.postId,
+					videoURL: info.videoURL,
+					frame: info.frame,
+					visibility: info.visibility
+				)
+			}
+			// evaluatePlayback is now called automatically in updateVideoVisibility
+		}
+		.onAppear {
+			// Preload ads for this location
+			adManager.preloadNativeAds(count: 10, location: adLocation)
+			
+			// Load ads for positions that need them
+			for (postIndex, _) in posts.enumerated() {
+				if showAds && postIndex > 0 && postIndex % 4 == 0 {
+					let adKey = "ad_\(postIndex)"
+					if nativeAds[adKey] == nil {
+						adManager.loadNativeAd(adKey: adKey, location: adLocation) { ad in
+							if let ad = ad {
+								Task { @MainActor in
+									nativeAds[adKey] = ad
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		.onDisappear {
+			// Clear all video tracking when grid disappears
+			gridVideoManager.clearAll()
+		}
+	}
+	
+	// Extract view building to separate function to avoid SwiftUI warnings
+	@ViewBuilder
+	private func gridItemView(for item: GridItem) -> some View {
+		switch item {
+		case .post(let post, let postIndex, _):
+			// Get collection for this post
+			let postCollection = collection ?? postsCollectionMap?[post.id]
+							PinterestPostCard(
+				post: post,
+								collection: postCollection,
+								isIndividualCollection: isIndividualCollection,
+								currentUserId: currentUserId,
+								width: columnWidth,
+								videoPlayerManager: videoPlayerManager,
+								gridVideoManager: gridVideoManager,
+								allPosts: posts,
+				currentPostIndex: postIndex,
+								roundedCorners: roundedCorners,
+								onPinPost: onPinPost,
+								onDeletePost: onDeletePost
+							)
+			.id("post_\(post.id)")
+			
+		case .ad(let adKey, _):
+			if let nativeAd = nativeAds[adKey] {
+				GridNativeAdCard(nativeAd: nativeAd, width: columnWidth)
+					.id("ad_\(adKey)")
+			} else {
+				// Placeholder while ad loads
+				RoundedRectangle(cornerRadius: 12)
+					.fill(Color.gray.opacity(0.1))
+					.frame(width: columnWidth, height: columnWidth * 1.5)
+					.id("ad_placeholder_\(adKey)")
+					.onAppear {
+						// Load ad when placeholder appears
+						adManager.loadNativeAd(adKey: adKey, location: adLocation) { ad in
+							if let ad = ad {
+								Task { @MainActor in
+									nativeAds[adKey] = ad
+								}
+							}
+						}
+					}
+			}
+		}
+	}
+	
+	// MARK: - Visibility and Height Tracking
 }
 
 // MARK: - Pinterest Post Card
@@ -95,6 +242,10 @@ struct PinterestPostCard: View {
 	let currentUserId: String?
 	let width: CGFloat
 	@ObservedObject var videoPlayerManager: VideoPlayerManager
+	@ObservedObject var gridVideoManager: GridVideoPlaybackManager
+	let allPosts: [CollectionPost]? // Optional: array of all posts for navigation
+	let currentPostIndex: Int? // Optional: current post index in the array
+	var roundedCorners: Bool = false // Whether to show rounded corners
 	var onPinPost: ((CollectionPost) -> Void)? = nil
 	var onDeletePost: ((CollectionPost) -> Void)? = nil
 	
@@ -104,8 +255,12 @@ struct PinterestPostCard: View {
 	@State private var showPostDetail: Bool = false
 	@State private var imageAspectRatios: [String: CGFloat] = [:]
 	@State private var isVisible: Bool = false
-	@State private var currentVideoIndex: Int? = nil
 	@State private var currentPageIndex: Int = 0 // Track current page in carousel
+	@State private var ownerProfileImageURL: String? // Store owner's profile image URL for fallback
+	@State private var imageLoadingStates: [String: Bool] = [:] // Track loading state for each image
+	@State private var videoLoadingStates: [String: Bool] = [:] // Track loading state for each video
+	@State private var elapsedTime: Double = 0.0 // Track elapsed time for current video
+	@State private var elapsedTimeCancellable: AnyCancellable? // Cancellable for elapsed time subscription
 	@Environment(\.colorScheme) var colorScheme
 	
 	// Check if current user can pin this post
@@ -227,7 +382,7 @@ struct PinterestPostCard: View {
 	}
 	
 	var body: some View {
-		VStack(alignment: .leading, spacing: 12) {
+		VStack(alignment: .leading, spacing: 0) {
 			// Media Content with blur background
 			ZStack {
 				// If all items have the same height, use natural height (like single post)
@@ -244,6 +399,13 @@ struct PinterestPostCard: View {
 					}
 				}()
 				
+				// Loading placeholder for entire media container (while calculating dimensions)
+				if calculatedHeight == 0 || contentHeight == 0 {
+					Rectangle()
+						.fill(colorScheme == .dark ? Color.white.opacity(0.3) : Color.black.opacity(0.15))
+						.frame(width: width, height: 200) // Default height while loading
+				}
+				
 				// Blur background is now handled per-item in imageView and videoPlayerView
 				// Each item that has a different height will show its own blur
 				
@@ -253,35 +415,88 @@ struct PinterestPostCard: View {
 					.frame(height: contentHeight)
 					.clipped()
 			}
-			.cornerRadius(16) // Pinterest uses slightly larger corner radius
+			.cornerRadius(roundedCorners ? 16 : 0) // Rounded corners for inside collection, sharp for home/search
 			.onTapGesture {
 				showPostDetail = true
 			}
 			.contextMenu {
 				contextMenuContent
 			}
+			// Use new visibility system for single-video posts only
 			.background(
-				GeometryReader { geometry in
-					Color.clear
-						.preference(key: ViewOffsetKey.self, value: geometry.frame(in: .named("scroll")))
+				Group {
+					// Only track visibility for single-video posts (not carousels)
+					if post.mediaItems.count == 1,
+					   let mediaItem = post.mediaItems.first,
+					   mediaItem.isVideo,
+					   let videoURL = mediaItem.videoURL {
+						GeometryReader { geometry in
+							Color.clear
+								.preference(
+									key: VideoFramesPreferenceKey.self,
+									value: [VideoFrameInfo(
+										playerId: "\(post.id)_\(videoURL)",
+										postId: post.id,
+										videoURL: videoURL,
+										frame: geometry.frame(in: .global),
+										visibility: calculateVisibilityPercentage(frame: geometry.frame(in: .global))
+									)]
+								)
+						}
+					} else {
+						Color.clear
+					}
 				}
 			)
-			.onPreferenceChange(ViewOffsetKey.self) { frame in
-				checkVisibility(frame: frame)
-			}
 			
 			// Post Info - under the media (matches Pinterest spacing)
 			VStack(alignment: .leading, spacing: 6) {
-				// Username and Star in same row
+				// Collection profile image, collection name, username, and star
 				HStack(alignment: .center, spacing: 8) {
-					// Username - only show for Invite, Request, or Open collections
-					if shouldShowUsername {
-						if !post.authorName.isEmpty {
-							Text("@\(post.authorName)")
-								.font(.caption)
-								.fontWeight(.medium)
-								.foregroundColor(.primary)
-								.lineLimit(1)
+					// Left side: Profile image with collection name and username on the same row
+					if !isIndividualCollection {
+						// Collection profile image - use same logic as CollectionRowDesign
+						Group {
+							if let collection = collection {
+								if let imageURL = collection.imageURL, !imageURL.isEmpty {
+									// Use collection's profile image if available
+									CachedProfileImageView(url: imageURL, size: 26)
+										.clipShape(Circle())
+								} else {
+									// Use owner's profile image as fallback
+									if let ownerImageURL = ownerProfileImageURL, !ownerImageURL.isEmpty {
+										CachedProfileImageView(url: ownerImageURL, size: 26)
+											.clipShape(Circle())
+									} else {
+										// Fallback to default icon if owner has no profile image
+										DefaultProfileImageView(size: 26)
+									}
+								}
+							} else {
+								DefaultProfileImageView(size: 26)
+							}
+						}
+						.frame(width: 26, height: 26)
+						
+						// Collection name and username - on the same row as profile image
+						VStack(alignment: .leading, spacing: 1) {
+							// Collection name
+							if let collection = collection {
+								Text(collection.name)
+									.font(.caption2)
+									.fontWeight(.medium)
+									.foregroundColor(.primary)
+									.lineLimit(1)
+							}
+							
+							// Username - below collection name
+							if !post.authorName.isEmpty {
+								Text("@\(post.authorName)")
+									.font(.caption2)
+									.fontWeight(.medium)
+									.foregroundColor(.secondary)
+									.lineLimit(1)
+							}
 						}
 					}
 					
@@ -298,6 +513,7 @@ struct PinterestPostCard: View {
 							.font(.system(size: 16, weight: .medium))
 								.foregroundColor(isStarred ? .yellow : .secondary)
 						}
+						.padding(.leading, 8) // Add extra spacing before star icon
 					}
 				}
 				
@@ -311,15 +527,34 @@ struct PinterestPostCard: View {
 						.multilineTextAlignment(.leading)
 				}
 			}
-			.padding(.horizontal, 4) // Small padding for text content (matches Pinterest)
-			.padding(.top, 8) // Consistent top spacing after media
-			.padding(.bottom, 8) // Consistent bottom spacing after caption (ensures uniform spacing between posts)
+			.padding(.horizontal, 10) // Increased padding for text content for better spacing
+			.padding(.top, 8) // Add top padding to separate from media
+			.padding(.bottom, 4) // Bottom padding for better separation between posts
 		}
 		.onAppear {
+			isVisible = true
+			// Defer heavy operations to avoid blocking initial render
+			Task { @MainActor in
 			checkStarVisibility()
 			loadStarStatus()
-			calculateImageAspectRatios()
-			isVisible = true
+			// Load owner's profile image if collection has no imageURL (same as CollectionRowDesign)
+			if let collection = collection, collection.imageURL?.isEmpty != false {
+				loadOwnerProfileImage()
+			}
+			}
+			// Defer aspect ratio calculation to background (non-blocking)
+			Task.detached(priority: .utility) {
+				await calculateImageAspectRatios()
+			}
+			// Initialize loading states for all media items (lightweight)
+			for mediaItem in post.mediaItems {
+				if let imageURL = mediaItem.imageURL, !imageURL.isEmpty {
+					imageLoadingStates[imageURL] = true // Start as loading
+				}
+				if let videoURL = mediaItem.videoURL, !videoURL.isEmpty {
+					videoLoadingStates[videoURL] = true // Start as loading
+				}
+			}
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostStarred"))) { notification in
 			if (notification.object as? String) == post.id {
@@ -333,17 +568,27 @@ struct PinterestPostCard: View {
 		}
 		.onDisappear {
 			isVisible = false
-			// Pause video when card disappears
-			if let videoIndex = currentVideoIndex,
-			   videoIndex < post.mediaItems.count,
-			   post.mediaItems[videoIndex].isVideo,
-			   let videoURL = post.mediaItems[videoIndex].videoURL {
+			// Remove video from grid manager when card disappears
+			// Use stable playerId format: "\(postId)_\(videoURL)"
+			if post.mediaItems.count == 1,
+			   let mediaItem = post.mediaItems.first,
+			   mediaItem.isVideo,
+			   let videoURL = mediaItem.videoURL {
 				let playerId = "\(post.id)_\(videoURL)"
-				videoPlayerManager.pauseVideo(playerId: playerId)
+				gridVideoManager.removeVideo(playerId: playerId)
 			}
+			// Cancel elapsed time subscription
+			elapsedTimeCancellable?.cancel()
+			elapsedTimeCancellable = nil
+			elapsedTime = 0.0
 		}
 		.fullScreenCover(isPresented: $showPostDetail) {
-			CYPostDetailView(post: post, collection: collection)
+			CYPostDetailView(
+				post: post,
+				collection: collection,
+				allPosts: allPosts,
+				currentPostIndex: currentPostIndex
+			)
 		}
 	}
 	
@@ -363,45 +608,6 @@ struct PinterestPostCard: View {
 				onDeletePost?(post)
 			}) {
 				Label("Delete", systemImage: "trash")
-			}
-		}
-	}
-	
-	// Visibility check for video autoplay
-	private func checkVisibility(frame: CGRect) {
-		let screenHeight = UIScreen.main.bounds.height
-		let cardTop = frame.minY
-		let cardBottom = frame.maxY
-		let cardHeight = frame.height
-		
-		// Check if card is 70% visible (30% or less out of frame)
-		let visibleTop = max(0, cardTop)
-		let visibleBottom = min(screenHeight, cardBottom)
-		let visibleHeight = max(0, visibleBottom - visibleTop)
-		let visibilityRatio = cardHeight > 0 ? visibleHeight / cardHeight : 0
-		
-		// Find first video in post
-		if let videoIndex = post.mediaItems.firstIndex(where: { $0.isVideo }),
-		   let videoURL = post.mediaItems[videoIndex].videoURL {
-			let playerId = "\(post.id)_\(videoURL)"
-			
-			// If card is at least 70% visible and no other video is playing, play this one
-			if visibilityRatio >= 0.7 {
-				// Check if another video is currently playing
-				if let activePlayerId = videoPlayerManager.activePlayerId, activePlayerId != playerId {
-					// Another video is playing, don't start this one
-					return
-				}
-				
-				// Play this video
-				currentVideoIndex = videoIndex
-				videoPlayerManager.playVideo(playerId: playerId)
-			} else {
-				// Card is less than 70% visible, pause video
-				if currentVideoIndex == videoIndex {
-					videoPlayerManager.pauseVideo(playerId: playerId)
-					currentVideoIndex = nil
-				}
 			}
 		}
 	}
@@ -426,7 +632,7 @@ struct PinterestPostCard: View {
 		// Use the specific image/video from this media item for the blur
 		// But fill the entire calculatedHeight area
 		if let imageURL = mediaItem.imageURL, !imageURL.isEmpty, let url = URL(string: imageURL) {
-			WebImage(url: url)
+			WebImage(url: url, options: [.lowPriority, .retryFailed, .scaleDownLargeImages])
 				.resizable()
 				.indicator(.activity)
 				.aspectRatio(contentMode: .fill)
@@ -434,7 +640,7 @@ struct PinterestPostCard: View {
 				.blur(radius: 20)
 				.opacity(0.6)
 		} else if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty, let url = URL(string: thumbnailURL) {
-			WebImage(url: url)
+			WebImage(url: url, options: [.lowPriority, .retryFailed, .scaleDownLargeImages])
 				.resizable()
 				.indicator(.activity)
 				.aspectRatio(contentMode: .fill)
@@ -533,18 +739,39 @@ struct PinterestPostCard: View {
 					.clipped()
 			}
 			
-			// Image on top - use natural height, fill to avoid gaps
+			// Image on top - force fill to match Pinterest (no gaps)
 			if let imageURL = mediaItem.imageURL, !imageURL.isEmpty, let url = URL(string: imageURL) {
-				WebImage(url: url)
-					.resizable()
-					.indicator(.activity)
-					.transition(.fade(duration: 0.2))
-					.aspectRatio(contentMode: .fill) // Fill to avoid gaps like videos
-					.frame(width: width, height: imageNaturalHeight) // Use natural height
-					.clipped()
+				ZStack {
+					// Loading placeholder - color scheme aware
+					if imageLoadingStates[imageURL] != false {
+						Rectangle()
+							.fill(colorScheme == .dark ? Color.white.opacity(0.3) : Color.black.opacity(0.15))
+							.frame(width: width, height: imageNaturalHeight)
+					}
+					
+					WebImage(url: url, options: [.lowPriority, .retryFailed, .scaleDownLargeImages])
+						.onSuccess { image, data, cacheType in
+							// Image loaded successfully
+							Task { @MainActor in
+							imageLoadingStates[imageURL] = false
+							}
+						}
+						.onFailure { error in
+							// Image failed to load
+							Task { @MainActor in
+							imageLoadingStates[imageURL] = false
+							}
+						}
+						.resizable()
+						.indicator(.activity)
+						.transition(.fade(duration: 0.2))
+						.scaledToFill()
+						.frame(width: width, height: imageNaturalHeight)
+						.clipped()
+				}
 			} else {
 				Rectangle()
-					.fill(colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.1))
+					.fill(colorScheme == .dark ? Color.white.opacity(0.3) : Color.black.opacity(0.15))
 					.frame(width: width, height: imageNaturalHeight)
 					.overlay(
 						Image(systemName: "photo")
@@ -588,40 +815,94 @@ struct PinterestPostCard: View {
 			// Video Player (autoplay, no controls) - exactly like images: use natural height
 			if let videoURL = mediaItem.videoURL, !videoURL.isEmpty {
 				let playerId = "\(post.id)_\(videoURL)"
-				let player = videoPlayerManager.getOrCreatePlayer(for: videoURL, postId: post.id)
+				let player = videoPlayerManager.player(for: videoURL, id: playerId)
 				
-				VideoPlayer(player: player)
-					.allowsHitTesting(false) // Prevent taps from reaching video player (taps go to parent)
-					.aspectRatio(contentMode: .fill) // Fill the frame to avoid black bars
-					.frame(width: width, height: videoNaturalHeight) // Use natural height
-					.clipped()
-					.onAppear {
-						// Autoplay when visible
-						if index == 0 {
-							DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-								if isVisible && currentVideoIndex == nil {
-									if videoPlayerManager.activePlayerId == nil {
-										currentVideoIndex = index
-										videoPlayerManager.playVideo(playerId: playerId)
+				ZStack {
+					// Thumbnail placeholder while video loads
+					if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty, let url = URL(string: thumbnailURL) {
+						WebImage(url: url)
+							.resizable()
+							.indicator(.activity)
+							.aspectRatio(contentMode: .fill)
+							.frame(width: width, height: videoNaturalHeight)
+							.clipped()
+					} else {
+						// Fallback placeholder
+						Rectangle()
+							.fill(colorScheme == .dark ? Color.white.opacity(0.3) : Color.black.opacity(0.15))
+							.frame(width: width, height: videoNaturalHeight)
+					}
+					
+					VideoPlayer(player: player)
+						.allowsHitTesting(false)
+						.aspectRatio(contentMode: .fill)
+						.frame(width: width, height: videoNaturalHeight)
+						.clipped()
+						.onAppear {
+							// For single-video posts, ensure player is ready
+							if post.mediaItems.count == 1 && mediaItem.isVideo {
+								// Get the player from manager to ensure it's the same instance
+								let actualPlayer = videoPlayerManager.player(for: videoURL, id: playerId)
+								actualPlayer.isMuted = true
+								
+								// Set up looping
+								if actualPlayer.currentItem != nil {
+									actualPlayer.actionAtItemEnd = .none
+									NotificationCenter.default.addObserver(
+										forName: .AVPlayerItemDidPlayToEndTime,
+										object: actualPlayer.currentItem,
+										queue: .main
+									) { _ in
+										actualPlayer.seek(to: .zero) { _ in
+											actualPlayer.play()
+										}
 									}
 								}
+								
+								// Grid manager will handle playback based on visibility
+								// Just ensure player is ready
+								videoPlayerManager.playVideo(playerId: playerId)
+							}
+							
+							// Subscribe to elapsed time updates for this video (for timer display)
+							// Cancel any existing subscription first
+							elapsedTimeCancellable?.cancel()
+							
+							// Get or create elapsed time publisher and subscribe
+							if let publisher = videoPlayerManager.getElapsedTimePublisher(for: playerId) {
+								// Get current elapsed time
+								elapsedTime = videoPlayerManager.getElapsedTime(for: playerId)
+								
+								// Subscribe to updates (already on main actor)
+								elapsedTimeCancellable = publisher
+									.sink { time in
+										elapsedTime = time
+									}
 							}
 						}
-					}
-					.onDisappear {
-						videoPlayerManager.pauseVideo(playerId: playerId)
-						if currentVideoIndex == index {
-							currentVideoIndex = nil
+						.onDisappear {
+							// Pause when video disappears
+							if post.mediaItems.count == 1 && mediaItem.isVideo {
+								let actualPlayer = videoPlayerManager.findPlayer(by: playerId)
+								actualPlayer?.pause()
+								videoPlayerManager.pauseVideo(playerId: playerId)
+							}
+							// Cancel elapsed time subscription when video disappears
+							elapsedTimeCancellable?.cancel()
+							elapsedTimeCancellable = nil
+							elapsedTime = 0.0
 						}
-					}
+				}
 			}
 			
-			// Duration Badge - at the top right
-			if let duration = mediaItem.videoDuration {
+			// Duration Badge - at the top right (shows remaining time countdown)
+			// Only show for the currently visible video in carousel, or for single videos
+			if let duration = mediaItem.videoDuration,
+			   (post.mediaItems.count == 1 || currentPageIndex == index) {
 				VStack {
 					HStack {
 						Spacer()
-						Text(formatDuration(duration))
+						Text(formatRemainingTime(elapsed: elapsedTime, total: duration))
 							.font(.caption2)
 							.fontWeight(.semibold)
 							.foregroundColor(.white)
@@ -694,44 +975,93 @@ struct PinterestPostCard: View {
 		return String(format: "%d:%02d", minutes, secs)
 	}
 	
-	// MARK: - Calculate Image Aspect Ratios
-	private func calculateImageAspectRatios() {
-		// Pre-calculate aspect ratios for all media items using SDWebImage
-		for mediaItem in post.mediaItems {
-			if !mediaItem.isVideo {
-				if let imageURL = mediaItem.imageURL, !imageURL.isEmpty {
-					// Load image to get dimensions
-					Task {
-						if let url = URL(string: imageURL) {
-							// Use SDWebImage to load and get dimensions
-							SDWebImageManager.shared.loadImage(
-								with: url,
-								options: [],
-								progress: nil
-							) { image, data, error, cacheType, finished, loadedImageURL in
-								if let image = image, finished, let loadedImageURL = loadedImageURL {
-									let aspectRatio = image.size.width / image.size.height
-									DispatchQueue.main.async {
-										imageAspectRatios[loadedImageURL.absoluteString] = aspectRatio
-									}
-								}
-							}
-						}
-					}
+	private func formatRemainingTime(elapsed: Double, total: Double) -> String {
+		// Show remaining time (countdown from total)
+		// e.g., if total is 55 seconds and elapsed is 5 seconds, show 50 seconds remaining
+		let remaining = max(0, total - elapsed)
+		return formatDuration(remaining)
+	}
+	
+	// MARK: - Load Owner Profile Image (same as CollectionRowDesign)
+	private func loadOwnerProfileImage() {
+		// Skip if already loaded
+		if ownerProfileImageURL != nil {
+			return
+		}
+		
+		guard let collection = collection else { return }
+		
+		Task {
+			do {
+				let owner = try await UserService.shared.getUser(userId: collection.ownerId)
+				await MainActor.run {
+					ownerProfileImageURL = owner?.profileImageURL
 				}
-			} else if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty {
-				// For videos, load thumbnail to get aspect ratio
-				Task {
-					if let url = URL(string: thumbnailURL) {
+			} catch {
+				print("Error loading owner profile image: \(error.localizedDescription)")
+			}
+		}
+	}
+	
+	// MARK: - Calculate Visibility Percentage
+	private func calculateVisibilityPercentage(frame: CGRect) -> Double {
+		let screenHeight = UIScreen.main.bounds.height
+		let safeAreaTop = UIApplication.shared.connectedScenes
+			.compactMap { $0 as? UIWindowScene }
+			.flatMap { $0.windows }
+			.first { $0.isKeyWindow }?
+			.safeAreaInsets.top ?? 0
+		
+		let safeAreaBottom = UIApplication.shared.connectedScenes
+			.compactMap { $0 as? UIWindowScene }
+			.flatMap { $0.windows }
+			.first { $0.isKeyWindow }?
+			.safeAreaInsets.bottom ?? 0
+		
+		let viewportTop = safeAreaTop
+		let viewportBottom = screenHeight - safeAreaBottom
+		
+		let viewTop = frame.minY
+		let viewBottom = frame.maxY
+		let cardHeight = frame.height
+		
+		let visibleTop = max(viewportTop, viewTop)
+		let visibleBottom = min(viewportBottom, viewBottom)
+		let visibleHeight = max(0, visibleBottom - visibleTop)
+		
+		return cardHeight > 0 ? Double(visibleHeight / cardHeight) : 0.0
+	}
+	
+	// MARK: - Calculate Image Aspect Ratios (Optimized - Non-blocking, Deferred)
+	private func calculateImageAspectRatios() {
+		// Defer aspect ratio calculation to avoid blocking initial render
+		// Only calculate for visible items to avoid unnecessary work
+		// Use background priority to not interfere with UI rendering
+		Task.detached(priority: .utility) {
+		for mediaItem in post.mediaItems {
+				// Skip if already calculated (check on main actor)
+				let imageURL = mediaItem.isVideo ? mediaItem.thumbnailURL : mediaItem.imageURL
+				if let urlString = imageURL, !urlString.isEmpty {
+					let alreadyCalculated = await MainActor.run {
+						imageAspectRatios[urlString] != nil
+					}
+					if alreadyCalculated {
+						continue
+					}
+					
+					// Load image to get dimensions (low priority, non-blocking)
+					if let url = URL(string: urlString) {
+						// Use SDWebImage with low priority and scale down options for faster loading
 						SDWebImageManager.shared.loadImage(
 							with: url,
-							options: [],
+							options: [.lowPriority, .retryFailed, .scaleDownLargeImages],
 							progress: nil
-						) { image, data, error, cacheType, finished, _ in
+						) { image, data, error, cacheType, finished, loadedImageURL in
 							if let image = image, finished {
 								let aspectRatio = image.size.width / image.size.height
-								DispatchQueue.main.async {
-									imageAspectRatios[thumbnailURL] = aspectRatio
+								let finalURL = loadedImageURL?.absoluteString ?? urlString
+								Task { @MainActor in
+									imageAspectRatios[finalURL] = aspectRatio
 								}
 							}
 						}
@@ -742,69 +1072,23 @@ struct PinterestPostCard: View {
 	}
 }
 
-// MARK: - View Offset Key for Scroll Detection
-struct ViewOffsetKey: PreferenceKey {
-	static var defaultValue: CGRect = .zero
-	static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-		value = nextValue()
+// MARK: - Video Frame Info for Aggregated Visibility Tracking
+// A small struct to carry the identifying info + frame + visibility for each card
+struct VideoFrameInfo: Equatable {
+	let playerId: String   // "\(post.id)_\(videoURL)"
+	let postId: String
+	let videoURL: String
+	let frame: CGRect
+	let visibility: Double // 0.0 to 1.0 (percentage visible)
+}
+
+// PreferenceKey that aggregates frames from all cards
+struct VideoFramesPreferenceKey: PreferenceKey {
+	static var defaultValue: [VideoFrameInfo] { [] }
+	
+	static func reduce(value: inout [VideoFrameInfo], nextValue: () -> [VideoFrameInfo]) {
+		// append new values (each card will send a single-element array)
+		value.append(contentsOf: nextValue())
 	}
 }
 
-// MARK: - Preview
-#Preview {
-	PinterestPostGrid(
-		posts: [
-			CollectionPost(
-				id: "1",
-				title: "Beautiful sunset at the beach",
-				collectionId: "col1",
-				authorId: "user1",
-				authorName: "john_doe",
-				createdAt: Date(),
-				firstMediaItem: MediaItem(
-					imageURL: "https://example.com/image1.jpg",
-					thumbnailURL: nil,
-					videoURL: nil,
-					videoDuration: nil,
-					isVideo: false
-				),
-				mediaItems: [
-					MediaItem(
-						imageURL: "https://example.com/image1.jpg",
-						thumbnailURL: nil,
-						videoURL: nil,
-						videoDuration: nil,
-						isVideo: false
-					)
-				]
-			),
-			CollectionPost(
-				id: "2",
-				title: "Amazing city lights",
-				collectionId: "col1",
-				authorId: "user2",
-				authorName: "jane_smith",
-				createdAt: Date(),
-				firstMediaItem: MediaItem(
-					imageURL: "https://example.com/image2.jpg",
-					thumbnailURL: nil,
-					videoURL: nil,
-					videoDuration: nil,
-					isVideo: false
-				),
-				mediaItems: [
-					MediaItem(
-						imageURL: "https://example.com/image2.jpg",
-						thumbnailURL: nil,
-						videoURL: nil,
-						videoDuration: nil,
-						isVideo: false
-					)
-				]
-			)
-		],
-		collection: nil,
-		isIndividualCollection: false,
-		currentUserId: "user1"
-	)
-}

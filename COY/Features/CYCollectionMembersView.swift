@@ -20,6 +20,8 @@ struct CYCollectionMembersView: View {
 	@State private var isProcessingAction = false
 	@State private var showError = false
 	@State private var errorMessage = ""
+	@State private var selectedUserId: String?
+	@State private var showingProfile = false
 	
 	var body: some View {
 		VStack(spacing: 0) {
@@ -146,6 +148,12 @@ struct CYCollectionMembersView: View {
 		.navigationBarHidden(true)
 		.navigationBarBackButtonHidden(true)
 		.toolbar(.hidden, for: .navigationBar)
+		.navigationDestination(isPresented: $showingProfile) {
+			if let userId = selectedUserId {
+				ViewerProfileView(userId: userId)
+					.environmentObject(authService)
+			}
+		}
 		.onAppear {
 			loadMembers()
 		}
@@ -227,8 +235,17 @@ struct CYCollectionMembersView: View {
 					}
 				}
 			} else {
-				// Clickable NavigationLink for other users
-				NavigationLink(destination: ViewerProfileView(userId: user.id).environmentObject(authService)) {
+				// Clickable button for other users - checks mutual blocking before navigating
+				Button(action: {
+					Task {
+						// Check if users are mutually blocked before navigating
+						let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: user.id)
+						if !areMutuallyBlocked {
+							selectedUserId = user.id
+							showingProfile = true
+						}
+					}
+				}) {
 					HStack(spacing: 12) {
 						CachedProfileImageView(url: user.profileImageURL ?? "", size: 50)
 						
@@ -243,6 +260,7 @@ struct CYCollectionMembersView: View {
 					}
 				}
 				.buttonStyle(.plain)
+				.contentShape(Rectangle())
 			}
 			
 			Spacer()

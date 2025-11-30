@@ -5,9 +5,10 @@ import FirebaseFirestore
 import SDWebImageSwiftUI
 
 struct EditPostView: View {
-	let post: CollectionPost
+	let initialPost: CollectionPost
 	let collection: CollectionData?
 	
+	@State private var post: CollectionPost
 	@Environment(\.dismiss) var dismiss
 	@Environment(\.colorScheme) var colorScheme
 	@EnvironmentObject var authService: AuthService
@@ -24,6 +25,12 @@ struct EditPostView: View {
 	@State private var showTagFriendsSheet = false
 	@State private var allUsers: [CYUser] = []
 	@State private var isLoadingUsers = false
+	
+	init(post: CollectionPost, collection: CollectionData?) {
+		self.initialPost = post
+		self.collection = collection
+		_post = State(initialValue: post)
+	}
 	
 	var body: some View {
 		VStack(alignment: .leading, spacing: 0) {
@@ -47,6 +54,14 @@ struct EditPostView: View {
 		.task {
 			await loadInitialData()
 			await loadAllUsers()
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostUpdated"))) { notification in
+			if let updatedPostId = notification.object as? String, updatedPostId == post.id {
+				// Reload post data when post is updated
+				Task {
+					await reloadPost()
+				}
+			}
 		}
 		.sheet(isPresented: $showTagFriendsSheet) {
 			TagFriendsView(
@@ -271,7 +286,7 @@ struct EditPostView: View {
 			VStack {
 				Divider().background(Color.gray)
 				Toggle(isOn: $allowReplies) {
-					Text("Allow Replies")
+					Text("Allow Comments")
 						.foregroundColor(colorScheme == .dark ? .white : .black)
 				}
 				.toggleStyle(SwitchToggleStyle(tint: .blue))
@@ -309,12 +324,33 @@ struct EditPostView: View {
 	
 	// MARK: - Data Loading
 	
+	private func reloadPost() async {
+		do {
+			if let updatedPost = try await CollectionService.shared.getPostById(postId: post.id) {
+				await MainActor.run {
+					self.post = updatedPost
+					// Update the form fields with the new post data
+					caption = updatedPost.caption ?? ""
+					allowDownload = updatedPost.allowDownload
+					allowReplies = updatedPost.allowReplies
+					print("✅ EditPostView: Reloaded post - allowDownload: \(updatedPost.allowDownload), allowReplies: \(updatedPost.allowReplies)")
+				}
+			}
+		} catch {
+			print("❌ Error reloading post in EditPostView: \(error)")
+		}
+	}
+	
 	private func loadInitialData() async {
 		await MainActor.run {
 			// Load current post data
 			caption = post.caption ?? ""
 			allowDownload = post.allowDownload
 			allowReplies = post.allowReplies
+			print("🔍 EditPostView.loadInitialData: Loading post \(post.id)")
+			print("   - post.allowDownload: \(post.allowDownload)")
+			print("   - post.allowReplies: \(post.allowReplies)")
+			print("   - Setting state: allowDownload=\(allowDownload), allowReplies=\(allowReplies)")
 			
 			// Load tagged users
 			if !post.taggedUsers.isEmpty {
@@ -362,6 +398,8 @@ struct EditPostView: View {
 		do {
 			let taggedUserIds = taggedFriends.map { $0.id }
 			
+			print("🔍 EditPostView: Updating post \(post.id) with allowDownload=\(allowDownload), allowReplies=\(allowReplies)")
+			
 			try await CollectionService.shared.updatePost(
 				postId: post.id,
 				caption: caption.isEmpty ? "" : caption, // Empty string to remove caption
@@ -370,7 +408,7 @@ struct EditPostView: View {
 				allowReplies: allowReplies
 			)
 			
-			print("✅ Post updated successfully")
+			print("✅ Post updated successfully with allowDownload=\(allowDownload), allowReplies=\(allowReplies)")
 			
 			// Post notification to refresh views
 			await MainActor.run {

@@ -80,23 +80,48 @@ struct CollectionRowDesign: View {
 	}
 	
 	@StateObject private var cyServiceManager = CYServiceManager.shared
+	@StateObject private var requestStateManager = CollectionRequestStateManager.shared
 	@State private var previewPosts: [CollectionPost] = []
 	@State private var ownerProfileImageURL: String? // Store owner's profile image URL
 	@State private var postGridRefreshId = UUID() // Force refresh when posts change
 	@State private var postListener: ListenerRegistration? // Firestore listener for real-time updates
+	@State private var ownerProfileListener: ListenerRegistration? // Real-time listener for owner's profile
+	@State private var isOwnerBlocked = false // Track if owner is mutually blocked (either direction)
+	@Environment(\.horizontalSizeClass) var horizontalSizeClass
+	@Environment(\.colorScheme) var colorScheme
+	
+	// Observe ServiceManager changes for real-time updates
+	private var currentUser: CYServiceManager.CurrentUser? {
+		cyServiceManager.currentUser
+	}
+	
+	// iPad detection
+	private var isIPad: Bool {
+		horizontalSizeClass == .regular
+	}
 	
 	var body: some View {
-		VStack(alignment: .leading, spacing: 12) {
+		// Don't render if collection is hidden or owner is mutually blocked - check reactively via StateObject
+		if cyServiceManager.isCollectionHidden(collectionId: collection.id) || isOwnerBlocked {
+			EmptyView()
+		} else {
+			collectionRowContent
+		}
+	}
+	
+	private var collectionRowContent: some View {
+		VStack(alignment: .leading, spacing: isIPad ? 16 : 12) {
 			// Header: Image + Name + Buttons
-			HStack(spacing: 12) {
+			HStack(spacing: isIPad ? 16 : 12) {
 				// Profile Image Placeholder
 				profileImageView
 				
 				// Name + Type/Members
-				VStack(alignment: .leading, spacing: 4) {
+				VStack(alignment: .leading, spacing: isIPad ? 6 : 4) {
 					HStack {
 						Text(collection.name)
-							.font(.headline)
+							.font(isIPad ? .title3 : .headline)
+							.fontWeight(isIPad ? .semibold : .regular)
 							.foregroundColor(.primary)
 						
 						// Follow button (next to collection name)
@@ -106,7 +131,7 @@ struct CollectionRowDesign: View {
 					}
 					
 					Text(memberLabel)
-						.font(.caption)
+						.font(isIPad ? .subheadline : .caption)
 						.foregroundColor(.secondary)
 				}
 				
@@ -115,6 +140,7 @@ struct CollectionRowDesign: View {
 				// Lock icon for private collections (positioned before action button)
 				if !collection.isPublic {
 					Image(systemName: "lock.fill")
+						.font(isIPad ? .title3 : .body)
 						.foregroundColor(.primary)
 				}
 				
@@ -124,43 +150,73 @@ struct CollectionRowDesign: View {
 						.zIndex(1) // Ensure button is on top layer
 				}
 			}
-			.padding(.horizontal)
+			.padding(.horizontal, isIPad ? 20 : 16)
 			
 			// Description
 			if !collection.description.isEmpty {
 				Text(collection.description)
-					.font(.caption)
+					.font(isIPad ? .body : .caption)
 					.foregroundColor(.secondary)
-					.lineLimit(2)
-					.padding(.horizontal)
+					.lineLimit(isIPad ? 3 : 2)
+					.padding(.horizontal, isIPad ? 20 : 16)
 			}
 			
 			// Grid with actual post images
 			postGrid
+		}
+		.onChange(of: cyServiceManager.currentUser) { oldValue, newValue in
+			// Real-time update when user profile changes via ServiceManager
+			// IMMEDIATELY update owner profile image if this is current user's collection (like ProfileView does)
+			if collection.ownerId == Auth.auth().currentUser?.uid, let cyUser = newValue {
+				// Immediately update owner profile image from ServiceManager
+				ownerProfileImageURL = cyUser.profileImageURL
+				print("🔄 CollectionRowDesign: Immediately updated owner profile image from ServiceManager")
+			}
+			
+			// Check mutual blocking status when current user's block list changes
+			Task {
+				let mutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: collection.ownerId)
+				await MainActor.run {
+					isOwnerBlocked = mutuallyBlocked
+					if mutuallyBlocked {
+						print("🚫 CollectionRowDesign: Collection owner '\(collection.ownerId)' is mutually blocked, clearing cache and posts")
+						CollectionPostsCache.shared.clearCache(for: collection.id)
+						previewPosts = []
+						postGridRefreshId = UUID()
+					}
+				}
+			}
 		}
 		.onAppear {
 			// Always check cache first and use it if available
 			if let cached = CollectionPostsCache.shared.getCachedPosts(for: collection.id), !cached.isEmpty {
 				// Use cached posts immediately - don't reload
 				previewPosts = cached
+				#if VERBOSE_DEBUG
 				print("✅ CollectionRowDesign: Using cached posts for collection '\(collection.name)' (ID: \(collection.id)) - \(cached.count) posts")
+				#endif
 			} else if previewPosts.isEmpty {
 				// Only load if we have no posts at all (neither cached nor in state)
 				// This ensures posts are always loaded, even for deleted collections
+				#if VERBOSE_DEBUG
 				print("🔄 CollectionRowDesign: No cached posts found, loading for collection '\(collection.name)' (ID: \(collection.id))")
+				#endif
 				loadPreviewPosts()
 			} else {
 				// If we have posts in state but no cache, update cache to persist them
 				CollectionPostsCache.shared.setCachedPosts(previewPosts, for: collection.id)
 				print("✅ CollectionRowDesign: Persisting existing posts to cache for collection '\(collection.name)' (ID: \(collection.id)) - \(previewPosts.count) posts")
 			}
-			// Set up real-time listener for posts in this collection
-			setupPostListener()
+			// Set up real-time listener for owner's profile (so other users see updates)
+			// NOTE: Removed post listener for scalability - using notification-based updates instead
+			setupOwnerProfileListener()
 		}
 		.onChange(of: collection.id) { oldId, newId in
 			// Reload posts when collection changes
 			if oldId != newId {
+				#if VERBOSE_DEBUG
 				print("🔄 CollectionRowDesign: Collection ID changed from \(oldId) to \(newId), reloading posts")
+				#endif
 				// Check cache for new collection first - don't clear unnecessarily
 				if let cached = CollectionPostsCache.shared.getCachedPosts(for: newId), !cached.isEmpty {
 					previewPosts = cached
@@ -185,27 +241,67 @@ struct CollectionRowDesign: View {
 			
 			if let collectionId = createdCollectionId,
 			   collectionId == collection.id {
+				#if VERBOSE_DEBUG
 				print("🔄 CollectionRowDesign: New post created in collection '\(collection.name)', reloading preview posts")
+				#endif
 				// Clear cache immediately so all users see the update
 				CollectionPostsCache.shared.clearCache(for: collection.id)
 				loadPreviewPosts(forceRefresh: true)
 			}
 		}
 		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("PostDeleted"))) { notification in
-			// Reload posts when a post is deleted from this collection
+			// Immediately remove deleted post from preview and reload if needed
 			if let userInfo = notification.userInfo,
 			   let deletedCollectionId = userInfo["collectionId"] as? String,
-			   deletedCollectionId == collection.id {
-				print("🔄 CollectionRowDesign: Post deleted from collection '\(collection.name)', reloading preview posts")
+			   deletedCollectionId == collection.id,
+			   let deletedPostId = userInfo["postId"] as? String {
+				print("🔄 CollectionRowDesign: Post deleted from collection '\(collection.name)', removing from preview")
+				
+				// Immediately remove the deleted post from previewPosts array
+				previewPosts.removeAll { $0.id == deletedPostId }
+				
+				// Force UI refresh
+				postGridRefreshId = UUID()
+				
+				// Clear cache and reload to get fresh posts
 				CollectionPostsCache.shared.clearCache(for: collection.id)
 				loadPreviewPosts(forceRefresh: true)
 			}
 		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProfileUpdated"))) { notification in
+			// Immediately reload owner profile image when profile is updated
+			if let userId = notification.userInfo?["userId"] as? String,
+			   userId == collection.ownerId {
+				// If it's the current user, update immediately from ServiceManager
+				if userId == Auth.auth().currentUser?.uid, let cyUser = cyServiceManager.currentUser {
+					ownerProfileImageURL = cyUser.profileImageURL
+					#if VERBOSE_DEBUG
+					print("✅ CollectionRowDesign: Immediately updated owner profile image from ServiceManager")
+				#endif
+				} else {
+					// For other users, reload async
+					loadOwnerProfileImage()
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("OwnerProfileImageUpdated"))) { notification in
+			// Update owner profile image when real-time listener detects changes
+			if let collectionId = notification.object as? String,
+			   collectionId == collection.id,
+			   let ownerId = notification.userInfo?["ownerId"] as? String,
+			   ownerId == collection.ownerId,
+			   let newProfileImageURL = notification.userInfo?["profileImageURL"] as? String {
+				ownerProfileImageURL = newProfileImageURL
+				print("✅ CollectionRowDesign: Updated owner profile image from real-time listener")
+			}
+		}
 		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionPostsUpdated"))) { notification in
-			// Reload posts when real-time listener detects changes
+			// Reload posts when notification is received (replaces expensive real-time listener)
 			if let updatedCollectionId = notification.object as? String,
 			   updatedCollectionId == collection.id {
-				print("🔄 CollectionRowDesign: Real-time posts update for collection '\(collection.name)', reloading preview posts")
+				#if VERBOSE_DEBUG
+				print("🔄 CollectionRowDesign: Received CollectionPostsUpdated notification, reloading posts")
+				#endif
 				loadPreviewPosts(forceRefresh: true)
 			}
 		}
@@ -224,7 +320,9 @@ struct CollectionRowDesign: View {
 			// Posts should still be visible in deleted collections view
 			if let deletedCollectionId = notification.object as? String,
 			   deletedCollectionId == collection.id {
+				#if VERBOSE_DEBUG
 				print("🔄 CollectionRowDesign: Collection '\(collection.name)' was deleted, ensuring posts are cached")
+				#endif
 				// Don't clear cache - keep posts visible in deleted collections
 				// If we don't have posts loaded, load them now
 				if previewPosts.isEmpty {
@@ -232,6 +330,68 @@ struct CollectionRowDesign: View {
 				} else {
 					// Ensure existing posts are cached
 					CollectionPostsCache.shared.setCachedPosts(previewPosts, for: collection.id)
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionHidden"))) { notification in
+			// When a collection is hidden, it should disappear completely
+			if let hiddenCollectionId = notification.object as? String,
+			   hiddenCollectionId == collection.id {
+				print("🚫 CollectionRowDesign: Collection '\(collection.name)' was hidden, clearing cache and posts")
+				// Clear cache and posts - collection should not be visible
+				CollectionPostsCache.shared.clearCache(for: collection.id)
+				previewPosts = []
+				postGridRefreshId = UUID()
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUnhidden"))) { notification in
+			// When a collection is unhidden, reload it
+			if let unhiddenCollectionId = notification.object as? String,
+			   unhiddenCollectionId == collection.id {
+				print("✅ CollectionRowDesign: Collection '\(collection.name)' was unhidden, reloading")
+				// Reload posts when collection is unhidden
+				loadPreviewPosts(forceRefresh: true)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { notification in
+			// Check mutual blocking when any user is blocked (could be owner or current user)
+			Task {
+				let mutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: collection.ownerId)
+				await MainActor.run {
+					isOwnerBlocked = mutuallyBlocked
+					if mutuallyBlocked {
+						print("🚫 CollectionRowDesign: Collection owner '\(collection.ownerId)' is mutually blocked, hiding collection")
+						// Clear cache and posts - collection should not be visible
+						CollectionPostsCache.shared.clearCache(for: collection.id)
+						previewPosts = []
+						postGridRefreshId = UUID()
+					}
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { notification in
+			// Check mutual blocking when any user is unblocked
+			// This could be the owner OR a member who has posts in this collection
+			Task {
+				let mutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: collection.ownerId)
+				let isCollectionHidden = cyServiceManager.isCollectionHidden(collectionId: collection.id)
+				
+				await MainActor.run {
+					isOwnerBlocked = mutuallyBlocked
+					
+					// Only reload if collection is visible (not hidden and owner not blocked)
+					if !mutuallyBlocked && !isCollectionHidden {
+						if let unblockedUserId = notification.userInfo?["unblockedUserId"] as? String {
+							print("✅ CollectionRowDesign: User '\(unblockedUserId)' was unblocked, reloading posts to show their content in collection '\(collection.name)'")
+						} else {
+							print("✅ CollectionRowDesign: User was unblocked, reloading posts to show any previously hidden content in collection '\(collection.name)'")
+						}
+						// Reload posts to show any posts from the unblocked user (could be owner or member)
+						loadPreviewPosts(forceRefresh: true)
+					} else if !mutuallyBlocked {
+						// Owner is no longer blocked, but collection might be hidden
+						print("✅ CollectionRowDesign: Collection owner '\(collection.ownerId)' is no longer mutually blocked")
+					}
 				}
 			}
 		}
@@ -246,7 +406,9 @@ struct CollectionRowDesign: View {
 				} else {
 					// Cache is empty (lost on app exit), reload from Firebase
 					// This is especially important for deleted collections
+					#if VERBOSE_DEBUG
 					print("🔄 CollectionRowDesign: App returned to foreground, no cache found, reloading posts for '\(collection.name)' (ID: \(collection.id))")
+					#endif
 					loadPreviewPosts(forceRefresh: true)
 				}
 			} else {
@@ -256,37 +418,43 @@ struct CollectionRowDesign: View {
 			}
 		}
 		.onDisappear {
-			// Clean up listener when view disappears
+			// Clean up listeners when view disappears
 			postListener?.remove()
 			postListener = nil
-		}
-		.onDisappear {
-			// Clean up listener when view disappears
-			postListener?.remove()
-			postListener = nil
+			ownerProfileListener?.remove()
+			ownerProfileListener = nil
 		}
 	}
 	
 	// MARK: - Profile Image
 	private var profileImageView: some View {
 		Button(action: onProfileTapped) {
+			let imageSize: CGFloat = isIPad ? 56 : 44
 			if let imageURL = collection.imageURL, !imageURL.isEmpty {
 				// Use collection's profile image if available
-				CachedProfileImageView(url: imageURL, size: 50)
+				CachedProfileImageView(url: imageURL, size: imageSize)
 					.clipShape(Circle())
 			} else {
 				// Use owner's profile image as fallback (not current user's)
 				if let ownerImageURL = ownerProfileImageURL, !ownerImageURL.isEmpty {
-					CachedProfileImageView(url: ownerImageURL, size: 50)
+					CachedProfileImageView(url: ownerImageURL, size: imageSize)
 						.clipShape(Circle())
 				} else {
 					// Fallback to default icon if owner has no profile image
-					DefaultProfileImageView(size: 50)
+					DefaultProfileImageView(size: imageSize)
 				}
 			}
 		}
 		.buttonStyle(.plain)
 		.onAppear {
+			// Check mutual blocking status
+			Task {
+				let mutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: collection.ownerId)
+				await MainActor.run {
+					isOwnerBlocked = mutuallyBlocked
+				}
+			}
+			
 			// Load owner's profile image if collection has no imageURL
 			if collection.imageURL?.isEmpty != false {
 				loadOwnerProfileImage()
@@ -313,6 +481,43 @@ struct CollectionRowDesign: View {
 		}
 	}
 	
+	// MARK: - Real-time Listener for Owner's Profile
+	private func setupOwnerProfileListener() {
+		// Remove existing listener if any
+		ownerProfileListener?.remove()
+		
+		// Set up real-time Firestore listener for the owner's profile
+		// This allows other users to see real-time updates when the owner edits their profile
+		let db = Firestore.firestore()
+		let collectionId = collection.id
+		let ownerId = collection.ownerId
+		ownerProfileListener = db.collection("users").document(ownerId).addSnapshotListener { snapshot, error in
+			Task { @MainActor in
+				
+				if let error = error {
+					print("❌ CollectionRowDesign: Error listening to owner profile updates: \(error.localizedDescription)")
+					return
+				}
+				
+				guard let snapshot = snapshot, let data = snapshot.data() else {
+					return
+				}
+				
+				// Immediately update owner profile image from Firestore (real-time)
+				// Use NotificationCenter to update the view since we can't capture self in struct
+				let newProfileImageURL = data["profileImageURL"] as? String
+				NotificationCenter.default.post(
+					name: Notification.Name("OwnerProfileImageUpdated"),
+					object: collectionId,
+					userInfo: ["ownerId": ownerId, "profileImageURL": newProfileImageURL as Any]
+				)
+				#if VERBOSE_DEBUG
+				print("🔄 CollectionRowDesign: Owner profile image updated in real-time from Firestore")
+				#endif
+			}
+		}
+	}
+	
 	// MARK: - Member Label
 	private var memberLabel: String {
 		if collection.type == "Individual" {
@@ -325,12 +530,13 @@ struct CollectionRowDesign: View {
 	// MARK: - Follow Button
 	private var followButton: some View {
 		Button(action: onFollowTapped) {
+			let buttonSize: CGFloat = isIPad ? 36 : 28
 			Circle()
 				.fill(isFollowing ? Color.blue : Color(.systemGray4))
-				.frame(width: 28, height: 28)
+				.frame(width: buttonSize, height: buttonSize)
 				.overlay(
 					Image(systemName: isFollowing ? "checkmark" : "plus")
-						.font(.caption)
+						.font(isIPad ? .subheadline : .caption)
 						.fontWeight(.bold)
 						.foregroundColor(isFollowing ? .white : .primary)
 				)
@@ -375,33 +581,21 @@ struct CollectionRowDesign: View {
 	}
 	
 	private var actionButton: some View {
-		Button(action: {
-			// Explicitly call the action handler
-			print("🔘 CollectionRowDesign: Action button tapped - \(actionButtonText)")
-			onActionTapped()
-		}) {
+		Button(action: onActionTapped) {
 			Text(actionButtonText)
-				.font(.subheadline)
+				.font(isIPad ? .body : .subheadline)
 				.fontWeight(.medium)
 				.foregroundColor(actionButtonTextColor)
-				.padding(.horizontal, 12)
-				.padding(.vertical, 6)
+				.padding(.horizontal, isIPad ? 16 : 12)
+				.padding(.vertical, isIPad ? 8 : 6)
 				.background(actionButtonBackground)
-				.cornerRadius(6)
+				.cornerRadius(isIPad ? 8 : 6)
 				.overlay(
-					RoundedRectangle(cornerRadius: 6)
+					RoundedRectangle(cornerRadius: isIPad ? 8 : 6)
 						.stroke(actionButtonBorderColor, lineWidth: 1)
 				)
 		}
 		.buttonStyle(.plain)
-		.allowsHitTesting(true)
-		.contentShape(Rectangle())
-		.highPriorityGesture(
-			TapGesture().onEnded {
-				print("🔘 CollectionRowDesign: High priority gesture - \(actionButtonText)")
-				onActionTapped()
-			}
-		)
 	}
 	
 	private var actionButtonText: String {
@@ -412,7 +606,8 @@ struct CollectionRowDesign: View {
 			if isMember || isOwner {
 				return "" // Shouldn't show, but return empty if it does
 			}
-			return hasRequested ? "Requested" : "Request"
+			// Read directly from state manager (same as follow button pattern)
+			return requestStateManager.hasPendingRequest(for: collection.id) ? "Requested" : "Request"
 		case "Open":
 			// Only show Join button (Leave is only in CYInsideCollectionView)
 			// Should not reach here if user is member/owner (button shouldn't show)
@@ -426,21 +621,21 @@ struct CollectionRowDesign: View {
 	}
 	
 	private var actionButtonTextColor: Color {
-		if collection.type == "Request" && hasRequested {
+		if collection.type == "Request" && requestStateManager.hasPendingRequest(for: collection.id) {
 			return .blue
 		}
 		return .primary
 	}
 	
 	private var actionButtonBackground: Color {
-		if collection.type == "Request" && hasRequested {
+		if collection.type == "Request" && requestStateManager.hasPendingRequest(for: collection.id) {
 			return .blue.opacity(0.1)
 		}
 		return Color(.systemGray6)
 	}
 	
 	private var actionButtonBorderColor: Color {
-		if collection.type == "Request" && hasRequested {
+		if collection.type == "Request" && requestStateManager.hasPendingRequest(for: collection.id) {
 			return .blue
 		}
 		return .clear
@@ -449,23 +644,29 @@ struct CollectionRowDesign: View {
 	// MARK: - Post Grid
 	private var postGrid: some View {
 		Button(action: onCollectionTapped) {
-		HStack(spacing: 8) {
+			// Always show 4 posts on all devices (iPhone and iPad)
+			// iPad sizes are bigger to fill the space better
+			let thumbnailWidth: CGFloat = isIPad ? 180 : 90
+			let thumbnailHeight: CGFloat = isIPad ? 260 : 130
+			let spacing: CGFloat = isIPad ? 18 : 8
+			
+			HStack(spacing: spacing) {
 			ForEach(0..<4, id: \.self) { idx in
 				if idx < previewPosts.count {
 					let post = previewPosts[idx]
-					postThumbnailView(post: post, index: idx)
+						postThumbnailView(post: post, index: idx, width: thumbnailWidth, height: thumbnailHeight)
 				} else {
-					// Show gray placeholder
+					// Show placeholder - color scheme aware
 					Rectangle()
-						.fill(Color.gray.opacity(0.3))
-						.frame(width: 90, height: 130)
+						.fill(colorScheme == .dark ? Color.white.opacity(0.3) : Color.gray.opacity(0.3))
+							.frame(width: thumbnailWidth, height: thumbnailHeight)
 						.clipped()
 						.id("placeholder_\(idx)")
 				}
 			}
 		}
-		.padding(.horizontal, 16)
-		.padding(.bottom, 20)
+			.padding(.horizontal, isIPad ? 20 : 16)
+			.padding(.bottom, isIPad ? 24 : 20)
 		}
 		.buttonStyle(.plain)
 		.id("postGrid_\(postGridRefreshId)_\(previewPosts.count)")
@@ -497,7 +698,7 @@ struct CollectionRowDesign: View {
 	
 	// Helper view for post thumbnail
 	@ViewBuilder
-	private func postThumbnailView(post: CollectionPost, index: Int) -> some View {
+	private func postThumbnailView(post: CollectionPost, index: Int, width: CGFloat, height: CGFloat) -> some View {
 		let imageURL = getImageURL(for: post)
 		let hasVideo = post.mediaItems.contains { $0.isVideo }
 		let videoDuration = post.mediaItems.first(where: { $0.isVideo })?.videoDuration
@@ -509,14 +710,14 @@ struct CollectionRowDesign: View {
 					.indicator(.activity)
 					.transition(.fade(duration: 0.2))
 					.aspectRatio(contentMode: .fill)
-					.frame(width: 90, height: 130)
+					.frame(width: width, height: height)
 					.clipped()
 					.cornerRadius(0)
 					.id("post_\(post.id)_\(index)_\(finalImageURL)")
 			} else {
 				Rectangle()
 					.fill(Color.gray.opacity(0.3))
-					.frame(width: 90, height: 130)
+					.frame(width: width, height: height)
 					.clipped()
 					.id("post_\(post.id)_\(index)_empty")
 			}
@@ -527,20 +728,20 @@ struct CollectionRowDesign: View {
 					HStack {
 						Spacer()
 						Text(formatVideoDuration(duration))
-							.font(.caption2)
+							.font(isIPad ? .caption : .caption2)
 							.fontWeight(.semibold)
 							.foregroundColor(.white)
-							.padding(.horizontal, 6)
-							.padding(.vertical, 3)
+							.padding(.horizontal, isIPad ? 8 : 6)
+							.padding(.vertical, isIPad ? 4 : 3)
 							.background(Color.black.opacity(0.7))
-							.cornerRadius(4)
-							.padding(8)
+							.cornerRadius(isIPad ? 5 : 4)
+							.padding(isIPad ? 10 : 8)
 					}
 					Spacer()
 				}
 			}
 		}
-		.frame(width: 90, height: 130)
+		.frame(width: width, height: height)
 	}
 	
 	// Helper to format video duration - matching PinterestPostGrid format
@@ -554,6 +755,14 @@ struct CollectionRowDesign: View {
 	private func loadPreviewPosts(forceRefresh: Bool = false) {
 		let collectionId = collection.id
 		
+		// Don't load if collection is hidden or owner is mutually blocked
+		if cyServiceManager.isCollectionHidden(collectionId: collectionId) || isOwnerBlocked {
+			print("🚫 CollectionRowDesign: Collection '\(collection.name)' is hidden or owner is mutually blocked, not loading posts")
+			previewPosts = []
+			CollectionPostsCache.shared.clearCache(for: collectionId)
+			return
+		}
+		
 		// Don't reload if already loading
 		if CollectionPostsCache.shared.isLoading(for: collectionId) {
 			print("⏭️ CollectionRowDesign: Already loading posts for collection '\(collection.name)' (ID: \(collectionId)), skipping")
@@ -563,7 +772,9 @@ struct CollectionRowDesign: View {
 		// If we have cached posts and not forcing refresh, use cache
 		if !forceRefresh, let cached = CollectionPostsCache.shared.getCachedPosts(for: collectionId), !cached.isEmpty {
 			previewPosts = cached
+			#if VERBOSE_DEBUG
 			print("⏭️ CollectionRowDesign: Using cached posts for collection '\(collection.name)' (ID: \(collectionId)) - \(cached.count) posts")
+			#endif
 			return 
 		}
 		
@@ -579,16 +790,29 @@ struct CollectionRowDesign: View {
 		Task {
 			do {
 				// Fetch posts from collection (prioritize pinned, then most recent)
-				var allPosts = try await CollectionService.shared.getCollectionPostsFromFirebase(collectionId: collection.id)
-				print("📦 CollectionRowDesign: Fetched \(allPosts.count) posts from Firebase")
+				// Load only 4 posts for preview (paginated)
+				let (posts, _, _) = try await PostService.shared.getCollectionPostsPaginated(
+					collectionId: collection.id,
+					limit: 4,
+					lastDocument: nil,
+					sortBy: "Newest to Oldest"
+				)
+				var allPosts = posts
+				#if VERBOSE_DEBUG
+				print("📦 CollectionRowDesign: Fetched \(allPosts.count) posts from Firebase (limited to 4 for preview)")
+				#endif
 				
 				// For deleted collections, skip filtering - user should see all posts
 				// For regular collections, filter out posts from hidden collections and blocked users
 				if !isDeletedCollection {
 				allPosts = await CollectionService.filterPosts(allPosts)
+				#if VERBOSE_DEBUG
 				print("📦 CollectionRowDesign: After filtering: \(allPosts.count) posts remaining")
+				#endif
 				} else {
+					#if VERBOSE_DEBUG
 					print("📦 CollectionRowDesign: Skipping filtering for deleted collection - showing all \(allPosts.count) posts")
+					#endif
 				}
 				
 				// Sort EXACTLY like CYInsideCollectionView: pinned first (by pinnedAt, most recent first), then by date (newest first)
@@ -611,7 +835,9 @@ struct CollectionRowDesign: View {
 				
 				// Take first 4 posts for the grid (pinned first, then most recent)
 				let displayPosts = Array(sortedPosts.prefix(4))
+				#if VERBOSE_DEBUG
 				print("✅ CollectionRowDesign: Displaying \(displayPosts.count) posts in preview grid (out of \(sortedPosts.count) total)")
+				#endif
 				
 				// Log each post's details with image URL info
 				for (index, post) in displayPosts.enumerated() {
@@ -631,7 +857,9 @@ struct CollectionRowDesign: View {
 							foundImageURL = firstMedia.thumbnailURL ?? firstMedia.imageURL
 						}
 					}
+					#if VERBOSE_DEBUG
 					print("   📸 Post \(index + 1): ID=\(post.id), imageURL=\(foundImageURL ?? "nil"), isPinned=\(post.isPinned), mediaItemsCount=\(post.mediaItems.count)")
+					#endif
 				}
 				
 				await MainActor.run {
@@ -660,7 +888,9 @@ struct CollectionRowDesign: View {
 						if foundImageURL == nil, let firstMedia = post.firstMediaItem {
 							foundImageURL = firstMedia.thumbnailURL ?? firstMedia.imageURL
 						}
+						#if VERBOSE_DEBUG
 						print("      Post \(idx): \(post.id), willDisplayImage=\(foundImageURL != nil ? "YES (\(foundImageURL!))" : "NO")")
+					#endif
 					}
 				}
 			} catch {
@@ -674,41 +904,13 @@ struct CollectionRowDesign: View {
 	}
 	
 	// MARK: - Real-time Post Listener
+	// REMOVED: Real-time listener for posts (expensive at scale)
+	// Using notification-based updates instead (PostCreated, PostDeleted notifications)
+	// This reduces Firebase costs and improves scalability
 	private func setupPostListener() {
-		// Remove existing listener
-		postListener?.remove()
-		
-		let db = Firestore.firestore()
-		// Listen to posts in this collection for real-time updates
-		postListener = db.collection("posts")
-			.whereField("collectionId", isEqualTo: collection.id)
-			.order(by: "isPinned", descending: true)
-			.order(by: "createdAt", descending: true)
-			.limit(to: 4)
-			.addSnapshotListener { [collection] snapshot, error in
-				guard let snapshot = snapshot, error == nil else {
-					if let error = error {
-						print("❌ CollectionRowDesign: Error listening to posts: \(error.localizedDescription)")
-					}
-					return
-				}
-				
-				// Only reload if there are actual changes (not just initial load)
-				if !snapshot.documentChanges.isEmpty {
-					print("🔄 CollectionRowDesign: Real-time update detected for collection '\(collection.name)', reloading preview posts")
-					// Clear cache and reload
-					CollectionPostsCache.shared.clearCache(for: collection.id)
-					Task { @MainActor in
-						// Small delay to ensure Firestore has the latest data
-						try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
-						// Trigger reload via notification
-						NotificationCenter.default.post(
-							name: Notification.Name("CollectionPostsUpdated"),
-							object: collection.id
-						)
-					}
-				}
-			}
+		// No longer using real-time listener - removed for scalability
+		// Posts are updated via notifications (PostCreated, PostDeleted, etc.)
+		// This is much more cost-effective at scale
 	}
 }
 

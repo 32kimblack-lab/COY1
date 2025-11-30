@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title><%= escapeHtml(user.name || user.username) %> - COY</title>
   <meta name="description" content="View <%= escapeHtml(user.name || user.username) %>'s profile on COY">
   <meta property="og:title" content="<%= escapeHtml(user.name || user.username) %> - COY">
@@ -36,6 +36,45 @@
       overflow-x: hidden;
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
+      margin: 0;
+      padding: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      touch-action: pan-y; /* Allow vertical scrolling but prevent zoom */
+      -webkit-touch-callout: none; /* Prevent callout menu */
+      -webkit-user-select: none; /* Prevent text selection */
+      user-select: none;
+    }
+    
+    /* App Store Banner - Small, top-right corner, white background */
+    .app-store-banner {
+      position: fixed !important;
+      top: 12px !important;
+      right: 12px !important;
+      background: white !important;
+      color: #000 !important;
+      padding: 8px 14px !important;
+      text-align: center !important;
+      z-index: 999999 !important;
+      cursor: pointer !important;
+      font-weight: 600 !important;
+      font-size: 13px !important;
+      text-decoration: none !important;
+      display: block !important;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
+      border-radius: 20px !important;
+      margin: 0 !important;
+      line-height: 1.3 !important;
+    }
+    
+    .app-store-banner:hover {
+      opacity: 0.9;
+      transform: scale(1.05);
+    }
+    
+    .app-store-banner:active {
+      opacity: 0.8;
     }
     
     .container {
@@ -43,14 +82,23 @@
       margin: 0;
       padding: 0;
       background-color: #000;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
     }
     
-    /* Profile Header Section - EXACT match to ViewerProfileView */
+    /* Profile Header Section - Fixed at top, matches ViewerProfileView */
     .profile-header {
-      position: relative;
+      position: fixed;
+      top: 70px; /* Below banner */
+      left: 0;
+      right: 0;
       width: 100%;
       height: 200px; /* Total height: 105 (bg) + 35 (half profile) + 60 (username/name area) */
       overflow: hidden;
+      z-index: 100;
+      background-color: #000;
     }
     
     .background-image {
@@ -89,6 +137,7 @@
       text-align: center;
       width: 100%;
       z-index: 10;
+      padding-bottom: 24px; /* Add spacing below name before collections - user feedback */
     }
     
     .profile-username {
@@ -104,30 +153,37 @@
       color: #fff;
     }
     
-    /* Collections Section - EXACT match to ViewerProfileView */
+    /* Collections Section - Scrollable, matches ViewerProfileView */
     .collections-section {
-      margin-top: -20px; /* Matches ViewerProfileView line 70 */
+      margin-top: 200px; /* Just header height (banner is small in corner) */
       padding: 0;
+      padding-top: 16px; /* Additional top padding for spacing - user feedback */
       background-color: #000;
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
     }
     
     .collection-row {
       padding: 8px 16px; /* top: 8, leading: 16, bottom: 8, trailing: 16 - matches ViewerProfileView line 388 */
-      margin-bottom: 0;
+      margin-bottom: 16px; /* Add spacing between collection rows - user feedback */
       border-bottom: none;
       background-color: #000;
+      overflow: visible; /* Ensure posts aren't cut off */
+      width: 100%;
     }
     
     .collection-header {
       display: flex;
       align-items: center;
       gap: 12px; /* spacing: 12 - matches CollectionRowDesign line 91 */
-      margin-bottom: 12px; /* VStack spacing: 12 - matches CollectionRowDesign line 89 */
+      margin-bottom: 16px; /* Increased spacing before post grid - user feedback */
     }
     
     .collection-profile-image {
-      width: 50px; /* size: 50 - matches CollectionRowDesign line 275 */
-      height: 50px; /* size: 50 - matches CollectionRowDesign line 275 */
+      width: 40px; /* Slightly smaller to match app better - user feedback */
+      height: 40px; /* Slightly smaller to match app better - user feedback */
       border-radius: 50%;
       object-fit: cover;
       background: #333;
@@ -174,18 +230,28 @@
     .post-grid {
       display: flex;
       gap: 8px; /* spacing: 8 - matches CollectionRowDesign line 452 */
-      padding: 0 16px 12px; /* padding horizontal: 16 - matches CollectionRowDesign line 127 */
+      padding: 0 16px 20px; /* padding horizontal: 16, bottom: 20 - matches CollectionRowDesign line 604 */
+      overflow: visible; /* Ensure posts aren't cut off */
+      width: 100%;
+      box-sizing: border-box;
     }
     
     .post-thumbnail {
       flex: 1;
-      width: 90px; /* Matches CollectionRowDesign line 461 */
+      min-width: 0; /* Allow flex items to shrink */
+      width: auto; /* Use flex: 1 to fill space */
       height: 130px; /* Matches CollectionRowDesign line 461 */
       background: #222;
       border-radius: 0; /* cornerRadius: 0 - matches CollectionRowDesign line 514 */
       overflow: hidden;
       position: relative;
       flex-shrink: 0;
+      aspect-ratio: 90/130; /* Maintain aspect ratio while allowing width to grow */
+    }
+    
+    /* Hide posts beyond 4 on mobile */
+    .post-thumbnail:nth-child(n+5) {
+      display: none;
     }
     
     .post-thumbnail img {
@@ -215,10 +281,70 @@
       color: #999;
     }
     
+    /* iPad/Tablet responsive - show 4 posts with bigger sizes to match app */
+    @media (min-width: 769px) and (max-width: 1024px) {
+      .post-grid {
+        display: flex;
+        flex-wrap: nowrap;
+        gap: 16px; /* Increased spacing to match app (16px on iPad) */
+        padding: 0 20px 24px; /* Increased padding to match app */
+        justify-content: flex-start;
+        overflow: visible;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      
+      .post-thumbnail {
+        flex: 0 0 auto;
+        width: 150px; /* Increased to match app iPad size (150px) */
+        height: 220px; /* Increased to match app iPad size (220px) */
+        min-width: 150px;
+        max-width: 150px;
+        display: block;
+        overflow: visible;
+      }
+      
+      /* Hide posts beyond 4 on iPad (same as iPhone) */
+      .post-thumbnail:nth-child(n+5) {
+        display: none;
+      }
+      
+      .collection-row {
+        overflow: visible;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      
+      .collections-section {
+        overflow-x: hidden;
+        overflow-y: auto;
+      }
+      
+      .container {
+        overflow-x: hidden;
+        overflow-y: hidden;
+      }
+    }
+    
+    /* Desktop - show 4 posts like iPhone */
+    @media (min-width: 1025px) {
+      /* Hide posts beyond 4 on desktop (same as iPhone) */
+      .post-thumbnail:nth-child(n+5) {
+        display: none;
+      }
+    }
+    
     /* Responsive - maintain exact measurements on all screen sizes */
     @media (max-width: 768px) {
       .profile-header {
         height: 200px;
+        position: fixed;
+        top: 48px; /* Below banner */
+      }
+      
+      .collections-section {
+        margin-top: 248px; /* 48px (banner) + 200px (header) */
+        padding-top: 16px; /* Additional top padding - user feedback */
       }
       
       .background-image {
@@ -226,29 +352,53 @@
       }
       
       .profile-image-container {
-        top: 70px;
-        width: 70px;
-        height: 70px;
+        top: 75px; /* Adjusted for smaller image */
+        width: 60px; /* Smaller profile image - user feedback */
+        height: 60px;
       }
       
       .profile-image {
-        width: 70px;
-        height: 70px;
+        width: 60px; /* Smaller profile image - user feedback */
+        height: 60px;
       }
       
       .profile-info {
         top: 148px;
+        padding-bottom: 24px; /* Add spacing below name - user feedback */
       }
       
       .post-thumbnail {
-        width: 90px;
+        width: auto; /* Use flex: 1 to make wider - user feedback */
+        min-width: 0;
         height: 130px;
+        flex: 1;
+        aspect-ratio: 90/130;
+      }
+    }
+    
+    /* Ensure fixed header works on all devices */
+    @media (min-width: 769px) {
+      .profile-header {
+        position: fixed;
+        top: 0;
+      }
+      
+      .collections-section {
+        margin-top: 200px;
+        padding-top: 16px; /* Additional top padding - user feedback */
       }
     }
   </style>
 </head>
 <body>
-  <div class="container">
+  <!-- Small App Store Banner - Top Right Corner -->
+  <div id="app-store-banner" style="position: fixed !important; top: 12px !important; right: 12px !important; background: white !important; color: #000 !important; padding: 8px 14px !important; text-align: center !important; z-index: 999999 !important; font-weight: 600 !important; font-size: 13px !important; box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important; border-radius: 20px !important; margin: 0 !important; line-height: 1.3 !important; cursor: pointer !important;">
+    <a href="https://apps.apple.com/app/coy" id="app-store-link" style="color: #000 !important; text-decoration: none !important; display: block !important; white-space: nowrap !important;" target="_blank" onclick="window.location.href='https://apps.apple.com/app/coy'; return false;">
+      📱 Open in App
+    </a>
+  </div>
+  
+  <div class="container" style="margin-top: 0;">
     <!-- Profile Header - EXACT match to ViewerProfileView -->
     <div class="profile-header">
       <% if (user.backgroundImageURL && user.backgroundImageURL.trim() !== '') { %>
@@ -311,6 +461,7 @@
             <% } %>
             
             <!-- Post Grid - EXACT match to CollectionRowDesign: 90x130px, spacing 8px -->
+            <!-- Always show 4 posts on all devices -->
             <div class="post-grid">
               <% for (let i = 0; i < 4; i++) { %>
                 <% if (i < collection.previewPosts.length && collection.previewPosts[i] && collection.previewPosts[i].imageURL && collection.previewPosts[i].imageURL.trim() !== '') { %>
@@ -330,5 +481,166 @@
       <% } %>
     </div>
   </div>
+  
+  <script>
+    // App Store URL - redirect when user taps anywhere on profile
+    const APP_STORE_URL = 'https://apps.apple.com/app/coy';
+    
+    // CRITICAL: Ensure banner is ALWAYS visible - add it if missing (small, top-right corner)
+    document.addEventListener('DOMContentLoaded', function() {
+      var banner = document.getElementById('app-store-banner');
+      if (!banner) {
+        // Banner missing - create it immediately (small, white, top-right)
+        var newBanner = document.createElement('div');
+        newBanner.id = 'app-store-banner';
+        newBanner.style.cssText = 'position: fixed !important; top: 12px !important; right: 12px !important; background: white !important; color: #000 !important; padding: 8px 14px !important; text-align: center !important; z-index: 999999 !important; font-weight: 600 !important; font-size: 13px !important; box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important; border-radius: 20px !important; margin: 0 !important; line-height: 1.3 !important; cursor: pointer !important;';
+        newBanner.innerHTML = '<a href="' + APP_STORE_URL + '" style="color: #000 !important; text-decoration: none !important; display: block !important; white-space: nowrap !important;" target="_blank" onclick="window.location.href=\'' + APP_STORE_URL + '\'; return false;">📱 Open in App</a>';
+        document.body.insertBefore(newBanner, document.body.firstChild);
+        console.log('✅ Created App Store banner (was missing)');
+      } else {
+        // Banner exists - ensure it's visible
+        banner.style.display = 'block';
+        banner.style.visibility = 'visible';
+        banner.style.opacity = '1';
+        console.log('✅ App Store banner is visible');
+      }
+    });
+    
+    // Prevent zoom gestures
+    document.addEventListener('gesturestart', function(e) {
+      e.preventDefault();
+    });
+    
+    document.addEventListener('gesturechange', function(e) {
+      e.preventDefault();
+    });
+    
+    document.addEventListener('gestureend', function(e) {
+      e.preventDefault();
+    });
+    
+    // Prevent double-tap zoom
+    var lastTouchEnd = 0;
+    document.addEventListener('touchend', function(e) {
+      var now = Date.now();
+      if (now - lastTouchEnd <= 300) {
+        e.preventDefault();
+        // Redirect on double tap
+        window.location.href = APP_STORE_URL;
+      }
+      lastTouchEnd = now;
+    }, false);
+    
+    // Simple scroll detection
+    var isScrolling = false;
+    var scrollTimer = null;
+    
+    function handleScroll() {
+      isScrolling = true;
+      if (scrollTimer) clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(function() {
+        isScrolling = false;
+      }, 300);
+    }
+    
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    
+    document.addEventListener('DOMContentLoaded', function() {
+      var collectionsSection = document.querySelector('.collections-section');
+      if (collectionsSection) {
+        collectionsSection.addEventListener('scroll', handleScroll, { passive: true });
+      }
+    });
+    
+    // Track touch for tap detection
+    var touchStartX = 0;
+    var touchStartY = 0;
+    var touchStartTime = 0;
+    
+    document.addEventListener('touchstart', function(e) {
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      touchStartTime = Date.now();
+    }, { passive: true });
+    
+    document.addEventListener('touchend', function(e) {
+      if (!touchStartX || !touchStartY) return;
+      
+      var touchEndX = e.changedTouches[0].clientX;
+      var touchEndY = e.changedTouches[0].clientY;
+      var moveX = Math.abs(touchEndX - touchStartX);
+      var moveY = Math.abs(touchEndY - touchStartY);
+      var moveTime = Date.now() - touchStartTime;
+      
+      // If small movement (<30px) and quick (<500ms), it's a tap - redirect!
+      if (moveX < 30 && moveY < 30 && moveTime < 500 && !isScrolling) {
+        window.location.href = APP_STORE_URL;
+      }
+      
+      touchStartX = 0;
+      touchStartY = 0;
+      touchStartTime = 0;
+    }, { passive: true });
+    
+    // Desktop/Mobile: Redirect on ANY click anywhere on page (unless scrolling)
+    document.addEventListener('click', function(e) {
+      // Don't redirect if clicking the banner (it has its own handler)
+      if (e.target.closest('#app-store-banner') || e.target.closest('#app-store-link')) {
+        return;
+      }
+      
+      // Redirect on ANY other click (background, images, collections, posts, etc.)
+      if (!isScrolling) {
+        e.preventDefault();
+        e.stopPropagation();
+        window.location.href = APP_STORE_URL;
+        return false;
+      }
+    }, true);
+    
+    // Make entire page clickable - redirect to App Store
+    document.addEventListener('DOMContentLoaded', function() {
+      // Make container clickable
+      var container = document.querySelector('.container');
+      if (container) {
+        container.style.cursor = 'pointer';
+        container.addEventListener('click', function(e) {
+          // Don't redirect if clicking banner
+          if (e.target.closest('#app-store-banner') || e.target.closest('#app-store-link')) {
+            return;
+          }
+          if (!isScrolling) {
+            window.location.href = APP_STORE_URL;
+          }
+        }, true);
+      }
+      
+      // Make all images clickable
+      document.querySelectorAll('img').forEach(function(img) {
+        img.style.cursor = 'pointer';
+        img.addEventListener('click', function(e) {
+          if (!e.target.closest('#app-store-banner')) {
+            e.preventDefault();
+            e.stopPropagation();
+            window.location.href = APP_STORE_URL;
+            return false;
+          }
+        }, true);
+      });
+      
+      // Make all collection rows clickable
+      document.querySelectorAll('.collection-row, .post-thumbnail, .profile-header, .background-image').forEach(function(el) {
+        el.style.cursor = 'pointer';
+        el.addEventListener('click', function(e) {
+          if (!e.target.closest('#app-store-banner')) {
+            e.preventDefault();
+            e.stopPropagation();
+            window.location.href = APP_STORE_URL;
+            return false;
+          }
+        }, true);
+      });
+    });
+  </script>
 </body>
 </html>

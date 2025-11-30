@@ -103,22 +103,21 @@ struct ReportView: View {
 		NavigationStack {
 			PhoneSizeContainer {
 			ScrollView {
-				VStack(alignment: .leading, spacing: 24) {
+				VStack(alignment: .leading, spacing: 16) {
 					// Header info
-					VStack(alignment: .leading, spacing: 8) {
+					VStack(alignment: .leading, spacing: 6) {
 						Text("What's wrong with this \(itemType.rawValue)?")
-							.font(.title2)
-							.fontWeight(.bold)
+							.font(.system(size: 14, weight: .semibold))
 							.foregroundColor(textColor)
 						
 						Text("Your report is anonymous. If someone is in immediate danger, call local emergency services.")
-							.font(.subheadline)
+							.font(.system(size: 11))
 							.foregroundColor(.gray)
 					}
 					.padding(.horizontal)
 					
 					// Report categories
-					VStack(spacing: 12) {
+					VStack(spacing: 8) {
 						ForEach(ReportCategory.allCases, id: \.self) { category in
 							ReportCategoryButton(
 								category: category,
@@ -132,23 +131,24 @@ struct ReportView: View {
 					.padding(.horizontal)
 					
 					// Additional details
-					VStack(alignment: .leading, spacing: 12) {
+					VStack(alignment: .leading, spacing: 8) {
 						Text("Additional Details (Optional)")
-							.font(.headline)
+							.font(.system(size: 12, weight: .medium))
 							.foregroundColor(textColor)
 						
 						TextEditor(text: $viewModel.additionalDetails)
-							.frame(height: 100)
-							.padding(8)
+							.frame(height: 80)
+							.padding(6)
+							.font(.system(size: 12))
 							.background(secondaryBackgroundColor)
-							.cornerRadius(8)
+							.cornerRadius(6)
 							.overlay(
-								RoundedRectangle(cornerRadius: 8)
+								RoundedRectangle(cornerRadius: 6)
 									.stroke(Color.gray.opacity(0.3), lineWidth: 1)
 							)
 						
 						Text("Provide any additional context that might help us review this report.")
-							.font(.caption)
+							.font(.system(size: 10))
 							.foregroundColor(.gray)
 					}
 					.padding(.horizontal)
@@ -163,17 +163,17 @@ struct ReportView: View {
 							ProgressView()
 								.progressViewStyle(CircularProgressViewStyle(tint: .white))
 								.frame(maxWidth: .infinity)
-								.frame(height: 50)
+								.frame(height: 40)
 						} else {
 							Text("Submit Report")
-								.font(.headline)
+								.font(.system(size: 13, weight: .medium))
 								.foregroundColor(.white)
 								.frame(maxWidth: .infinity)
-								.frame(height: 50)
+								.frame(height: 40)
 						}
 					}
 					.background(viewModel.selectedCategory == nil ? Color.gray : Color.red)
-					.cornerRadius(12)
+					.cornerRadius(8)
 					.padding(.horizontal)
 					.disabled(viewModel.selectedCategory == nil || viewModel.isSubmitting)
 				}
@@ -187,6 +187,7 @@ struct ReportView: View {
 					Button("Cancel") {
 						dismiss()
 					}
+					.font(.system(size: 14))
 					.foregroundColor(textColor)
 				}
 			}
@@ -274,36 +275,27 @@ struct ReportCategoryButton: View {
 	
 	var body: some View {
 		Button(action: action) {
-			HStack(spacing: 16) {
-				Image(systemName: icon)
-					.font(.title3)
-					.foregroundColor(iconColor)
-					.frame(width: 30)
-				
-				VStack(alignment: .leading, spacing: 4) {
+			HStack(spacing: 10) {
+				VStack(alignment: .leading, spacing: 3) {
 					Text(category.rawValue)
-						.font(.headline)
+						.font(.system(size: 12, weight: .medium))
 						.foregroundColor(colorScheme == .dark ? .white : .black)
 					
 					Text(category.description)
-						.font(.caption)
+						.font(.system(size: 10))
 						.foregroundColor(.gray)
 						.fixedSize(horizontal: false, vertical: true)
 				}
 				
 				Spacer()
-				
-				if isSelected {
-					Image(systemName: "checkmark.circle.fill")
-						.foregroundColor(iconColor)
-				}
 			}
-			.padding()
+			.padding(.horizontal, 12)
+			.padding(.vertical, 10)
 			.background(backgroundColor)
-			.cornerRadius(12)
+			.cornerRadius(8)
 			.overlay(
-				RoundedRectangle(cornerRadius: 12)
-					.stroke(borderColor, lineWidth: isSelected ? 2 : 0)
+				RoundedRectangle(cornerRadius: 8)
+					.stroke(borderColor, lineWidth: isSelected ? 1.5 : 0)
 			)
 		}
 		.buttonStyle(PlainButtonStyle())

@@ -183,18 +183,14 @@ struct DeletedCollectionsView: View {
 	private func loadDeletedCollections() {
 		guard let userId = authService.user?.uid else { return }
 		isLoading = true
-		Task {
+		Task { @MainActor in
 			do {
 				let collections = try await CollectionService.shared.getDeletedCollections(ownerId: userId)
-				await MainActor.run {
-					deletedCollections = collections
-					isLoading = false
-				}
+				deletedCollections = collections
+				isLoading = false
 			} catch {
 				print("Error loading deleted collections: \(error)")
-				await MainActor.run {
-					isLoading = false
-				}
+				isLoading = false
 			}
 		}
 	}

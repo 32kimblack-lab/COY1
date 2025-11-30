@@ -9,11 +9,13 @@ struct MessageBubble: View {
 	let senderProfileImageURL: String?
 	let repliedToMessage: MessageModel?
 	let repliedToSenderName: String?
+	let otherUserId: String? // Recipient ID for read/delivery status
 	var onLongPress: () -> Void
 	var onReplyTap: () -> Void
 	var onReactionTap: (String) -> Void
 	var onReactionDetailsTap: ((String) -> Void)? = nil // (emoji) -> Void
 	var onMediaTap: ((String, String) -> Void)? = nil // (mediaURL, mediaType)
+	var onSharedPostTap: ((String) -> Void)? = nil // (postId) -> Void
 	
 	@Environment(\.colorScheme) var colorScheme
 	
@@ -50,7 +52,7 @@ struct MessageBubble: View {
 				// Reactions
 				reactionsView
 				
-				// Timestamp
+				// Timestamp and status
 				HStack(spacing: 4) {
 					Text(formatTime(message.timestamp))
 						.font(.system(size: 11))
@@ -59,6 +61,10 @@ struct MessageBubble: View {
 						Text("(edited)")
 							.font(.system(size: 11))
 							.foregroundColor(.secondary)
+					}
+					// Read/delivery status (only for messages sent by current user)
+					if isMe {
+						readDeliveryStatusView
 					}
 				}
 				.padding(.horizontal, 4)
@@ -183,6 +189,8 @@ struct MessageBubble: View {
 				imageMessageView
 			case "video":
 				videoMessageView
+			case "shared_post":
+				sharedPostView
 			default:
 				Text(message.content)
 					.font(.system(size: 15))
@@ -251,6 +259,23 @@ struct MessageBubble: View {
 						}
 					}
 	
+	@ViewBuilder
+	private var sharedPostView: some View {
+		SharedPostPreview(
+			messageContent: message.content,
+			onTap: {
+				// Parse postId from JSON content
+				if let data = message.content.data(using: .utf8),
+				   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+				   let postId = json["postId"] as? String {
+					onSharedPostTap?(postId)
+				}
+			}
+		)
+		.frame(maxWidth: 280)
+		.contentShape(Rectangle())
+					}
+	
 	private var messageBackground: some View {
 						RoundedRectangle(cornerRadius: 16)
 			.fill(isMe ? Color.clear : (colorScheme == .dark ? Color(.systemGray5) : Color(.systemGray6)))
@@ -262,7 +287,7 @@ struct MessageBubble: View {
 	}
 	
 	private var outlineColor: Color {
-		let shouldShowOutline = message.type == "text" || message.isDeleted
+		let shouldShowOutline = (message.type == "text" || message.isDeleted) && message.type != "shared_post"
 		guard shouldShowOutline else { return Color.clear }
 		
 		if isMe {
@@ -318,6 +343,44 @@ struct MessageBubble: View {
 		let formatter = DateFormatter()
 		formatter.timeStyle = .short
 		return formatter.string(from: date)
+	}
+	
+	@ViewBuilder
+	private var readDeliveryStatusView: some View {
+		// Get recipient ID - use otherUserId if provided, otherwise extract from chatId
+		let recipientId: String = {
+			if let otherUserId = otherUserId {
+				return otherUserId
+			}
+			// Fallback: extract from chatId (format is "uid1_uid2" where uids are sorted)
+			let currentUid = Auth.auth().currentUser?.uid ?? ""
+			let chatParticipants = message.chatId.components(separatedBy: "_")
+			return chatParticipants.first { $0 != currentUid } ?? ""
+		}()
+		
+		// Check if message has been read by recipient
+		let isRead = !recipientId.isEmpty && message.readBy.contains(recipientId)
+		// Check if message has been delivered to recipient
+		let isDelivered = !recipientId.isEmpty && message.deliveredTo.contains(recipientId)
+		
+		Group {
+			if isRead {
+				// Double checkmark (read) - blue
+				Image(systemName: "checkmark.2")
+					.font(.system(size: 10, weight: .semibold))
+					.foregroundColor(.blue)
+			} else if isDelivered {
+				// Single checkmark (delivered but not read) - gray
+				Image(systemName: "checkmark")
+					.font(.system(size: 10, weight: .semibold))
+					.foregroundColor(.secondary)
+			} else {
+				// Single gray checkmark (sent but not delivered yet)
+				Image(systemName: "checkmark")
+					.font(.system(size: 10, weight: .semibold))
+					.foregroundColor(.secondary.opacity(0.5))
+			}
+		}
 	}
 }
 

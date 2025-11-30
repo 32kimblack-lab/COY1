@@ -21,10 +21,13 @@ struct AddFriendsScreen: View {
 	@Environment(\.dismiss) var dismiss
 	
 	var displayedAddedYou: [FriendRequestModel] {
+		// Filter out requests from blocked users (mutual blocking)
+		// This will be checked async, but we filter here for immediate UI update
+		let filtered = incomingRequests // Will be filtered in real-time via notifications
 		if showAllAddedYou {
-			return incomingRequests
+			return filtered
 		}
-		return Array(incomingRequests.prefix(5))
+		return Array(filtered.prefix(5))
 	}
 	
 	var filteredUsers: [UserService.AppUser] {
@@ -35,6 +38,9 @@ struct AddFriendsScreen: View {
 			// Exclude users who have sent friend requests to current user
 			!incomingRequestUids.contains(user.userId)
 		}
+		
+		// Additional filtering happens in loadAllUsers via mutual blocking check
+		// This computed property just handles search and display count
 		
 		if searchText.isEmpty {
 			return Array(users.prefix(displayedUsersCount))
@@ -196,6 +202,27 @@ struct AddFriendsScreen: View {
 					loadAllUsers() // Refresh to filter out accepted friend
 				}
 			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { notification in
+				// Immediately filter out blocked user from Add Users list
+				if let blockedUserId = notification.userInfo?["blockedUserId"] as? String {
+					Task {
+						await MainActor.run {
+							// Remove blocked user from list immediately
+							allUsers.removeAll { $0.userId == blockedUserId }
+							// Also remove from incoming requests if they sent one
+							incomingRequests.removeAll { $0.fromUid == blockedUserId }
+							print("🚫 AddFriendsScreen: Removed blocked user '\(blockedUserId)' from list")
+						}
+					}
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { notification in
+				// Reload users when someone is unblocked
+				if let unblockedUserId = notification.userInfo?["unblockedUserId"] as? String {
+					print("✅ AddFriendsScreen: User '\(unblockedUserId)' was unblocked, reloading users")
+					loadAllUsers()
+				}
+			}
 		}
 	}
 	
@@ -253,12 +280,20 @@ struct AddFriendsScreen: View {
 							status: data["status"] as? String ?? "pending"
 						)
 						
-						Task { @MainActor in
+						Task {
+							// Check mutual blocking before adding request
+							let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: fromUid)
+							if !areMutuallyBlocked {
+								await MainActor.run {
 							if !self.incomingRequests.contains(where: { $0.id == request.id }) {
 								self.incomingRequests.append(request)
 								// Reload users to filter out user who sent request
 								self.loadAllUsers()
 								print("✅ AddFriendsScreen: Added new incoming request from \(request.fromUid)")
+									}
+								}
+							} else {
+								print("🚫 AddFriendsScreen: Ignoring request from blocked user \(fromUid)")
 							}
 						}
 					} else if change.type == .modified {
@@ -321,9 +356,17 @@ struct AddFriendsScreen: View {
 	private func loadIncomingRequests() {
 		Task {
 			do {
-				let requests = try await friendService.getIncomingFriendRequests()
+				var requests = try await friendService.getIncomingFriendRequests()
+				// Filter out requests from blocked users (mutual blocking)
+				var filteredRequests: [FriendRequestModel] = []
+				for request in requests {
+					let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: request.fromUid)
+					if !areMutuallyBlocked {
+						filteredRequests.append(request)
+					}
+				}
 				await MainActor.run {
-					self.incomingRequests = requests
+					self.incomingRequests = filteredRequests
 				}
 			} catch {
 				print("Error loading incoming requests: \(error)")
@@ -387,9 +430,8 @@ struct AddFriendsScreen: View {
 						continue
 					}
 					
-					// Check if blocked (mutual block check for full invisibility)
-					let isBlocked = await friendService.isBlocked(userId: doc.documentID)
-					let isBlockedBy = await friendService.isBlockedBy(userId: doc.documentID)
+					// Check if mutually blocked (mutual block check for full invisibility)
+					let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: doc.documentID)
 					
 					// Check if already friends
 					let isFriend = await friendService.isFriend(userId: doc.documentID)
@@ -400,11 +442,11 @@ struct AddFriendsScreen: View {
 					let hasOneWayUnadd = await friendService.hasOneWayUnadd(userId: doc.documentID)
 					
 					// Only include users who are:
-					// - Not mutually blocked
+					// - Not mutually blocked (either direction)
 					// - Not currently friends
 					// - Not in a one-way un-add relationship (both-way un-adds ARE allowed in Add User list)
 					// - Not in incoming requests (handled in filteredUsers)
-					if !isBlocked && !isBlockedBy && !isFriend && !hasOneWayUnadd {
+					if !areMutuallyBlocked && !isFriend && !hasOneWayUnadd {
 						let user = UserService.AppUser(
 							userId: doc.documentID,
 							name: data["name"] as? String ?? "",
@@ -613,6 +655,16 @@ struct AddedYouTile: View {
 	private func loadUser() {
 		Task {
 			do {
+				// Check mutual blocking before loading user
+				let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: request.fromUid)
+				if areMutuallyBlocked {
+					await MainActor.run {
+						self.user = nil
+						self.isLoading = false
+					}
+					return
+				}
+				
 				let user = try await userService.getUser(userId: request.fromUid)
 				await MainActor.run {
 					self.user = user

@@ -19,11 +19,15 @@
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>GADApplicationIdentifier</key>
-	<string>ca-app-pub-3940256099942544~1458002511</string>
+	<string>ca-app-pub-1522482018148796~3418234355</string>
+	<key>GADNativeAdValidatorEnabled</key>
+	<false/>
 	<key>NSFaceIDUsageDescription</key>
 	<string>We need to verify your identity to access private collections</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>We need access to your photo library to select images and videos for your posts</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>We need access to save downloaded photos and videos to your camera roll</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>We need access to your microphone to record voice messages</string>
 	<key>UIApplicationSceneManifest</key>

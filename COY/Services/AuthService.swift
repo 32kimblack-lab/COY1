@@ -31,8 +31,10 @@ class AuthService: ObservableObject {
 		}
 		// Check if Firebase is configured before accessing Firestore
 		guard FirebaseApp.app() != nil else {
+			#if DEBUG
 			print(" ERROR: Firebase is not configured. Firestore operations will fail.")
 			print(" Please add GoogleService-Info.plist to your project.")
+			#endif
 			return nil
 		}
 		let firestore = Firestore.firestore()
@@ -62,7 +64,9 @@ class AuthService: ObservableObject {
 	private func setupAuthStateListener() {
 		// Check if Firebase Auth is available
 		guard let auth = firebaseAuth else {
+			#if DEBUG
 			print("⚠️ Firebase not configured - cannot setup auth state listener")
+			#endif
 			return
 		}
 		authStateHandle = auth.addStateDidChangeListener { [weak self] _, user in
@@ -89,7 +93,9 @@ class AuthService: ObservableObject {
 	
 	func checkProfileSetupStatus(user: FirebaseAuth.User) async {
 		guard let db = self.db else {
+			#if DEBUG
 			print("⚠️ Firestore not available - cannot check profile setup status")
+			#endif
 			await MainActor.run {
 				self.isProfileSetupComplete = false
 				self.isLoading = false
@@ -135,19 +141,25 @@ class AuthService: ObservableObject {
 					// 4. Profile save is not in progress
 					// This prevents deleting legitimate users who just have Firestore permission issues
 					if isRecentlyCreated && !hasPendingEmailSignup && !hasPendingPhoneSignup && !isProfileSaveInProgress && !inSignUpFlow {
-						// Very new account with no profile data and no sign-up in progress
-						// This means user exited before completing profile during initial signup
-						print("⚠️ Incomplete sign-up detected - user authenticated but profile incomplete (account age: \(String(format: "%.1f", timeSinceCreation))s)")
-						print("🧹 Signing out and cleaning up incomplete sign-up...")
+					// Very new account with no profile data and no sign-up in progress
+					// This means user exited before completing profile during initial signup
+					#if DEBUG
+					print("⚠️ Incomplete sign-up detected - user authenticated but profile incomplete (account age: \(String(format: "%.1f", timeSinceCreation))s)")
+					print("🧹 Signing out and cleaning up incomplete sign-up...")
+					#endif
 						
 						Task { @MainActor [weak self] in
 							guard let self = self else { return }
 							do {
 								// Delete the Firebase Auth account
 								try await user.delete()
+								#if DEBUG
 								print("✅ Deleted incomplete Firebase Auth account")
+								#endif
 							} catch {
+								#if DEBUG
 								print("⚠️ Could not delete auth account: \(error)")
+								#endif
 								// Still sign out even if deletion fails
 							}
 							
@@ -157,20 +169,24 @@ class AuthService: ObservableObject {
 							}
 							self.user = nil
 							self.isProfileSetupComplete = false
+							#if DEBUG
 							print("✅ Signed out incomplete user - they can now start over")
+							#endif
 						}
 					} else {
-						// Account is older than 5 minutes OR has pending data OR is in sign-up flow
-						// Don't delete - this is likely a legitimate user or a permissions issue
-						if !isRecentlyCreated {
-							print("📝 Account is older than 5 minutes - treating as legitimate user (may have Firestore permission issues)")
-						} else if inSignUpFlow {
-							print("📝 User is in sign-up flow - allowing completion")
-						} else if isProfileSaveInProgress {
-							print("📝 Profile save in progress - allowing completion")
-						} else {
-							print("📝 User has pending sign-up data - allowing profile completion")
-						}
+					// Account is older than 5 minutes OR has pending data OR is in sign-up flow
+					// Don't delete - this is likely a legitimate user or a permissions issue
+					#if DEBUG
+					if !isRecentlyCreated {
+						print("📝 Account is older than 5 minutes - treating as legitimate user (may have Firestore permission issues)")
+					} else if inSignUpFlow {
+						print("📝 User is in sign-up flow - allowing completion")
+					} else if isProfileSaveInProgress {
+						print("📝 Profile save in progress - allowing completion")
+					} else {
+						print("📝 User has pending sign-up data - allowing profile completion")
+					}
+					#endif
 					}
 				}
 			}
@@ -182,15 +198,19 @@ class AuthService: ObservableObject {
 			await MainActor.run {
 				// Check if it's a permissions error
 				if errorDomain == "FIRFirestoreErrorDomain" || error.localizedDescription.contains("permission") || error.localizedDescription.contains("Permission") {
+					#if DEBUG
 					print("⚠️ Firestore permissions error - cannot check profile. Allowing user to stay logged in.")
 					print("⚠️ Error: \(error.localizedDescription)")
+					#endif
 					// Don't delete account - this is a configuration issue
 					// Assume profile might be complete but we just can't verify it
 					self.isProfileSetupComplete = true // Allow access, user can complete profile if needed
 					self.isInSignUpFlow = false
 				} else {
 					// Other errors - be conservative, don't delete account
+					#if DEBUG
 					print("⚠️ Error checking profile setup: \(error.localizedDescription)")
+					#endif
 					self.isProfileSetupComplete = false
 				}
 			}
@@ -252,7 +272,9 @@ class AuthService: ObservableObject {
 					try await db.collection("users").document(user.uid).setData(userData)
 				}.value
 			} else {
+				#if DEBUG
 				print("⚠️ Firestore not available - user document not created in Firestore")
+				#endif
 				// Continue anyway - user data is in Firebase
 			}
 			
@@ -333,7 +355,9 @@ class AuthService: ObservableObject {
 			
 			// Create user document in Firestore
 			guard let db = self.db else {
+				#if DEBUG
 				print("⚠️ Firestore not available - user document not created in Firestore")
+				#endif
 				isLoading = false
 				return true // Continue anyway - Firebase will have the user data
 			}
@@ -368,20 +392,28 @@ class AuthService: ObservableObject {
 			isLoading = false
 			return false
 		}
+		#if DEBUG
 		print("🔄 Sending password reset email to: \(email)")
+		#endif
 		isLoading = true
 		errorMessage = nil
 		
 		do {
 			// Use Firebase default handler without custom settings
 			// This uses Firebase's hosted page and sends email immediately
+			#if DEBUG
 			print("📧 Calling Firebase sendPasswordReset (default handler)")
+			#endif
 			try await auth.sendPasswordReset(withEmail: email)
+			#if DEBUG
 			print("✅ Password reset email sent successfully")
+			#endif
 			isLoading = false
 			return true
 		} catch {
+			#if DEBUG
 			print("❌ Password reset email FAILED: \(error.localizedDescription)")
+			#endif
 			errorMessage = error.localizedDescription
 			isLoading = false
 			return false
@@ -402,7 +434,9 @@ class AuthService: ObservableObject {
 			
 			// Update user document
 			guard let db = self.db else {
+				#if DEBUG
 				print("⚠️ Firestore not available - profile image not updated in Firestore")
+				#endif
 				isLoading = false
 				return false
 			}
@@ -433,7 +467,9 @@ class AuthService: ObservableObject {
 			
 			// Update user document
 			guard let db = self.db else {
+				#if DEBUG
 				print("⚠️ Firestore not available - background image not updated in Firestore")
+				#endif
 				isLoading = false
 				return false
 			}
@@ -468,7 +504,9 @@ class AuthService: ObservableObject {
 	
 	func signOut() {
 		guard let auth = firebaseAuth else {
+			#if DEBUG
 			print("⚠️ Firebase not configured - cannot sign out")
+			#endif
 			user = nil
 			isProfileSetupComplete = false
 			return
@@ -502,7 +540,9 @@ class AuthService: ObservableObject {
 	func getUserData() async -> [String: Any]? {
 		guard let user = user else { return nil }
 		guard let db = self.db else {
+			#if DEBUG
 			print("⚠️ Firestore not available - cannot get user data")
+			#endif
 			return nil
 		}
 		

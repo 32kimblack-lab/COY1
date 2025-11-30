@@ -1,4 +1,5 @@
 import SwiftUI
+import FirebaseFirestore
 import FirebaseAuth
 import SDWebImageSwiftUI
 import SDWebImage
@@ -43,14 +44,15 @@ class HomeViewCache {
 
 struct CYHome: View {
 	@Environment(\.colorScheme) var colorScheme
+	@Environment(\.horizontalSizeClass) var horizontalSizeClass
+	@Environment(\.scenePhase) private var scenePhase
 	@EnvironmentObject var authService: AuthService
 	
+	@StateObject private var cyServiceManager = CYServiceManager.shared // Observe ServiceManager for real-time updates
 	@State private var isMenuOpen = false
 	@State private var followedCollections: [CollectionData] = []
 	@State private var postsWithCollections: [(post: CollectionPost, collection: CollectionData)] = []
 	@State private var isLoading = false
-	@State private var selectedPost: CollectionPost?
-	@State private var selectedCollection: CollectionData?
 	@State private var isLoadingMore = false
 	@State private var hasMoreData = true
 	@State private var lastPostTimestamp: Date?
@@ -58,12 +60,263 @@ struct CYHome: View {
 	@State private var unreadNotificationCount = 0
 	@State private var currentPostIndex = 0
 	@State private var friendRequestCount = 0
+	@State private var sideMenuSearchText = "" // Search text for side menu
+	
+	// Check if device is iPad
+	private var isIPad: Bool {
+		horizontalSizeClass == .regular
+	}
+	
+	private var notificationBadgeCount: Int? {
+		unreadNotificationCount > 0 ? unreadNotificationCount : nil
+	}
 	
 	private let pageSize = 20
 	
 	var body: some View {
 		NavigationStack {
 			PhoneSizeContainer {
+				mainContentView
+			}
+		}
+		.refreshable {
+			// Pull-to-refresh: Check for new posts, reorder if none found
+			await refreshFeed()
+		}
+		.onChange(of: scenePhase) { oldPhase, newPhase in
+			// When app becomes active (from background or completely closed), refresh feed
+			if newPhase == .active {
+				Task {
+					await refreshFeed()
+				}
+			}
+		}
+		.onAppear {
+			// Start ServiceManager listener for real-time user updates
+			Task {
+				try? await CYServiceManager.shared.loadCurrentUser()
+			}
+			
+			// Load unread notification count
+			loadUnreadNotificationCount()
+			
+			// ALWAYS use cache first - no auto-refresh on tab switch or view appearance
+			// This ensures fast loading and no unnecessary network calls
+			// NO background checks - only refresh on pull-to-refresh or explicit notifications
+			if HomeViewCache.shared.hasDataLoaded() {
+				let cached = HomeViewCache.shared.getCachedData()
+				// Filter cached data to remove posts from hidden collections and blocked users
+				Task {
+					let hiddenCollectionIds = await MainActor.run { () -> Set<String> in
+						Set(cyServiceManager.getHiddenCollectionIds())
+					}
+					let blockedUserIds = await MainActor.run { () -> Set<String> in
+						Set(cyServiceManager.getBlockedUsers())
+					}
+					await MainActor.run {
+						// Filter collections (remove hidden collections and collections from blocked users)
+						self.followedCollections = cached.collections.filter { collection in
+							!hiddenCollectionIds.contains(collection.id) &&
+							!blockedUserIds.contains(collection.ownerId)
+						}
+						// Filter posts (remove posts from hidden collections and blocked users)
+						self.postsWithCollections = cached.postsWithCollections.filter { postWithCollection in
+							!hiddenCollectionIds.contains(postWithCollection.post.collectionId) &&
+							!blockedUserIds.contains(postWithCollection.post.authorId)
+						}
+					}
+				}
+			} else {
+				// No cache exists, load fresh (only on first app launch)
+				loadFollowedCollectionsAndPosts()
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionFollowed"))) { notification in
+			// Reload when user follows a collection
+			if let userId = notification.userInfo?["userId"] as? String,
+			   userId == authService.user?.uid {
+				loadFollowedCollectionsAndPosts(forceRefresh: true)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUnfollowed"))) { notification in
+			// Reload when user unfollows a collection
+			if let userId = notification.userInfo?["userId"] as? String,
+			   userId == authService.user?.uid {
+				loadFollowedCollectionsAndPosts(forceRefresh: true)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FriendRequestCountChanged"))) { notification in
+			if let userInfo = notification.userInfo,
+			   let count = userInfo["count"] as? Int {
+				friendRequestCount = count
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostCreated"))) { notification in
+			// Reload when a new post is created in a followed collection
+			if let collectionId = notification.object as? String,
+			   followedCollections.contains(where: { $0.id == collectionId }) {
+				loadFollowedCollectionsAndPosts(forceRefresh: true)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { notification in
+			// Immediately reload posts and collections when profile is updated to show new username/name/images
+			// ServiceManager listener will update currentUser, which triggers UI updates
+			print("🔄 CYHome: Profile updated, reloading to show new user info")
+			loadFollowedCollectionsAndPosts(forceRefresh: true)
+		}
+		.onChange(of: cyServiceManager.currentUser) { oldValue, newValue in
+			// Real-time update when current user's profile changes via ServiceManager
+			guard let old = oldValue, let new = newValue else {
+				// Initial load - filter existing posts from hidden collections and blocked users
+				if let new = newValue {
+					Task {
+						let hiddenCollectionIds = Set(new.blockedCollectionIds)
+						let blockedUserIds = Set(new.blockedUsers)
+						await MainActor.run {
+							// Remove posts from hidden collections and blocked users
+							postsWithCollections.removeAll { postWithCollection in
+								hiddenCollectionIds.contains(postWithCollection.post.collectionId) ||
+								blockedUserIds.contains(postWithCollection.post.authorId)
+							}
+							// Remove collections that are hidden or owned by blocked users
+							followedCollections.removeAll { collection in
+								hiddenCollectionIds.contains(collection.id) ||
+								blockedUserIds.contains(collection.ownerId)
+							}
+						}
+					}
+				}
+				return
+			}
+			
+			// Check if hidden collections changed
+			let oldHiddenIds = Set(old.blockedCollectionIds)
+			let newHiddenIds = Set(new.blockedCollectionIds)
+			let hiddenCollectionsChanged = oldHiddenIds != newHiddenIds
+			
+			// Check if blocked users changed
+			let oldBlockedUserIds = Set(old.blockedUsers)
+			let newBlockedUserIds = Set(new.blockedUsers)
+			let blockedUsersChanged = oldBlockedUserIds != newBlockedUserIds
+			
+			if hiddenCollectionsChanged {
+				print("🔄 CYHome: Hidden collections changed, filtering posts")
+				Task {
+					let hiddenCollectionIds = newHiddenIds
+					await MainActor.run {
+						let beforeCount = postsWithCollections.count
+						postsWithCollections.removeAll { hiddenCollectionIds.contains($0.post.collectionId) }
+						followedCollections.removeAll { hiddenCollectionIds.contains($0.id) }
+						if postsWithCollections.count < beforeCount {
+							print("🚫 CYHome: Removed \(beforeCount - postsWithCollections.count) posts from hidden collections")
+						}
+					}
+				}
+			}
+			
+			if blockedUsersChanged {
+				print("🔄 CYHome: Blocked users changed, filtering posts")
+				Task {
+					let blockedUserIds = newBlockedUserIds
+					await MainActor.run {
+						let beforeCount = postsWithCollections.count
+						// Remove posts from blocked users
+						postsWithCollections.removeAll { blockedUserIds.contains($0.post.authorId) }
+						// Remove collections owned by blocked users
+						followedCollections.removeAll { blockedUserIds.contains($0.ownerId) }
+						// Clear cache
+						HomeViewCache.shared.clearCache()
+						if postsWithCollections.count < beforeCount {
+							print("🚫 CYHome: Removed \(beforeCount - postsWithCollections.count) posts from blocked users")
+						}
+					}
+				}
+			}
+			
+			// Only reload if profile-relevant fields changed (not just starredPostIds, hiddenPostIds, etc.)
+			let profileChanged = old.profileImageURL != new.profileImageURL ||
+				old.backgroundImageURL != new.backgroundImageURL ||
+				old.name != new.name ||
+				old.username != new.username
+			
+			if profileChanged {
+				print("🔄 CYHome: Current user profile updated via ServiceManager, reloading immediately")
+				loadFollowedCollectionsAndPosts(forceRefresh: true)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("UnreadNotificationCountChanged"))) { notification in
+			if let userInfo = notification.userInfo,
+			   let count = userInfo["count"] as? Int {
+				unreadNotificationCount = count
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionRequestSent"))) { _ in
+			loadUnreadNotificationCount()
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionInviteSent"))) { _ in
+			loadUnreadNotificationCount()
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionMembersJoined"))) { _ in
+			loadUnreadNotificationCount()
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionHidden"))) { notification in
+			// Immediately remove posts from hidden collection from home feed
+			if let hiddenCollectionId = notification.object as? String {
+				print("🚫 CYHome: Collection '\(hiddenCollectionId)' was hidden, removing posts from feed")
+				Task {
+					// Filter out posts from hidden collection
+					await MainActor.run {
+						let hiddenCollectionIds = Set([hiddenCollectionId])
+						postsWithCollections.removeAll { postWithCollection in
+							hiddenCollectionIds.contains(postWithCollection.post.collectionId)
+						}
+						// Also remove from followed collections list
+						followedCollections.removeAll { $0.id == hiddenCollectionId }
+						// Clear cache
+						HomeViewCache.shared.clearCache()
+					}
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUnhidden"))) { notification in
+			// Reload feed when collection is unhidden
+			if let unhiddenCollectionId = notification.object as? String {
+				print("✅ CYHome: Collection '\(unhiddenCollectionId)' was unhidden, reloading feed")
+				loadFollowedCollectionsAndPosts(forceRefresh: true)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { notification in
+			// Immediately remove posts from blocked user from home feed
+			if let blockedUserId = notification.userInfo?["blockedUserId"] as? String {
+				print("🚫 CYHome: User '\(blockedUserId)' was blocked, removing their posts from feed")
+				Task {
+					// Filter out posts from blocked user immediately
+					await MainActor.run {
+						let beforeCount = postsWithCollections.count
+						postsWithCollections.removeAll { postWithCollection in
+							postWithCollection.post.authorId == blockedUserId
+						}
+						// Also remove collections owned by blocked user
+						followedCollections.removeAll { $0.ownerId == blockedUserId }
+						// Clear cache
+						HomeViewCache.shared.clearCache()
+						if postsWithCollections.count < beforeCount {
+							print("🚫 CYHome: Removed \(beforeCount - postsWithCollections.count) posts from blocked user")
+						}
+					}
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { notification in
+			// Reload feed when user is unblocked
+			if let unblockedUserId = notification.userInfo?["unblockedUserId"] as? String {
+				print("✅ CYHome: User '\(unblockedUserId)' was unblocked, reloading feed")
+				loadFollowedCollectionsAndPosts(forceRefresh: true)
+			}
+		}
+	}
+	
+	private var mainContentView: some View {
 				ZStack {
 				// Main Content
 				VStack(spacing: 0) {
@@ -122,20 +375,23 @@ struct CYHome: View {
 										.frame(width: 25, height: 25)
 										.foregroundColor(colorScheme == .dark ? .white : .black)
 									
-									if unreadNotificationCount > 0 {
-										Text("\(unreadNotificationCount)")
-											.font(.caption2)
-											.fontWeight(.bold)
-											.foregroundColor(.white)
-											.padding(4)
-											.background(Color.red)
-											.clipShape(Circle())
+									if notificationBadgeCount != nil {
+										Circle()
+											.fill(Color.blue)
+											.frame(width: 10, height: 10)
 											.offset(x: 8, y: -8)
 									}
 								}
 							}
 							.fullScreenCover(isPresented: $showNotifications) {
 								NotificationsView(isPresented: $showNotifications)
+							}
+							.onChange(of: showNotifications) { oldValue, newValue in
+								// When notifications view is dismissed, refresh the count
+								if oldValue == true && newValue == false {
+									// View was dismissed, reload count (should be 0 after marking as read)
+									loadUnreadNotificationCount()
+								}
 							}
 						}
 					}
@@ -176,75 +432,11 @@ struct CYHome: View {
 						.animation(.easeInOut(duration: 0.3), value: isMenuOpen)
 					
 					Spacer()
-				}
-			}
 		}
-		.refreshable {
-			// Force refresh on pull-to-refresh
-			loadFollowedCollectionsAndPosts(forceRefresh: true)
 		}
-		.onAppear {
-			// Use cache if available, otherwise load
-			if HomeViewCache.shared.hasDataLoaded() {
-				let cached = HomeViewCache.shared.getCachedData()
-				// Use cached data immediately
-				self.followedCollections = cached.collections
-				self.postsWithCollections = cached.postsWithCollections
-				print("✅ CYHome: Using cached data")
-				
-				// Check if followed collection IDs have changed in background
-				Task {
-					guard let currentUserId = authService.user?.uid else { return }
-					let currentFollowed = try? await CollectionService.shared.getFollowedCollections(userId: currentUserId)
-					let currentFollowedIds = Set(currentFollowed?.map { $0.id } ?? [])
-					
-					if !HomeViewCache.shared.matchesCurrentFollowedIds(currentFollowedIds) {
-						// Followed collections changed, reload
-						await MainActor.run {
-							loadFollowedCollectionsAndPosts(forceRefresh: true)
-						}
-					}
-				}
-			} else {
-				// No cache, load fresh
-			loadFollowedCollectionsAndPosts()
-			}
-		}
-		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionFollowed"))) { notification in
-			// Reload when user follows a collection
-			if let userId = notification.userInfo?["userId"] as? String,
-			   userId == authService.user?.uid {
-				loadFollowedCollectionsAndPosts(forceRefresh: true)
-			}
-		}
-		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUnfollowed"))) { notification in
-			// Reload when user unfollows a collection
-			if let userId = notification.userInfo?["userId"] as? String,
-			   userId == authService.user?.uid {
-				loadFollowedCollectionsAndPosts(forceRefresh: true)
-			}
-		}
-		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FriendRequestCountChanged"))) { notification in
-			if let userInfo = notification.userInfo,
-			   let count = userInfo["count"] as? Int {
-				friendRequestCount = count
-			}
-		}
-		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostCreated"))) { notification in
-			// Reload when a new post is created in a followed collection
-			if let collectionId = notification.object as? String,
-			   followedCollections.contains(where: { $0.id == collectionId }) {
-				loadFollowedCollectionsAndPosts(forceRefresh: true)
-			}
-		}
-		.sheet(item: $selectedPost) { post in
-			if let collection = selectedCollection {
-				CYInsideCollectionView(collection: collection)
-			}
-		}
-			}
-		}
+	}
 	
+	// MARK: - View Components
 	private var emptyStateView: some View {
 		VStack(spacing: 12) {
 			Image(systemName: "tray")
@@ -261,40 +453,51 @@ struct CYHome: View {
 	}
 	
 	private var postsView: some View {
-		ScrollView {
-			LazyVStack(spacing: 0) {
-				ForEach(postsWithCollections.indices, id: \.self) { index in
-					let item = postsWithCollections[index]
-					PostDetailCard(post: item.post, collection: item.collection)
-						.onTapGesture {
-							selectedPost = item.post
-							selectedCollection = item.collection
-						}
-						.onAppear {
-							if index == postsWithCollections.count - 3 {
-								loadMoreIfNeeded()
-							}
-						}
-				}
-				
-				if isLoadingMore {
-					HStack {
-						Spacer()
-						ProgressView()
-						Spacer()
-					}
-					.padding()
-				} else if !hasMoreData && !postsWithCollections.isEmpty {
-					HStack {
-						Spacer()
-						Text("No more posts")
-							.font(.footnote)
-							.foregroundColor(.secondary)
-						Spacer()
-					}
-					.padding()
+		// Extract posts from postsWithCollections for Pinterest grid
+		let posts = postsWithCollections.map { $0.post }
+		
+		// Create a map of post IDs to collections
+		let postsCollectionMap = Dictionary(uniqueKeysWithValues: postsWithCollections.map { ($0.post.id, $0.collection) })
+		
+		return VStack(spacing: 0) {
+			PinterestPostGrid(
+			posts: posts,
+			collection: nil, // Not an individual collection view
+			isIndividualCollection: false,
+			currentUserId: authService.user?.uid,
+				postsCollectionMap: postsCollectionMap,
+				showAds: true, // Show ads on home feed
+				adLocation: .home // Use home ad unit
+			)
+			
+			// Loading indicator at bottom when loading more
+			if isLoadingMore {
+				HStack {
+					Spacer()
+					ProgressView()
+						.padding()
+					Spacer()
 				}
 			}
+			
+			// Load more trigger when scrolling near bottom
+			Color.clear
+				.frame(height: 1)
+				.onAppear {
+					if hasMoreData && !isLoadingMore {
+						loadMoreIfNeeded()
+					}
+				}
+		}
+	}
+	
+	// Filtered collections based on search
+	private var filteredFollowedCollections: [CollectionData] {
+		if sideMenuSearchText.isEmpty {
+			return followedCollections
+		}
+		return followedCollections.filter { collection in
+			collection.name.localizedCaseInsensitiveContains(sideMenuSearchText)
 		}
 	}
 	
@@ -318,12 +521,26 @@ struct CYHome: View {
 			}
 			.padding()
 			
+			// Search Bar
+			HStack {
+				Image(systemName: "magnifyingglass")
+					.foregroundColor(.secondary)
+				TextField("Search collections...", text: $sideMenuSearchText)
+					.textFieldStyle(.plain)
+			}
+			.padding(12)
+			.background(colorScheme == .dark ? Color(.systemGray6) : Color(.systemGray6))
+			.cornerRadius(10)
+			.padding(.horizontal)
+			.padding(.bottom, 8)
+			
 			Divider()
 			
 			// Followed Collections List
-			if followedCollections.isEmpty {
+			if filteredFollowedCollections.isEmpty {
 				VStack(spacing: 12) {
 					Spacer()
+					if sideMenuSearchText.isEmpty {
 					Image(systemName: "heart.slash")
 						.font(.system(size: 40))
 						.foregroundColor(.secondary)
@@ -333,13 +550,24 @@ struct CYHome: View {
 					Text("Follow collections to see them here")
 						.font(.subheadline)
 						.foregroundColor(.secondary)
+					} else {
+						Image(systemName: "magnifyingglass")
+							.font(.system(size: 40))
+							.foregroundColor(.secondary)
+						Text("No collections found")
+							.font(.headline)
+							.foregroundColor(.secondary)
+						Text("Try searching with a different term")
+							.font(.subheadline)
+							.foregroundColor(.secondary)
+					}
 					Spacer()
 				}
 				.frame(maxWidth: .infinity, maxHeight: .infinity)
 			} else {
 				ScrollView {
 					LazyVStack(spacing: 12) {
-						ForEach(followedCollections) { collection in
+						ForEach(filteredFollowedCollections) { collection in
 							FollowedCollectionRow(collection: collection) {
 								// Unfollow action
 								Task {
@@ -356,30 +584,162 @@ struct CYHome: View {
 		.background(colorScheme == .dark ? Color.black : Color.white)
 	}
 	
+	// MARK: - Pull-to-Refresh with Complete Fresh Reload
+	/// Complete refresh: Clear all caches, reload current user, reload everything from scratch
+	/// Equivalent to exiting and re-entering the app
+	private func refreshFeed() async {
+		guard let currentUserId = authService.user?.uid else { return }
+		
+		print("🔄 CYHome: Starting COMPLETE refresh (equivalent to app restart)")
+		
+		// Step 1: Clear ALL caches first
+		await MainActor.run {
+			HomeViewCache.shared.clearCache()
+			CollectionPostsCache.shared.clearAllCache()
+			print("✅ CYHome: Cleared all caches")
+		}
+		
+		// Step 2: Reload current user data (blocked users, hidden collections, etc.)
+		do {
+			try await CYServiceManager.shared.loadCurrentUser()
+			print("✅ CYHome: Reloaded current user data")
+		} catch {
+			print("⚠️ CYHome: Error reloading current user: \(error)")
+		}
+		
+		// Step 3: Reload everything from scratch (no cache usage)
+		do {
+			// Load followed collections from scratch
+			let followed = try await CollectionService.shared.getFollowedCollections(userId: currentUserId)
+			print("✅ CYHome: Loaded \(followed.count) followed collections")
+			
+			// Load FIRST PAGE of posts from all followed collections (paginated)
+			var allPosts: [(post: CollectionPost, collection: CollectionData)] = []
+			let initialLimit = isIPad ? 30 : 24 // More for grid view
+			
+			await withTaskGroup(of: [(post: CollectionPost, collection: CollectionData)].self) { group in
+				for collection in followed {
+					group.addTask {
+						// Skip hidden collections entirely - don't even load posts
+						let isHidden = await MainActor.run { () -> Bool in
+							CYServiceManager.shared.isCollectionHidden(collectionId: collection.id)
+						}
+						if isHidden {
+							print("🚫 CYHome: Skipping hidden collection '\(collection.name)' (ID: \(collection.id))")
+							return []
+						}
+						
+						// Check if collection owner is mutually blocked
+						let isOwnerBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: collection.ownerId)
+						if isOwnerBlocked {
+							print("🚫 CYHome: Skipping collection from blocked owner '\(collection.ownerId)'")
+							return []
+						}
+						
+						do {
+							// Load first page only - always fresh, no cache
+							let (posts, _, _) = try await PostService.shared.getCollectionPostsPaginated(
+								collectionId: collection.id,
+								limit: 5, // Only 5 posts per collection initially
+								lastDocument: nil,
+								sortBy: "Newest to Oldest"
+							)
+							
+							// Filter posts (includes hidden collections, blocked users, deleted posts check)
+							let filteredPosts = await CollectionService.filterPosts(posts)
+							
+							// Additional filter: Remove posts from blocked authors (mutual blocking)
+							var finalPosts: [CollectionPost] = []
+							for post in filteredPosts {
+								let isAuthorBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: post.authorId)
+								if !isAuthorBlocked {
+									finalPosts.append(post)
+								}
+							}
+							
+							return finalPosts.map { (post: $0, collection: collection) }
+						} catch {
+							print("⚠️ CYHome: Error loading posts for collection \(collection.id): \(error)")
+							return []
+						}
+					}
+				}
+				
+				for await collectionPosts in group {
+					allPosts.append(contentsOf: collectionPosts)
+				}
+			}
+			
+			// Sort by creation date (newest first)
+			allPosts.sort { $0.post.createdAt > $1.post.createdAt }
+			
+			// Take only initial limit
+			let limitedPosts = Array(allPosts.prefix(initialLimit))
+			
+			await MainActor.run {
+				// Always use fresh data - no cache comparison
+						self.postsWithCollections = limitedPosts
+						self.lastPostTimestamp = limitedPosts.last?.post.createdAt
+						self.hasMoreData = allPosts.count > initialLimit
+				self.followedCollections = followed
+						
+				// Update cache with fresh data
+						let followedIds = Set(followed.map { $0.id })
+						HomeViewCache.shared.setCachedData(
+							collections: followed,
+							postsWithCollections: limitedPosts,
+							followedIds: followedIds
+						)
+				
+				print("✅ CYHome: Complete refresh finished - \(limitedPosts.count) posts loaded, \(followed.count) collections")
+			}
+		} catch {
+			print("❌ CYHome: Error during complete refresh: \(error)")
+		}
+	}
+	
 	private func loadFollowedCollectionsAndPosts(forceRefresh: Bool = false) {
 		guard let currentUserId = authService.user?.uid else { return }
 		
 		// If we have cached data and not forcing refresh, skip loading
 		if HomeViewCache.shared.hasDataLoaded() && !forceRefresh {
-			print("⏭️ CYHome: Using cached data, skipping reload")
 			return
 		}
 		
 		isLoading = true
+		hasMoreData = true
+		lastPostTimestamp = nil
+		
 		Task {
 			do {
 				// Load followed collections
 				let followed = try await CollectionService.shared.getFollowedCollections(userId: currentUserId)
 				
-				// Load posts from all followed collections
+				// Load FIRST PAGE of posts from all followed collections (paginated)
 				var allPosts: [(post: CollectionPost, collection: CollectionData)] = []
+				let initialLimit = isIPad ? 30 : 24 // More for grid view
 				
 				await withTaskGroup(of: [(post: CollectionPost, collection: CollectionData)].self) { group in
 					for collection in followed {
 						group.addTask {
+							// Skip hidden collections entirely - don't even load posts
+							let isHidden = await MainActor.run { () -> Bool in
+								CYServiceManager.shared.isCollectionHidden(collectionId: collection.id)
+							}
+							if isHidden {
+								print("🚫 CYHome: Skipping hidden collection '\(collection.name)' (ID: \(collection.id))")
+								return []
+							}
+							
 							do {
-								let posts = try await CollectionService.shared.getCollectionPostsFromFirebase(collectionId: collection.id)
-								// Filter posts
+								// Load first page only
+								let (posts, _, _) = try await PostService.shared.getCollectionPostsPaginated(
+									collectionId: collection.id,
+									limit: 5, // Only 5 posts per collection initially
+									lastDocument: nil,
+									sortBy: "Newest to Oldest"
+								)
+								// Filter posts (includes hidden collections check)
 								let filteredPosts = await CollectionService.filterPosts(posts)
 								return filteredPosts.map { (post: $0, collection: collection) }
 							} catch {
@@ -397,23 +757,29 @@ struct CYHome: View {
 				// Sort by creation date (newest first)
 				allPosts.sort { $0.post.createdAt > $1.post.createdAt }
 				
+				// Take only initial limit
+				let limitedPosts = Array(allPosts.prefix(initialLimit))
+				lastPostTimestamp = limitedPosts.last?.post.createdAt
+				hasMoreData = allPosts.count > initialLimit
+				
 				// Cache the data
 				let followedIds = Set(followed.map { $0.id })
 				HomeViewCache.shared.setCachedData(
 					collections: followed,
-					postsWithCollections: allPosts,
+					postsWithCollections: limitedPosts,
 					followedIds: followedIds
 				)
 				
 				await MainActor.run {
 					self.followedCollections = followed
-					self.postsWithCollections = allPosts
+					self.postsWithCollections = limitedPosts
 					self.isLoading = false
 				}
 			} catch {
 				print("❌ Error loading followed collections: \(error)")
 				await MainActor.run {
 					self.isLoading = false
+					self.hasMoreData = false
 				}
 			}
 		}
@@ -434,502 +800,137 @@ struct CYHome: View {
 		}
 	}
 	
+	// Load more posts (pagination)
 	private func loadMoreIfNeeded() {
-		guard !isLoadingMore, hasMoreData else { return }
-		// For now, we load all posts at once
-		// Can implement pagination later if needed
-		isLoadingMore = false
-		hasMoreData = false
-	}
-}
-
-// MARK: - Post Detail Card (Matching CYPostDetailView design)
-struct PostDetailCard: View {
-	let post: CollectionPost
-	let collection: CollectionData
-	@Environment(\.colorScheme) var colorScheme
-	@State private var ownerProfileImageURL: String?
-	@State private var ownerUsername: String?
-	@StateObject private var videoPlayerManager = VideoPlayerManager.shared
-	@State private var currentMediaIndex = 0
-	@State private var imageAspectRatios: [String: CGFloat] = [:]
-	@State private var taggedUsers: [UserService.AppUser] = []
-	
-	private let screenWidth: CGFloat = UIScreen.main.bounds.width
-	
-	var body: some View {
-		VStack(alignment: .leading, spacing: 0) {
-			// Header: Collection info
-			HStack(spacing: 12) {
-				// Collection profile image
-				if let imageURL = collection.imageURL, !imageURL.isEmpty {
-					CachedProfileImageView(url: imageURL, size: 40)
-						.clipShape(Circle())
-				} else {
-					CachedProfileImageView(url: ownerProfileImageURL ?? "", size: 40)
-						.clipShape(Circle())
-						.onAppear {
-							loadOwnerInfo()
-						}
-				}
-				
-				VStack(alignment: .leading, spacing: 2) {
-					HStack(spacing: 4) {
-						Text(collection.name)
-							.font(.headline)
-							.foregroundColor(.primary)
-						
-						if let username = ownerUsername {
-							Text("•")
-								.foregroundColor(.secondary)
-							
-							Text("@\(username)")
-								.font(.subheadline)
-								.foregroundColor(.secondary)
-						}
-					}
-					
-					Text(collection.type == "Individual" ? "Individual" : "\(collection.memberCount) members")
-						.font(.caption)
-						.foregroundColor(.secondary)
-				}
-				
-				Spacer()
-			}
-			.padding(.horizontal)
-			.padding(.vertical, 12)
-			
-			// Media - Using same design as CYPostDetailView
-			mediaContentView
-			
-			// Bottom controls (matching CYPostDetailView)
-			postBottomControls
-			
-			// Caption and Tags
-			captionAndTagsView
-			
-			// Date
-			Text(post.createdAt, style: .date)
-				.font(.system(size: 11))
-				.foregroundColor(colorScheme == .dark ? .gray : .black.opacity(0.7))
-				.padding(.horizontal)
-				.padding(.top, 4)
-				.padding(.bottom, 12)
-			
-			Divider()
-		}
-		.background(colorScheme == .dark ? Color.black : Color.white)
-		.onAppear {
-			loadOwnerInfo()
-			calculateImageAspectRatios()
-			loadTaggedUsers()
-		}
-	}
-	
-	// Calculate actual media height (same logic as CYPostDetailView)
-	// ALL posts (single and multi-media) are capped at 55% of screen height
-	private var actualMediaHeight: CGFloat {
-		let mediaItems = post.mediaItems.isEmpty ? (post.firstMediaItem.map { [$0] } ?? []) : post.mediaItems
+		guard !isLoadingMore && !isLoading && hasMoreData else { return }
+		guard !postsWithCollections.isEmpty else { return }
 		
-		if mediaItems.isEmpty {
-			let maxAllowed = UIScreen.main.bounds.height * 0.55
-			return maxAllowed
-		}
+		isLoadingMore = true
 		
-		// Calculate natural height for the tallest item
-		var tallestHeight: CGFloat = 0
-		for mediaItem in mediaItems {
-			let height = calculateHeight(for: mediaItem)
-			tallestHeight = max(tallestHeight, height)
-		}
-		
-		// ALWAYS cap at 55% of screen height (for both single and multi-media posts)
-		let maxAllowed = UIScreen.main.bounds.height * 0.55
-		return min(tallestHeight, maxAllowed)
-	}
-	
-	// Check if content needs to scale down (exceeds 55%)
-	private var needsScaling: Bool {
-		let mediaItems = post.mediaItems.isEmpty ? (post.firstMediaItem.map { [$0] } ?? []) : post.mediaItems
-		
-		if mediaItems.isEmpty {
-			return false
-		}
-		
-		var tallestHeight: CGFloat = 0
-		for mediaItem in mediaItems {
-			let height = calculateHeight(for: mediaItem)
-			tallestHeight = max(tallestHeight, height)
-		}
-		
-		let maxAllowed = UIScreen.main.bounds.height * 0.55
-		return tallestHeight > maxAllowed
-	}
-	
-	@ViewBuilder
-	private var mediaContentView: some View {
-		let mediaItems = post.mediaItems.isEmpty ? (post.firstMediaItem.map { [$0] } ?? []) : post.mediaItems
-		
-		// Calculate container height: tallest item's height, capped at 55% (matching CYPostDetailView)
-		let tallestNaturalHeight: CGFloat = {
-			if mediaItems.isEmpty {
-				return UIScreen.main.bounds.height * 0.55
-			}
-			var tallest: CGFloat = 0
-			for mediaItem in mediaItems {
-				tallest = max(tallest, calculateHeight(for: mediaItem))
-			}
-			let maxAllowed = UIScreen.main.bounds.height * 0.55
-			return min(tallest, maxAllowed)
-		}()
-		
-		let containerHeight = tallestNaturalHeight
-		
-		ZStack(alignment: .center) {
-			// Media carousel - each item displays at its natural height
-			if mediaItems.count > 1 {
-				TabView(selection: $currentMediaIndex) {
-					ForEach(0..<mediaItems.count, id: \.self) { index in
-						mediaItemView(mediaItems[index], index: index, containerHeight: containerHeight)
-							.tag(index)
-					}
-				}
-				.tabViewStyle(.page)
-				.frame(maxWidth: .infinity)
-				.frame(height: containerHeight) // Container height (tallest item, capped at 55%)
-				
-				// Page indicator (top right)
-				VStack {
-					HStack {
-						Spacer()
-						Text("\(currentMediaIndex + 1)/\(mediaItems.count)")
-							.font(.caption)
-							.fontWeight(.semibold)
-							.padding(.horizontal, 8)
-							.padding(.vertical, 4)
-							.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-							.foregroundColor(.primary)
-							.padding(.top, 12)
-							.padding(.trailing, 12)
-							.animation(.easeInOut(duration: 0.2), value: currentMediaIndex)
-					}
-					Spacer()
-				}
-				.allowsHitTesting(false)
-			} else if let mediaItem = mediaItems.first {
-				// Single media item - capped at 55%
-				mediaItemView(mediaItem, index: 0, containerHeight: containerHeight)
-					.frame(maxWidth: .infinity)
-			}
-		}
-		.frame(maxWidth: .infinity)
-		.animation(.easeInOut(duration: 0.08), value: currentMediaIndex)
-	}
-	
-	@ViewBuilder
-	private func mediaItemView(_ mediaItem: MediaItem, index: Int, containerHeight: CGFloat) -> some View {
-		if mediaItem.isVideo, let videoURL = mediaItem.videoURL {
-			// Video view - matching CYPostDetailView exactly
-			videoItemView(mediaItem: mediaItem, index: index, containerHeight: containerHeight, videoURL: videoURL)
-		} else {
-			// Image view - matching CYPostDetailView exactly
-			imageItemView(mediaItem: mediaItem, index: index, containerHeight: containerHeight)
-		}
-	}
-	
-	@ViewBuilder
-	private func imageItemView(mediaItem: MediaItem, index: Int, containerHeight: CGFloat) -> some View {
-		let mediaItems = post.mediaItems.isEmpty ? (post.firstMediaItem.map { [$0] } ?? []) : post.mediaItems
-		
-		// Calculate natural height for this image
-		let imageNaturalHeight = calculateHeight(for: mediaItem)
-		let maxAllowed = UIScreen.main.bounds.height * 0.55
-		
-		// Check if image exceeds 55% - if so, scale down to fit
-		let exceedsMax = imageNaturalHeight > maxAllowed
-		let displayHeight = exceedsMax ? containerHeight : imageNaturalHeight
-		
-		// For multi-media posts, use container height; for single posts, use calculated display height
-		let itemHeight = mediaItems.count == 1 ? displayHeight : containerHeight
-		
-		// Show blur if:
-		// 1. Multi-media post and item is shorter than container, OR
-		// 2. Single post exceeds max and needs to scale down (will have side space)
-		let showBlur = (mediaItems.count > 1 && imageNaturalHeight < containerHeight) || 
-					   (mediaItems.count == 1 && exceedsMax)
-		
-		ZStack(alignment: .center) {
-			// Blur background - fills empty space (sides when scaled down, or bottom when shorter)
-			if showBlur {
-				blurBackgroundView(height: itemHeight, mediaItem: mediaItem)
-					.frame(width: screenWidth, height: itemHeight)
-					.clipped()
-			}
-			
-			// Image - use .fit when scaling down to show full image, .fill otherwise
-			if let imageURL = mediaItem.imageURL ?? mediaItem.thumbnailURL, !imageURL.isEmpty, let url = URL(string: imageURL) {
-				WebImage(url: url)
-					.resizable()
-					.indicator(.activity)
-					.transition(.fade(duration: 0.2))
-					.aspectRatio(contentMode: exceedsMax ? .fit : .fill) // Use .fit when scaling down, .fill otherwise
-					.frame(maxWidth: exceedsMax ? screenWidth : screenWidth) // Allow width to scale when using .fit
-					.frame(maxHeight: displayHeight) // Cap at container height when scaling down
-					.clipped()
-			} else {
-				Rectangle()
-					.fill(Color.gray.opacity(0.2))
-					.frame(width: screenWidth, height: displayHeight)
-			}
-		}
-		.frame(width: screenWidth, height: itemHeight) // Container height for blur
-		.clipped()
-	}
-	
-	@ViewBuilder
-	private func videoItemView(mediaItem: MediaItem, index: Int, containerHeight: CGFloat, videoURL: String) -> some View {
-		let mediaItems = post.mediaItems.isEmpty ? (post.firstMediaItem.map { [$0] } ?? []) : post.mediaItems
-		
-		// Calculate natural height for this video (just like images)
-		let videoNaturalHeight = calculateHeight(for: mediaItem)
-		let maxAllowed = UIScreen.main.bounds.height * 0.55
-		
-		// Check if video exceeds 55% - if so, scale down to fit
-		let exceedsMax = videoNaturalHeight > maxAllowed
-		let displayHeight = exceedsMax ? containerHeight : videoNaturalHeight
-		
-		// For multi-media posts, use container height; for single posts, use calculated display height
-		let itemHeight = mediaItems.count == 1 ? displayHeight : containerHeight
-		
-		// Show blur if:
-		// 1. Multi-media post and item is shorter than container, OR
-		// 2. Single post exceeds max and needs to scale down (will have side space)
-		let showBlur = (mediaItems.count > 1 && videoNaturalHeight < containerHeight) || 
-					   (mediaItems.count == 1 && exceedsMax)
-		
-		ZStack(alignment: .center) {
-			// Blur background - fills empty space (sides when scaled down, or bottom when shorter)
-			if showBlur {
-				blurBackgroundView(height: itemHeight, mediaItem: mediaItem)
-					.frame(width: screenWidth, height: itemHeight)
-					.clipped()
-			}
-			
-			// Gray placeholder - shows while video loads
-			Rectangle()
-				.fill(Color.gray.opacity(0.3))
-				.frame(maxWidth: exceedsMax ? screenWidth : screenWidth)
-				.frame(maxHeight: displayHeight)
-			
-			// Video Player - use .fit when scaling down to show full video, .fill otherwise
-			if !videoURL.isEmpty {
-				let player = videoPlayerManager.getOrCreatePlayer(for: videoURL, postId: "\(post.id)_\(index)")
-				VideoPlayer(player: player)
-					.aspectRatio(contentMode: exceedsMax ? .fit : .fill) // Use .fit when scaling down, .fill otherwise
-					.frame(maxWidth: exceedsMax ? screenWidth : screenWidth) // Allow width to scale when using .fit
-					.frame(maxHeight: displayHeight) // Cap at container height when scaling down
-					.clipped()
-					.ignoresSafeArea(.container, edges: .horizontal)
-					.onAppear {
-						if index == currentMediaIndex {
-							videoPlayerManager.playVideo(playerId: "\(post.id)_\(videoURL)")
-						}
-					}
-					.onDisappear {
-						videoPlayerManager.pauseVideo(playerId: "\(post.id)_\(videoURL)")
-					}
-			} else {
-				Rectangle()
-					.fill(Color.gray.opacity(0.3))
-					.frame(maxWidth: exceedsMax ? screenWidth : screenWidth)
-					.frame(maxHeight: displayHeight)
-			}
-		}
-		.frame(width: screenWidth, height: itemHeight) // Container height for blur
-		.clipped()
-	}
-	
-	// MARK: - Post Bottom Controls (matching CYPostDetailView)
-	@ViewBuilder
-	private var postBottomControls: some View {
-		VStack(spacing: 12) {
-			HStack {
-				HStack(spacing: 12) {
-					// Star button (placeholder - can add functionality later)
-					Button(action: {}) {
-						Image(systemName: "star")
-							.font(.system(size: 18))
-							.foregroundColor(colorScheme == .dark ? .white : .black)
-					}
-					
-					// Comment button (placeholder)
-					Button(action: {}) {
-						Image(systemName: "bubble.right")
-							.font(.system(size: 18))
-							.foregroundColor(colorScheme == .dark ? .white : .black)
-					}
-					
-					// Share button (placeholder)
-					Button(action: {}) {
-						Image(systemName: "arrow.turn.up.right")
-							.font(.system(size: 18))
-							.foregroundColor(colorScheme == .dark ? .white : .black)
-					}
-				}
-				Spacer()
-			}
-			.padding(.horizontal)
-		}
-		.padding(.top, 16)
-		.padding(.bottom, 8)
-	}
-	
-	// MARK: - Blur Background
-	@ViewBuilder
-	private func blurBackgroundView(height: CGFloat, mediaItem: MediaItem) -> some View {
-		if let imageURL = mediaItem.imageURL, !imageURL.isEmpty, let url = URL(string: imageURL) {
-			WebImage(url: url)
-				.resizable()
-				.indicator(.activity)
-				.aspectRatio(contentMode: .fill)
-				.frame(width: screenWidth, height: height)
-				.blur(radius: 20)
-				.opacity(0.6)
-		} else if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty, let url = URL(string: thumbnailURL) {
-			WebImage(url: url)
-				.resizable()
-				.indicator(.activity)
-				.aspectRatio(contentMode: .fill)
-				.frame(width: screenWidth, height: height)
-				.blur(radius: 20)
-				.opacity(0.6)
-		} else {
-			LinearGradient(
-				colors: colorScheme == .dark ? 
-					[Color.white.opacity(0.3), Color.white.opacity(0.1)] :
-					[Color.black.opacity(0.3), Color.black.opacity(0.1)],
-				startPoint: .top,
-				endPoint: .bottom
-			)
-			.frame(height: height)
-		}
-	}
-	
-	// MARK: - Height Calculation (matching CYPostDetailView)
-	private func calculateHeight(for mediaItem: MediaItem) -> CGFloat {
-		if mediaItem.isVideo {
-			// For videos, use thumbnail aspect ratio if available, otherwise default 16:9
-			if let thumbnailURL = mediaItem.thumbnailURL,
-			   let aspectRatio = imageAspectRatios[thumbnailURL] {
-				return screenWidth / aspectRatio
-			} else {
-				return screenWidth * (9.0 / 16.0) // Default 16:9
-			}
-		} else if let imageURL = mediaItem.imageURL,
-				  let aspectRatio = imageAspectRatios[imageURL] {
-			// Use calculated aspect ratio
-			return screenWidth / aspectRatio
-		} else {
-			// Default aspect ratio for images (4:3)
-			return screenWidth * (3.0 / 4.0)
-		}
-	}
-	
-	// MARK: - Calculate Image Aspect Ratios
-	private func calculateImageAspectRatios() {
-		let mediaItems = post.mediaItems.isEmpty ? (post.firstMediaItem.map { [$0] } ?? []) : post.mediaItems
-		
-		for mediaItem in mediaItems {
-			if !mediaItem.isVideo {
-				if let imageURL = mediaItem.imageURL, !imageURL.isEmpty {
-					Task {
-						if let url = URL(string: imageURL) {
-							SDWebImageManager.shared.loadImage(
-								with: url,
-								options: [],
-								progress: nil
-							) { image, data, error, cacheType, finished, loadedImageURL in
-								if let image = image, finished, let loadedImageURL = loadedImageURL {
-									let aspectRatio = image.size.width / image.size.height
-									DispatchQueue.main.async {
-										imageAspectRatios[loadedImageURL.absoluteString] = aspectRatio
-									}
-								}
-							}
-						}
-					}
-				}
-			} else if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty {
-				Task {
-					if let url = URL(string: thumbnailURL) {
-						SDWebImageManager.shared.loadImage(
-							with: url,
-							options: [],
-							progress: nil
-						) { image, data, error, cacheType, finished, _ in
-							if let image = image, finished {
-								let aspectRatio = image.size.width / image.size.height
-								DispatchQueue.main.async {
-									imageAspectRatios[thumbnailURL] = aspectRatio
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	
-	private func loadOwnerInfo() {
-		Task {
-			if let owner = try? await UserService.shared.getUser(userId: collection.ownerId) {
-				await MainActor.run {
-					ownerProfileImageURL = owner.profileImageURL
-					ownerUsername = owner.username
-				}
-			}
-		}
-	}
-	
-	// MARK: - Caption and Tags View
-	@ViewBuilder
-	private var captionAndTagsView: some View {
-		let hasCaption = post.caption != nil && !post.caption!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-		let hasTags = !taggedUsers.isEmpty
-		
-		if hasCaption || hasTags {
-			VStack(alignment: .leading, spacing: 4) {
-				// Caption first (if exists)
-				if hasCaption {
-					Text(post.caption!)
-						.font(.system(size: 13))
-						.foregroundColor(colorScheme == .dark ? .white : .black)
-						.frame(maxWidth: .infinity, alignment: .leading)
-						.fixedSize(horizontal: false, vertical: true)
-				}
-				
-				// Tags with @ symbol (if exists)
-				if hasTags {
-					// Create a single text with all tags
-					let tagsText = taggedUsers.map { "@\($0.username)" }.joined(separator: " ")
-					Text(tagsText)
-						.font(.system(size: 13))
-						.foregroundColor(.blue)
-						.frame(maxWidth: .infinity, alignment: .leading)
-						.fixedSize(horizontal: false, vertical: true)
-				}
-			}
-			.padding(.horizontal)
-			.padding(.top, 8)
-		}
-	}
-	
-	private func loadTaggedUsers() {
 		Task {
 			do {
-				taggedUsers = try await PostService.shared.getTaggedUsers(postId: post.id)
+				guard let currentUserId = authService.user?.uid else { return }
+				
+				// Load followed collections (in case they changed)
+				let followed = try await CollectionService.shared.getFollowedCollections(userId: currentUserId)
+				
+				// Load more posts from all followed collections
+				var newPosts: [(post: CollectionPost, collection: CollectionData)] = []
+				let pageSize = isIPad ? 18 : 15
+				
+				// Get posts created before the last post timestamp
+				let cutoffDate = lastPostTimestamp ?? Date()
+				
+				await withTaskGroup(of: [(post: CollectionPost, collection: CollectionData)].self) { group in
+					for collection in followed {
+						group.addTask {
+							// Skip hidden collections entirely - don't even load posts
+							let isHidden = await MainActor.run { () -> Bool in
+								CYServiceManager.shared.isCollectionHidden(collectionId: collection.id)
+							}
+							if isHidden {
+								print("🚫 CYHome: Skipping hidden collection '\(collection.name)' (ID: \(collection.id))")
+								return []
+							}
+							
+							do {
+								// Load more posts from this collection
+								// We'll need to track last document per collection for proper pagination
+								// For now, use a simple approach: get posts older than cutoff
+								let db = Firestore.firestore()
+								let query = db.collection("posts")
+									.whereField("collectionId", isEqualTo: collection.id)
+									.whereField("createdAt", isLessThan: Timestamp(date: cutoffDate))
+									.order(by: "createdAt", descending: true)
+									.limit(to: 3) // 3 posts per collection per page
+								
+								let snapshot = try await query.getDocuments()
+								var posts: [CollectionPost] = []
+								
+								for doc in snapshot.documents {
+									// Documents from getDocuments() are already QueryDocumentSnapshot
+									// PostService is @MainActor, access it from MainActor
+									let postResult = await MainActor.run {
+										Result { try PostService.shared.parsePost(from: doc) }
+									}
+									
+									switch postResult {
+									case .success(let post):
+										posts.append(post)
+									case .failure(let error):
+										print("⚠️ Error parsing post \(doc.documentID): \(error)")
+										// Continue with other documents
+									}
+								}
+								
+								// Filter posts (includes hidden collections check)
+								let filteredPosts = await CollectionService.filterPosts(posts)
+								return filteredPosts.map { (post: $0, collection: collection) }
+							} catch {
+								print("Error loading more posts for collection \(collection.id): \(error)")
+								return []
+							}
+						}
+					}
+					
+					for await collectionPosts in group {
+						newPosts.append(contentsOf: collectionPosts)
+					}
+				}
+				
+				// Sort by creation date (newest first)
+				newPosts.sort { $0.post.createdAt > $1.post.createdAt }
+				
+				// Take only pageSize
+				let limitedNewPosts = Array(newPosts.prefix(pageSize))
+				
+				if !limitedNewPosts.isEmpty {
+					lastPostTimestamp = limitedNewPosts.last?.post.createdAt
+					hasMoreData = newPosts.count >= pageSize
+					
+					await MainActor.run {
+						// Filter out any posts from hidden collections and blocked users before appending
+						let hiddenCollectionIds = Set(cyServiceManager.getHiddenCollectionIds())
+						let blockedUserIds = Set(cyServiceManager.getBlockedUsers())
+						let filteredNewPosts = limitedNewPosts.filter { postWithCollection in
+							!hiddenCollectionIds.contains(postWithCollection.post.collectionId) &&
+							!blockedUserIds.contains(postWithCollection.post.authorId)
+						}
+						
+						postsWithCollections.append(contentsOf: filteredNewPosts)
+						// Re-sort all posts
+						postsWithCollections.sort { $0.post.createdAt > $1.post.createdAt }
+						isLoadingMore = false
+					}
+				} else {
+					await MainActor.run {
+						hasMoreData = false
+						isLoadingMore = false
+					}
+				}
 			} catch {
-				print("Error loading tagged users: \(error)")
+				print("❌ Error loading more posts: \(error)")
+				await MainActor.run {
+		isLoadingMore = false
+		hasMoreData = false
+				}
+			}
+		}
+	}
+	
+	private func loadUnreadNotificationCount() {
+		guard let currentUserId = authService.user?.uid else { return }
+		
+		Task {
+			do {
+				let notifications = try await NotificationService.shared.getNotifications(userId: currentUserId)
+				// Count ALL unread notifications (same as messages badge)
+				let unreadCount = notifications.filter { !$0.isRead }.count
+				await MainActor.run {
+					self.unreadNotificationCount = unreadCount
+				}
+			} catch {
+				print("❌ Error loading unread notification count: \(error)")
 			}
 		}
 	}
@@ -1009,6 +1010,17 @@ struct FollowedCollectionRow: View {
 	let onUnfollow: () -> Void
 	@State private var ownerProfileImageURL: String?
 	@State private var ownerUsername: String?
+	@State private var ownerProfileListener: ListenerRegistration?
+	
+	// Computed property for username and type text
+	private var usernameAndTypeText: String {
+		var text = ""
+		if let username = ownerUsername {
+			text = "@\(username) • "
+		}
+		text += collection.type == "Individual" ? "Individual" : "\(collection.memberCount) members"
+		return text
+	}
 	
 	var body: some View {
 		HStack(spacing: 12) {
@@ -1031,24 +1043,20 @@ struct FollowedCollectionRow: View {
 				Text(collection.name)
 					.font(.subheadline)
 					.foregroundColor(.primary)
+					.lineLimit(2)
+					.multilineTextAlignment(.leading)
+					.fixedSize(horizontal: false, vertical: true)
 				
 				// Username • Type (matching NotificationRow time font: .caption)
-				HStack(spacing: 4) {
-					if let username = ownerUsername {
-						Text("@\(username)")
+				// Combine into single Text view to prevent cutoff and maintain proper alignment
+				Text(usernameAndTypeText)
 							.font(.caption)
 							.foregroundColor(.secondary)
-						
-						Text("•")
-							.font(.caption)
-							.foregroundColor(.secondary)
+					.lineLimit(2)
+					.multilineTextAlignment(.leading)
+					.fixedSize(horizontal: false, vertical: true)
 					}
-					
-					Text(collection.type == "Individual" ? "Individual" : "\(collection.memberCount) members")
-						.font(.caption)
-						.foregroundColor(.secondary)
-				}
-			}
+			.frame(maxWidth: .infinity, alignment: .leading)
 			
 			Spacer()
 			
@@ -1071,14 +1079,79 @@ struct FollowedCollectionRow: View {
 		.shadow(color: Color.black.opacity(0.05), radius: 2, x: 0, y: 1)
 		.task {
 			await loadOwnerInfo()
+			setupOwnerProfileListener() // Set up real-time listener for owner's profile
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { notification in
+			// Reload owner info when profile is updated
+			if let userId = notification.userInfo?["userId"] as? String,
+			   userId == collection.ownerId {
+				Task {
+					await loadOwnerInfo()
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("OwnerProfileImageUpdated"))) { notification in
+			// Update owner info when real-time listener detects changes
+			if let collectionId = notification.object as? String,
+			   collectionId == collection.id,
+			   let ownerId = notification.userInfo?["ownerId"] as? String,
+			   ownerId == collection.ownerId {
+				if let newProfileImageURL = notification.userInfo?["profileImageURL"] as? String {
+					ownerProfileImageURL = newProfileImageURL
+				}
+				if let newUsername = notification.userInfo?["username"] as? String {
+					ownerUsername = newUsername
+				}
+			}
+		}
+		.onDisappear {
+			// Clean up listener when view disappears
+			ownerProfileListener?.remove()
+			ownerProfileListener = nil
 		}
 	}
 	
+	// MARK: - Helper Functions
 	private func loadOwnerInfo() async {
 		if let owner = try? await UserService.shared.getUser(userId: collection.ownerId) {
 			await MainActor.run {
 				ownerProfileImageURL = owner.profileImageURL
 				ownerUsername = owner.username
+			}
+		}
+	}
+	
+	// MARK: - Real-time Listener for Owner's Profile
+	private func setupOwnerProfileListener() {
+		// Remove existing listener if any
+		ownerProfileListener?.remove()
+		
+		// Set up real-time Firestore listener for the owner's profile
+		// This allows other users to see real-time updates when the owner edits their profile
+		let db = Firestore.firestore()
+		let collectionId = collection.id
+		let ownerId = collection.ownerId
+		ownerProfileListener = db.collection("users").document(ownerId).addSnapshotListener { snapshot, error in
+			Task { @MainActor in
+				if let error = error {
+					print("❌ FollowedCollectionRow: Error listening to owner profile updates: \(error.localizedDescription)")
+					return
+				}
+				
+				guard let snapshot = snapshot, let data = snapshot.data() else {
+					return
+				}
+				
+				// Immediately update owner info from Firestore (real-time)
+				// Use NotificationCenter to update the view since we can't capture self in struct
+				let newProfileImageURL = data["profileImageURL"] as? String
+				let newUsername = data["username"] as? String ?? ""
+				NotificationCenter.default.post(
+					name: Notification.Name("OwnerProfileImageUpdated"),
+					object: collectionId,
+					userInfo: ["ownerId": ownerId, "profileImageURL": newProfileImageURL as Any, "username": newUsername]
+				)
+				print("🔄 FollowedCollectionRow: Owner profile updated in real-time from Firestore")
 			}
 		}
 	}

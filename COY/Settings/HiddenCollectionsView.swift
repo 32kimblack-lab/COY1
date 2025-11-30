@@ -9,8 +9,6 @@ struct HiddenCollectionsView: View {
 	
 	@State private var hiddenCollections: [CollectionData] = []
 	@State private var isLoading = false
-	@State private var showUnhideAlert = false
-	@State private var selectedCollection: CollectionData?
 	@State private var userListener: ListenerRegistration?
 	
 	var body: some View {
@@ -70,8 +68,7 @@ struct HiddenCollectionsView: View {
 							HiddenCollectionRow(
 								collection: collection,
 								onUnhide: {
-									selectedCollection = collection
-									showUnhideAlert = true
+									unhideCollection(collection)
 								}
 							)
 						}
@@ -94,23 +91,15 @@ struct HiddenCollectionsView: View {
 		}
 		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionUnhidden"))) { notification in
 			if let collectionId = notification.object as? String {
-				// Remove from list immediately
+				// Remove from list immediately with animation (if not already removed)
+				withAnimation(.easeOut(duration: 0.3)) {
 				hiddenCollections.removeAll { $0.id == collectionId }
+				}
 			}
 		}
 		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CurrentUserDidChange"))) { _ in
 			// Reload when user data changes
 			loadHiddenCollections()
-		}
-		.alert("Unhide Collection", isPresented: $showUnhideAlert) {
-			Button("Cancel", role: .cancel) { }
-			Button("Unhide", role: .destructive) {
-				if let collection = selectedCollection {
-					unhideCollection(collection)
-				}
-			}
-		} message: {
-			Text("Are you sure you want to unhide this collection?")
 		}
 	}
 	
@@ -198,14 +187,28 @@ struct HiddenCollectionsView: View {
 		}
 	}
 	
+	@MainActor
 	private func unhideCollection(_ collection: CollectionData) {
+		let collectionId = collection.id
+		
+		// Immediately remove from list for smooth UI (optimistic update)
+		withAnimation(.easeOut(duration: 0.3)) {
+			hiddenCollections.removeAll { $0.id == collectionId }
+		}
+		
+		// Then perform the actual unhide operation
 		Task {
 			do {
-				try await CYServiceManager.shared.unhideCollection(collectionId: collection.id)
-				// Reload to ensure consistency
-				loadHiddenCollections()
+				try await CYServiceManager.shared.unhideCollection(collectionId: collectionId)
+				// The notification listener will handle the removal, but we already did it optimistically
+				// No need to reload - the list is already updated
+				print("✅ Successfully unhid collection: \(collection.name)")
 			} catch {
-				print("Error unhiding collection: \(error)")
+				print("❌ Error unhiding collection: \(error)")
+				// If error, reload to restore the collection in case it failed
+				await MainActor.run {
+					loadHiddenCollections()
+				}
 			}
 		}
 	}
@@ -252,7 +255,10 @@ struct HiddenCollectionRow: View {
 			Spacer()
 			
 			// Unhide button
-			Button(action: onUnhide) {
+			Button(action: {
+				print("🔘 Unhide button tapped for collection: \(collection.name)")
+				onUnhide()
+			}) {
 				Text("Unhide")
 					.font(.subheadline)
 					.fontWeight(.semibold)
@@ -262,6 +268,8 @@ struct HiddenCollectionRow: View {
 					.background(Color.blue)
 					.cornerRadius(8)
 			}
+			.buttonStyle(PlainButtonStyle())
+			.contentShape(Rectangle())
 		}
 		.padding()
 		.background(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.95))

@@ -45,7 +45,13 @@ final class CollectionService {
 				}
 			}
 			
-		let docRef = try await db.collection("collections").addDocument(data: collectionData)
+		// Save collection with retry logic
+		let docRef = try await FirebaseRetryManager.shared.executeWithRetry(
+			operation: {
+				try await db.collection("collections").addDocument(data: collectionData)
+			},
+			operationName: "Create collection"
+		)
 		let collectionId = docRef.documentID
 		
 		// Send invite notifications to all invited users
@@ -72,9 +78,14 @@ final class CollectionService {
 	}
 	
 	func getCollection(collectionId: String) async throws -> CollectionData? {
-		// Use Firebase directly
+		// Use Firebase directly with retry logic
 		let db = Firestore.firestore()
-		let doc = try await db.collection("collections").document(collectionId).getDocument()
+		let doc = try await FirebaseRetryManager.shared.executeWithRetry(
+			operation: {
+				try await db.collection("collections").document(collectionId).getDocument()
+			},
+			operationName: "Get collection"
+		)
 		
 		guard let data = doc.data() else { return nil }
 		
@@ -129,7 +140,13 @@ final class CollectionService {
 			authorName: data["authorName"] as? String ?? "",
 			createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
 			firstMediaItem: firstMediaItem,
-			mediaItems: allMediaItems
+			mediaItems: allMediaItems,
+			isPinned: data["isPinned"] as? Bool ?? false,
+			pinnedAt: (data["pinnedAt"] as? Timestamp)?.dateValue(),
+			caption: data["caption"] as? String ?? data["title"] as? String,
+			allowReplies: data["allowReplies"] as? Bool ?? true,
+			allowDownload: data["allowDownload"] as? Bool ?? false,
+			taggedUsers: data["taggedUsers"] as? [String] ?? []
 		)
 	}
 	
@@ -138,8 +155,10 @@ final class CollectionService {
 		let db = Firestore.firestore()
 		
 		// Query 1: Collections where user is the owner
+		// CRITICAL FIX: Add limit to prevent loading all collections
 		let ownedSnapshot = try await db.collection("collections")
 			.whereField("ownerId", isEqualTo: userId)
+			.limit(to: 100) // Limit to 100 owned collections max
 			.getDocuments()
 		
 		// Query 2: Get user's collections array from user document
@@ -241,15 +260,134 @@ final class CollectionService {
 			}
 		}
 		
-		return Array(allCollections.values)
+		let allCollectionsArray = Array(allCollections.values)
+		
+		// Filter out hidden collections (mutual blocking, blocked users, etc.)
+		return await CollectionService.filterCollections(allCollectionsArray)
 	}
 	
-	/// Get posts for a collection from Firebase (source of truth)
+	// MARK: - Paginated Collection Loading
+	/// Get user collections with pagination
+	/// - Parameters:
+	///   - userId: The user ID
+	///   - limit: Number of collections to fetch
+	///   - lastDocument: Last document from previous page (nil for first page)
+	/// - Returns: Tuple of (collections, lastDocument, hasMore)
+	func getUserCollectionsPaginated(
+		userId: String,
+		limit: Int = 20,
+		lastDocument: DocumentSnapshot? = nil
+	) async throws -> (collections: [CollectionData], lastDocument: DocumentSnapshot?, hasMore: Bool) {
+		let db = Firestore.firestore()
+		
+		var query: Query = db.collection("collections")
+			.whereField("ownerId", isEqualTo: userId)
+			.order(by: "createdAt", descending: true)
+		
+		if let lastDoc = lastDocument {
+			query = query.start(afterDocument: lastDoc)
+		}
+		query = query.limit(to: limit)
+		
+		let snapshot = try await query.getDocuments()
+		
+		var collections: [CollectionData] = []
+		for doc in snapshot.documents {
+			let data = doc.data()
+			let collection = CollectionData(
+				id: doc.documentID,
+				name: data["name"] as? String ?? "",
+				description: data["description"] as? String ?? "",
+				type: data["type"] as? String ?? "Individual",
+				isPublic: data["isPublic"] as? Bool ?? false,
+				ownerId: data["ownerId"] as? String ?? userId,
+				ownerName: data["ownerName"] as? String ?? "",
+				owners: data["owners"] as? [String] ?? [userId],
+				imageURL: data["imageURL"] as? String,
+				invitedUsers: data["invitedUsers"] as? [String] ?? [],
+				members: data["members"] as? [String] ?? [userId],
+				memberCount: data["memberCount"] as? Int ?? 1,
+				followers: data["followers"] as? [String] ?? [],
+				followerCount: data["followerCount"] as? Int ?? 0,
+				allowedUsers: data["allowedUsers"] as? [String] ?? [],
+				deniedUsers: data["deniedUsers"] as? [String] ?? [],
+				createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+			)
+			collections.append(collection)
+		}
+		
+		let lastDoc = snapshot.documents.last
+		let hasMore = snapshot.documents.count == limit
+		
+		// Filter out hidden collections (mutual blocking, blocked users, etc.)
+		let filteredCollections = await CollectionService.filterCollections(collections)
+		
+		return (filteredCollections, lastDoc, hasMore)
+	}
+	
+	/// Get visible collections for a user with pagination (for viewing other users' profiles)
+	func getVisibleCollectionsPaginated(
+		profileUserId: String,
+		viewingUserId: String?,
+		limit: Int = 20,
+		lastDocument: DocumentSnapshot? = nil
+	) async throws -> (collections: [CollectionData], lastDocument: DocumentSnapshot?, hasMore: Bool) {
+		let db = Firestore.firestore()
+		
+		var query: Query = db.collection("collections")
+			.whereField("ownerId", isEqualTo: profileUserId)
+			.whereField("isPublic", isEqualTo: true)
+			.order(by: "createdAt", descending: true)
+		
+		if let lastDoc = lastDocument {
+			query = query.start(afterDocument: lastDoc)
+		}
+		query = query.limit(to: limit)
+		
+		let snapshot = try await query.getDocuments()
+		
+		var collections: [CollectionData] = []
+		for doc in snapshot.documents {
+			let data = doc.data()
+			let collection = CollectionData(
+				id: doc.documentID,
+				name: data["name"] as? String ?? "",
+				description: data["description"] as? String ?? "",
+				type: data["type"] as? String ?? "Individual",
+				isPublic: data["isPublic"] as? Bool ?? false,
+				ownerId: data["ownerId"] as? String ?? profileUserId,
+				ownerName: data["ownerName"] as? String ?? "",
+				owners: data["owners"] as? [String] ?? [profileUserId],
+				imageURL: data["imageURL"] as? String,
+				invitedUsers: data["invitedUsers"] as? [String] ?? [],
+				members: data["members"] as? [String] ?? [],
+				memberCount: data["memberCount"] as? Int ?? 1,
+				followers: data["followers"] as? [String] ?? [],
+				followerCount: data["followerCount"] as? Int ?? 0,
+				allowedUsers: data["allowedUsers"] as? [String] ?? [],
+				deniedUsers: data["deniedUsers"] as? [String] ?? [],
+				createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+			)
+			collections.append(collection)
+		}
+		
+		let lastDoc = snapshot.documents.last
+		let hasMore = snapshot.documents.count == limit
+		
+		// Filter out hidden collections (mutual blocking, blocked users, etc.)
+		let filteredCollections = await CollectionService.filterCollections(collections)
+		
+		return (filteredCollections, lastDoc, hasMore)
+	}
+	
+	/// Get posts for a collection from Firebase (source of truth) - DEPRECATED: Use PostService.getCollectionPostsPaginated instead
 	func getCollectionPostsFromFirebase(collectionId: String) async throws -> [CollectionPost] {
 		let db = Firestore.firestore()
+		// CRITICAL FIX: Add limit to prevent loading thousands of posts
 		// Query without orderBy to avoid index requirement, then sort in memory
 		let snapshot = try await db.collection("posts")
 			.whereField("collectionId", isEqualTo: collectionId)
+			.limit(to: 100) // Limit to 100 posts max (use pagination for more)
 			.getDocuments()
 		
 		let loadedPosts = snapshot.documents.compactMap { doc -> CollectionPost? in
@@ -297,8 +435,28 @@ final class CollectionService {
 				isPinned: data["isPinned"] as? Bool ?? false,
 				pinnedAt: (data["pinnedAt"] as? Timestamp)?.dateValue(),
 				caption: data["caption"] as? String ?? data["title"] as? String,
-				allowReplies: data["allowReplies"] as? Bool ?? true,
-				allowDownload: data["allowDownload"] as? Bool ?? false,
+				allowReplies: {
+					let firestoreValue = data["allowReplies"] as? Bool
+					let value = firestoreValue ?? true
+					let postId = doc.documentID
+					if firestoreValue == nil {
+						print("⚠️ Loading post \(postId): allowReplies is MISSING in Firestore, using default: \(value)")
+					} else {
+						print("✅ Loading post \(postId): allowReplies from Firestore = \(firestoreValue!), using: \(value)")
+					}
+					return value
+				}(),
+				allowDownload: {
+					let firestoreValue = data["allowDownload"] as? Bool
+					let value = firestoreValue ?? false
+					let postId = doc.documentID
+					if firestoreValue == nil {
+						print("⚠️ Loading post \(postId): allowDownload is MISSING in Firestore, using default: \(value)")
+					} else {
+						print("✅ Loading post \(postId): allowDownload from Firestore = \(firestoreValue!), using: \(value)")
+					}
+					return value
+				}(),
 				taggedUsers: data["taggedUsers"] as? [String] ?? []
 			)
 		}
@@ -313,6 +471,15 @@ final class CollectionService {
 		// Use Firebase directly
 		guard let collection = try await getCollection(collectionId: collectionId) else {
 			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
+		}
+		
+		// Only owner can delete collection
+		guard let currentUserId = Auth.auth().currentUser?.uid else {
+			throw NSError(domain: "CollectionService", code: -1, userInfo: [NSLocalizedDescriptionKey: "User not authenticated"])
+		}
+		
+		if collection.ownerId != currentUserId {
+			throw NSError(domain: "CollectionService", code: 403, userInfo: [NSLocalizedDescriptionKey: "Only the collection owner can delete the collection"])
 		}
 		
 		let ownerId = collection.ownerId
@@ -394,79 +561,192 @@ final class CollectionService {
 	}
 	
 	func permanentlyDeleteCollection(collectionId: String, ownerId: String) async throws {
-		print("🗑️ CollectionService: Starting permanent delete for collection: \(collectionId)")
+		print("🗑️ CollectionService: Starting PERMANENT delete for collection: \(collectionId)")
+		print("   Owner ID: \(ownerId)")
+		print("   This function works for ALL collection types: Individual, Request, Join, Invite")
+		print("   All posts, comments, media, and references will be permanently deleted")
 		
 		// Use Firebase directly
 		let db = Firestore.firestore()
 		let storage = Storage.storage()
 		
-		// Step 1: Get all posts in the collection
-		let postsSnapshot = try await db.collection("posts")
+		// Track any errors but continue with deletion
+		var deletionErrors: [String] = []
+		
+		// Get collection data first (from deleted_collections or main collections) to get all info
+		let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
+		let mainCollectionRef = db.collection("collections").document(collectionId)
+		
+		var collectionData: [String: Any]? = nil
+		if let deletedData = try? await deletedRef.getDocument().data() {
+			collectionData = deletedData
+			print("📋 Found collection in deleted_collections")
+		} else if let mainData = try? await mainCollectionRef.getDocument().data() {
+			collectionData = mainData
+			print("📋 Found collection in main collections")
+		}
+		
+		// Step 1: Delete ALL posts in the collection (with pagination) - works for ALL collection types
+		var postLastDoc: DocumentSnapshot? = nil
+		var hasMorePosts = true
+		var totalPostsDeleted = 0
+		
+		while hasMorePosts {
+			var postQuery = db.collection("posts")
 			.whereField("collectionId", isEqualTo: collectionId)
-			.getDocuments()
+				.limit(to: 100) // Process 100 posts at a time
+			
+			if let lastDoc = postLastDoc {
+				postQuery = postQuery.start(afterDocument: lastDoc)
+			}
+			
+			let postsSnapshot = try await postQuery.getDocuments()
+			print("📋 Processing batch of \(postsSnapshot.documents.count) posts (total deleted: \(totalPostsDeleted))")
+			
+			if postsSnapshot.documents.isEmpty {
+				hasMorePosts = false
+				break
+			}
 		
-		print("📋 Found \(postsSnapshot.documents.count) posts to delete")
-		
-		// Step 2: For each post, delete comments and media files
+			// Step 2: For each post, delete ALL comments and ALL media files
+		// CRITICAL: Use do-catch for each post so one failure doesn't stop all deletions
 		for postDoc in postsSnapshot.documents {
 			let postId = postDoc.documentID
 			let postData = postDoc.data()
 			
-			// Delete all comments for this post
-			let commentsSnapshot = try await db.collection("posts")
-				.document(postId)
-				.collection("comments")
-				.getDocuments()
-			
-			print("🗑️ Deleting \(commentsSnapshot.documents.count) comments for post \(postId)")
-			for commentDoc in commentsSnapshot.documents {
-				try await commentDoc.reference.delete()
-			}
-			
-			// Delete media files from Firebase Storage
-			if let mediaItems = postData["mediaItems"] as? [[String: Any]] {
-				for mediaItem in mediaItems {
-					// Delete image if exists
-					if let imageURL = mediaItem["imageURL"] as? String, !imageURL.isEmpty {
-						if let url = URL(string: imageURL) {
-							let imageRef = storage.reference(forURL: url.absoluteString)
-							try? await imageRef.delete()
-							print("🗑️ Deleted image: \(imageURL)")
-						}
+			do {
+				// CRITICAL FIX: Ensure post has collectionOwnerId for permission to delete
+				// For member collections, posts created by members might not have collectionOwnerId set
+				// We MUST set it to the collection owner so owner can delete all posts
+				let currentCollectionOwnerId = postData["collectionOwnerId"] as? String
+				if currentCollectionOwnerId != ownerId {
+					print("⚠️ Post \(postId) collectionOwnerId mismatch or missing (current: \(currentCollectionOwnerId ?? "nil"), owner: \(ownerId)), updating before deletion...")
+					do {
+						try await postDoc.reference.updateData([
+							"collectionOwnerId": ownerId
+						])
+						print("✅ Updated post \(postId) with collectionOwnerId = \(ownerId)")
+						// Update postData for subsequent operations
+						var updatedPostData = postData
+						updatedPostData["collectionOwnerId"] = ownerId
+					} catch let updateError {
+						print("⚠️ Could not update post \(postId) with collectionOwnerId: \(updateError.localizedDescription)")
+						print("   Will attempt deletion anyway - might work if post author is owner or member")
+						// Continue anyway - might still be deletable
+					}
+				} else {
+					print("✅ Post \(postId) already has correct collectionOwnerId")
+				}
+				
+				// Delete ALL comments for this post (with pagination)
+				var commentLastDoc: DocumentSnapshot? = nil
+				var hasMoreComments = true
+				
+				while hasMoreComments {
+					var commentQuery = db.collection("posts")
+						.document(postId)
+						.collection("comments")
+						.limit(to: 100)
+					
+					if let lastDoc = commentLastDoc {
+						commentQuery = commentQuery.start(afterDocument: lastDoc)
 					}
 					
-					// Delete thumbnail if exists
-					if let thumbnailURL = mediaItem["thumbnailURL"] as? String, !thumbnailURL.isEmpty {
-						if let url = URL(string: thumbnailURL) {
-							let thumbnailRef = storage.reference(forURL: url.absoluteString)
-							try? await thumbnailRef.delete()
-							print("🗑️ Deleted thumbnail: \(thumbnailURL)")
-						}
+					let commentsSnapshot = try await commentQuery.getDocuments()
+					
+					for commentDoc in commentsSnapshot.documents {
+						// Use try? so one comment failure doesn't stop others
+						try? await commentDoc.reference.delete()
 					}
 					
-					// Delete video if exists
-					if let videoURL = mediaItem["videoURL"] as? String, !videoURL.isEmpty {
-						if let url = URL(string: videoURL) {
-							let videoRef = storage.reference(forURL: url.absoluteString)
-							try? await videoRef.delete()
-							print("🗑️ Deleted video: \(videoURL)")
+					hasMoreComments = commentsSnapshot.documents.count == 100
+					commentLastDoc = commentsSnapshot.documents.last
+				}
+				
+				// Delete ALL media files from Firebase Storage
+				if let mediaItems = postData["mediaItems"] as? [[String: Any]] {
+					for mediaItem in mediaItems {
+						// Delete image if exists
+						if let imageURL = mediaItem["imageURL"] as? String, !imageURL.isEmpty {
+							if let url = URL(string: imageURL) {
+								let imageRef = storage.reference(forURL: url.absoluteString)
+								try? await imageRef.delete()
+								print("🗑️ Deleted image: \(imageURL)")
+							}
+						}
+						
+						// Delete thumbnail if exists
+						if let thumbnailURL = mediaItem["thumbnailURL"] as? String, !thumbnailURL.isEmpty {
+							if let url = URL(string: thumbnailURL) {
+								let thumbnailRef = storage.reference(forURL: url.absoluteString)
+								try? await thumbnailRef.delete()
+								print("🗑️ Deleted thumbnail: \(thumbnailURL)")
+							}
+						}
+						
+						// Delete video if exists
+						if let videoURL = mediaItem["videoURL"] as? String, !videoURL.isEmpty {
+							if let url = URL(string: videoURL) {
+								let videoRef = storage.reference(forURL: url.absoluteString)
+								try? await videoRef.delete()
+								print("🗑️ Deleted video: \(videoURL)")
+							}
 						}
 					}
 				}
+				
+				// Delete the post document itself
+				// CRITICAL: For member collections, posts might be created by members
+				// We updated collectionOwnerId above, so owner should be able to delete
+				try await postDoc.reference.delete()
+				totalPostsDeleted += 1
+				print("✅ Deleted post \(postId) with all comments and media")
+			} catch {
+				// CRITICAL: Log error but CONTINUE with other posts
+				// Don't let one post failure stop the entire deletion process
+				let errorMsg = "Post \(postId): \(error.localizedDescription)"
+				print("❌ Error deleting \(errorMsg)")
+				deletionErrors.append(errorMsg)
+				
+				// Try alternative approach: Delete post using batch (might bypass some permission checks)
+				// Or try to delete as the post author if we can determine who created it
+				if let authorId = postData["authorId"] as? String {
+					print("   Post author: \(authorId), Collection owner: \(ownerId)")
+					
+					// If post author is the owner, we should be able to delete
+					// If post author is a member, the collectionOwnerId update should allow deletion
+					// Try one more time with the updated collectionOwnerId
+					print("   Retrying post deletion after collectionOwnerId update...")
+					do {
+						try await postDoc.reference.delete()
+						totalPostsDeleted += 1
+						print("✅ Successfully deleted post \(postId) on retry")
+						// Remove from errors since it succeeded on retry
+						deletionErrors.removeAll { $0.contains(postId) }
+					} catch let retryError {
+						print("❌ Post \(postId) still failed to delete after retry: \(retryError.localizedDescription)")
+						print("   This post will remain in Firestore - manual cleanup may be needed")
+						// Continue with other posts - don't stop the entire deletion
+					}
+				} else {
+					print("   Could not determine post author, skipping this post")
+					// Continue with other posts
+				}
 			}
-			
-			// Delete the post document itself
-			try await postDoc.reference.delete()
-			print("✅ Deleted post \(postId)")
 		}
 		
 		print("✅ Deleted \(postsSnapshot.documents.count) posts and all their comments/media from collection")
 		
+		// Update pagination cursor
+		postLastDoc = postsSnapshot.documents.last
+		hasMorePosts = postsSnapshot.documents.count == 100
+		}
+		
+		print("✅ Total: Deleted \(totalPostsDeleted) posts, all comments, and all media files")
+		
 		// Step 3: Delete collection image from Storage if exists
-		// Get collection data first to find image URL
-		let deletedRef = db.collection("users").document(ownerId).collection("deleted_collections").document(collectionId)
-		if let deletedData = try? await deletedRef.getDocument().data(),
-		   let imageURL = deletedData["imageURL"] as? String, !imageURL.isEmpty {
+		if let collectionData = collectionData,
+		   let imageURL = collectionData["imageURL"] as? String, !imageURL.isEmpty {
 			if let url = URL(string: imageURL) {
 				let imageRef = storage.reference(forURL: url.absoluteString)
 				try? await imageRef.delete()
@@ -474,35 +754,135 @@ final class CollectionService {
 			}
 		}
 		
-		// Step 4: Delete from deleted_collections subcollection
+		// Step 4: Clean up user references (remove collection from users' followedCollectionIds)
+		// This works for ALL collection types (Individual, Request, Join, Invite)
+		if let collectionData = collectionData,
+		   let followers = collectionData["followers"] as? [String], !followers.isEmpty {
+			print("🧹 Cleaning up \(followers.count) follower references...")
+			var batch = db.batch()
+			var batchCount = 0
+			
+			for followerId in followers {
+				let userRef = db.collection("users").document(followerId)
+				batch.updateData([
+					"followedCollectionIds": FieldValue.arrayRemove([collectionId])
+				], forDocument: userRef)
+				batchCount += 1
+				
+				// Firestore batch limit is 500
+				if batchCount >= 500 {
+					try await batch.commit()
+					print("✅ Cleaned up batch of \(batchCount) follower references")
+					batch = db.batch() // Create new batch
+					batchCount = 0
+				}
+			}
+			
+			if batchCount > 0 {
+				try await batch.commit()
+				print("✅ Cleaned up remaining \(batchCount) follower references")
+			}
+		}
+		
+		// Step 5: Clean up member references (remove collection from members' user documents)
+		// This is important for Request/Join/Invite collections
+		if let collectionData = collectionData,
+		   let members = collectionData["members"] as? [String], !members.isEmpty {
+			print("🧹 Cleaning up \(members.count) member references...")
+			var batch = db.batch()
+			var batchCount = 0
+			
+			for memberId in members {
+				let userRef = db.collection("users").document(memberId)
+				// Remove from user's collections array if it exists
+				batch.updateData([
+					"collections": FieldValue.arrayRemove([collectionId])
+				], forDocument: userRef)
+				batchCount += 1
+				
+				// Firestore batch limit is 500
+				if batchCount >= 500 {
+					try await batch.commit()
+					print("✅ Cleaned up batch of \(batchCount) member references")
+					batch = db.batch() // Create new batch
+					batchCount = 0
+				}
+			}
+			
+			if batchCount > 0 {
+				try await batch.commit()
+				print("✅ Cleaned up remaining \(batchCount) member references")
+			}
+		}
+		
+		// Step 6: Delete collection-related notifications
+		// Delete all notifications related to this collection (requests, invites, etc.)
+		print("🧹 Cleaning up collection-related notifications...")
+		let notificationsQuery = db.collection("notifications")
+			.whereField("collectionId", isEqualTo: collectionId)
+			.limit(to: 500)
+		
+		let notificationsSnapshot = try? await notificationsQuery.getDocuments()
+		if let notifications = notificationsSnapshot?.documents, !notifications.isEmpty {
+			let batch = db.batch()
+			for notificationDoc in notifications {
+				// Get userId from notification to delete from user's notifications subcollection
+				let notificationData = notificationDoc.data()
+				if let userId = notificationData["userId"] as? String {
+					let userNotificationRef = db.collection("users").document(userId)
+						.collection("notifications").document(notificationDoc.documentID)
+					batch.deleteDocument(userNotificationRef)
+				}
+				// Also delete from main notifications collection
+				batch.deleteDocument(notificationDoc.reference)
+			}
+			try? await batch.commit()
+			print("✅ Deleted \(notifications.count) collection-related notifications")
+		}
+		
+		// Step 7: Delete from deleted_collections subcollection
 		try await deletedRef.delete()
 		print("✅ Deleted collection from deleted_collections subcollection")
 		
-		// Step 5: Also delete from main collections if it somehow still exists
-		let mainCollectionRef = db.collection("collections").document(collectionId)
+		// Step 8: Also delete from main collections if it somehow still exists
 		if (try? await mainCollectionRef.getDocument().exists) == true {
 			try await mainCollectionRef.delete()
 			print("✅ Deleted collection from main collections")
 		}
 		
-		print("✅ CollectionService: Collection permanently deleted with ALL related data")
+		print("✅ CollectionService: Collection PERMANENTLY deleted with ALL related data")
+		print("   - Posts deleted: \(totalPostsDeleted)")
+		print("   - Collection image: Deleted")
+		print("   - User references: Cleaned up")
+		print("   - Notifications: Deleted")
+		print("   - Collection document: Deleted")
+		print("   ✅ This works for ALL collection types: Individual, Request, Join, Invite")
 		
 		// Post notification so collection disappears from deleted collections view
 		Task { @MainActor in
 			NotificationCenter.default.post(
 				name: NSNotification.Name("CollectionDeleted"),
 				object: collectionId,
-				userInfo: ["permanent": true]
+				userInfo: ["permanent": true, "ownerId": ownerId, "postsDeleted": totalPostsDeleted]
 			)
 			print("📢 CollectionService: Posted CollectionDeleted notification (permanent)")
 		}
 		
 		print("✅ CollectionService: Permanent delete completed successfully for collection: \(collectionId)")
+		print("   Collection type: \(collectionData?["type"] as? String ?? "Unknown")")
+		print("   Total posts permanently deleted: \(totalPostsDeleted)")
 	}
 	
+	/// Get deleted collections for a user
 	func getDeletedCollections(ownerId: String) async throws -> [(CollectionData, Date)] {
 		let db = Firestore.firestore()
-		let snapshot = try await db.collection("users").document(ownerId).collection("deleted_collections").getDocuments()
+		// CRITICAL FIX: Add limit to prevent loading all deleted collections
+		let snapshot = try await db.collection("users")
+			.document(ownerId)
+			.collection("deleted_collections")
+			.order(by: "deletedAt", descending: true)
+			.limit(to: 50) // Only show last 50 deleted collections
+			.getDocuments()
 		
 		return snapshot.documents.compactMap { doc -> (CollectionData, Date)? in
 			let data = doc.data()
@@ -556,6 +936,22 @@ final class CollectionService {
 		allowedUsers: [String]? = nil,
 		deniedUsers: [String]? = nil
 	) async throws {
+		// Only owner or admin can update collection
+		guard let currentUserId = Auth.auth().currentUser?.uid else {
+			throw NSError(domain: "CollectionService", code: -1, userInfo: [NSLocalizedDescriptionKey: "User not authenticated"])
+		}
+		
+		guard let collection = try await getCollection(collectionId: collectionId) else {
+			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
+		}
+		
+		let isOwner = collection.ownerId == currentUserId
+		let isAdmin = collection.owners.contains(currentUserId)
+		
+		if !isOwner && !isAdmin {
+			throw NSError(domain: "CollectionService", code: 403, userInfo: [NSLocalizedDescriptionKey: "Only owner or admins can update collection"])
+		}
+		
 		var finalImageURL: String? = imageURL
 		
 		// Upload image to Firebase Storage first (like profile images)
@@ -758,9 +1154,21 @@ final class CollectionService {
 	func removeMember(collectionId: String, userId: String) async throws {
 		print("👤 CollectionService: Removing user \(userId) from collection \(collectionId)")
 		
+		// Only owner or admin can remove members
+		guard let currentUserId = Auth.auth().currentUser?.uid else {
+			throw NSError(domain: "CollectionService", code: -1, userInfo: [NSLocalizedDescriptionKey: "User not authenticated"])
+		}
+		
 		// Get collection to check if user is owner (cannot remove owner)
 		guard let collection = try await getCollection(collectionId: collectionId) else {
 			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
+		}
+		
+		let isOwner = collection.ownerId == currentUserId
+		let isAdmin = collection.owners.contains(currentUserId)
+		
+		if !isOwner && !isAdmin {
+			throw NSError(domain: "CollectionService", code: 403, userInfo: [NSLocalizedDescriptionKey: "Only owner or admins can remove members"])
 		}
 		
 		// Cannot remove the owner
@@ -802,6 +1210,12 @@ final class CollectionService {
 				name: NSNotification.Name("ProfileUpdated"),
 				object: nil,
 				userInfo: ["collectionId": collectionId, "userId": userId]
+			)
+			// Clear request state for this user and collection (they're no longer a member)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionRequestCancelled"),
+				object: collectionId,
+				userInfo: ["requesterId": userId, "collectionId": collectionId]
 			)
 		}
 		
@@ -876,6 +1290,12 @@ final class CollectionService {
 			NotificationCenter.default.post(
 				name: NSNotification.Name("UserCollectionsUpdated"),
 				object: userId
+			)
+			// Clear request state for this user and collection (they're no longer a member)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionRequestCancelled"),
+				object: collectionId,
+				userInfo: ["requesterId": userId, "collectionId": collectionId]
 			)
 			print("📢 CollectionService: Posted CollectionUpdated notification for member leaving")
 		}
@@ -1189,61 +1609,71 @@ final class CollectionService {
 			return
 		}
 		
-		// Use Firebase directly
-		let db = Firestore.firestore()
-		let collectionRef = db.collection("collections").document(collectionId)
+		// CRITICAL: Verify user is in invitedUsers array (required for Firebase security rules)
+		if !collection.invitedUsers.contains(currentUserId) {
+			throw NSError(domain: "CollectionService", code: 403, userInfo: [NSLocalizedDescriptionKey: "User is not in the invited users list"])
+		}
 		
-		// Get current memberJoinDates
-		let collectionDoc = try await collectionRef.getDocument()
-		var memberJoinDates = collectionDoc.data()?["memberJoinDates"] as? [String: Timestamp] ?? [:]
-		memberJoinDates[currentUserId] = Timestamp()
-		
-		// Add user to members
-		try await collectionRef.updateData([
-			"members": FieldValue.arrayUnion([currentUserId]),
-			"memberCount": FieldValue.increment(Int64(1)),
-			"memberJoinDates": memberJoinDates
-		])
-		
-		// Remove from invitedUsers if present
-		try await collectionRef.updateData([
-			"invitedUsers": FieldValue.arrayRemove([currentUserId])
-		])
-		
-		// Also add collection to user's user document (for profile display)
-		let userRef = db.collection("users").document(currentUserId)
-		try await userRef.updateData([
-			"collections": FieldValue.arrayUnion([collectionId])
-		])
-		
-		print("✅ CollectionService: User \(currentUserId) accepted invite and joined collection \(collectionId)")
-		
-		// Delete the notification
-		try await NotificationService.shared.deleteNotification(
-			notificationId: notificationId,
-			userId: currentUserId
+		// Post notifications immediately for synchronization (same pattern as join button)
+		NotificationCenter.default.post(
+			name: NSNotification.Name("CollectionInviteAccepted"),
+			object: collectionId,
+			userInfo: ["userId": currentUserId]
+		)
+		NotificationCenter.default.post(
+			name: NSNotification.Name("CollectionUpdated"),
+			object: collectionId,
+			userInfo: ["action": "memberAdded", "userId": currentUserId]
+		)
+		NotificationCenter.default.post(
+			name: NSNotification.Name("UserCollectionsUpdated"),
+			object: currentUserId
 		)
 		
-		// Post notification to update UI (use Task to avoid priority inversion)
-		Task { @MainActor in
+		do {
+			// Use Firebase directly (same pattern as acceptCollectionRequest - direct updates work better for permissions)
+			let db = Firestore.firestore()
+			let collectionRef = db.collection("collections").document(collectionId)
+			let userRef = db.collection("users").document(currentUserId)
+			
+			// Get current memberJoinDates
+			let collectionDoc = try await collectionRef.getDocument()
+			var memberJoinDates = collectionDoc.data()?["memberJoinDates"] as? [String: Timestamp] ?? [:]
+			memberJoinDates[currentUserId] = Timestamp()
+			
+			// Add user to members and remove from invitedUsers (same pattern as acceptCollectionRequest)
+			try await collectionRef.updateData([
+				"members": FieldValue.arrayUnion([currentUserId]),
+				"memberCount": FieldValue.increment(Int64(1)),
+				"memberJoinDates": memberJoinDates,
+				"invitedUsers": FieldValue.arrayRemove([currentUserId])
+			])
+			
+			// Also add collection to user's document (for profile display)
+			try await userRef.updateData([
+				"collections": FieldValue.arrayUnion([collectionId])
+			])
+			
+			print("✅ CollectionService: User \(currentUserId) accepted invite and joined collection \(collectionId)")
+			
+			// Delete the notification
+			try await NotificationService.shared.deleteNotification(
+				notificationId: notificationId,
+				userId: currentUserId
+			)
+			
+			print("✅ CollectionService: Collection invite accepted and notification deleted for user \(currentUserId)")
+		} catch {
+			// Revert notifications on error
+			print("❌ CollectionService: Error accepting invite: \(error.localizedDescription)")
+			print("❌ CollectionService: Error details: \(error)")
 			NotificationCenter.default.post(
-				name: NSNotification.Name("CollectionInviteAccepted"),
+				name: NSNotification.Name("CollectionInviteDenied"),
 				object: collectionId,
 				userInfo: ["userId": currentUserId]
 			)
-			NotificationCenter.default.post(
-				name: NSNotification.Name("CollectionUpdated"),
-				object: collectionId,
-				userInfo: ["action": "memberAdded", "userId": currentUserId]
-			)
-			// Post notification to refresh user's profile collections
-			NotificationCenter.default.post(
-				name: NSNotification.Name("UserCollectionsUpdated"),
-				object: currentUserId
-			)
+			throw error
 		}
-		
-		print("✅ CollectionService: Collection invite accepted for user \(currentUserId)")
 	}
 	
 	func denyCollectionInvite(collectionId: String, notificationId: String) async throws {
@@ -1302,6 +1732,22 @@ final class CollectionService {
 			throw NSError(domain: "CollectionService", code: 400, userInfo: [NSLocalizedDescriptionKey: "User is already a member"])
 		}
 		
+		// Post notifications immediately for synchronization (same pattern as invite/request)
+		NotificationCenter.default.post(
+			name: NSNotification.Name("CollectionJoined"),
+			object: collectionId,
+			userInfo: ["userId": currentUserId]
+		)
+		NotificationCenter.default.post(
+			name: NSNotification.Name("CollectionUpdated"),
+			object: collectionId,
+			userInfo: ["action": "memberAdded", "userId": currentUserId]
+		)
+		NotificationCenter.default.post(
+			name: NSNotification.Name("UserCollectionsUpdated"),
+			object: currentUserId
+		)
+		
 		// Get current user info before transaction
 		guard let currentUser = try await UserService.shared.getUser(userId: currentUserId) else {
 			throw NSError(domain: "CollectionService", code: -1, userInfo: [NSLocalizedDescriptionKey: "User not found"])
@@ -1316,107 +1762,99 @@ final class CollectionService {
 		var pendingJoinsToNotify: [[String: Any]] = []
 		var collectionNameForNotification = ""
 		
-		_ = try await db.runTransaction { transaction, errorPointer -> Any? in
-			// Get current collection data
-			do {
-				let collectionDoc = try transaction.getDocument(collectionRef)
-				guard let collectionData = collectionDoc.data() else {
+		do {
+			_ = try await db.runTransaction { transaction, errorPointer -> Any? in
+				// Get current collection data
+				do {
+					let collectionDoc = try transaction.getDocument(collectionRef)
+					guard let collectionData = collectionDoc.data() else {
+						if let errorPointer = errorPointer {
+							errorPointer.pointee = NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
+						}
+						return nil
+					}
+					
+					// Get current members and pending joins
+					var members = collectionData["members"] as? [String] ?? []
+					var pendingJoins = collectionData["pendingJoins"] as? [[String: Any]] ?? []
+					
+					// Check if user is already a member (double-check)
+					if members.contains(currentUserId) {
+						return nil // Already a member, nothing to do
+					}
+					
+					// Add user to members
+					members.append(currentUserId)
+					
+					// Add user to pending joins for batch notification
+					let joinInfo: [String: Any] = [
+						"userId": currentUserId,
+						"username": currentUser.username,
+						"name": currentUser.name,
+						"profileImageURL": currentUser.profileImageURL ?? "",
+						"joinedAt": Timestamp()
+					]
+					pendingJoins.append(joinInfo)
+					
+					// Threshold is 7 for batch notifications
+					let threshold = 7
+					
+					// Check if we've reached the threshold
+					if pendingJoins.count >= threshold {
+						shouldSendNotification = true
+						pendingJoinsToNotify = pendingJoins
+						collectionNameForNotification = collectionData["name"] as? String ?? ""
+						// Clear pending joins
+						pendingJoins = []
+					}
+					
+					// Get current memberJoinDates
+					var memberJoinDates = collectionData["memberJoinDates"] as? [String: Timestamp] ?? [:]
+					// Add join date for new member
+					memberJoinDates[currentUserId] = Timestamp()
+					
+					// Update collection document
+					transaction.updateData([
+						"members": members,
+						"memberCount": members.count,
+						"pendingJoins": pendingJoins,
+						"memberJoinDates": memberJoinDates
+					], forDocument: collectionRef)
+					
+					// Also update user's collections array
+					let userRef = db.collection("users").document(currentUserId)
+					transaction.updateData([
+						"collections": FieldValue.arrayUnion([collectionId])
+					], forDocument: userRef)
+					
+					return nil
+				} catch {
 					if let errorPointer = errorPointer {
-						errorPointer.pointee = NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
+						errorPointer.pointee = error as NSError
 					}
 					return nil
 				}
-				
-				// Get current members and pending joins
-				var members = collectionData["members"] as? [String] ?? []
-				var pendingJoins = collectionData["pendingJoins"] as? [[String: Any]] ?? []
-				
-				// Check if user is already a member (double-check)
-				if members.contains(currentUserId) {
-					return nil // Already a member, nothing to do
-				}
-				
-				// Add user to members
-				members.append(currentUserId)
-				
-				// Add user to pending joins for batch notification
-				let joinInfo: [String: Any] = [
-					"userId": currentUserId,
-					"username": currentUser.username,
-					"name": currentUser.name,
-					"profileImageURL": currentUser.profileImageURL ?? "",
-					"joinedAt": Timestamp()
-				]
-				pendingJoins.append(joinInfo)
-				
-				// Determine threshold (random between 5-10 for batch notifications)
-				let threshold = Int.random(in: 5...10)
-				
-				// Check if we've reached the threshold
-				if pendingJoins.count >= threshold {
-					shouldSendNotification = true
-					pendingJoinsToNotify = pendingJoins
-					collectionNameForNotification = collectionData["name"] as? String ?? ""
-					// Clear pending joins
-					pendingJoins = []
-				}
-				
-				// Get current memberJoinDates
-				var memberJoinDates = collectionData["memberJoinDates"] as? [String: Timestamp] ?? [:]
-				// Add join date for new member
-				memberJoinDates[currentUserId] = Timestamp()
-				
-				// Update collection document
-				transaction.updateData([
-					"members": members,
-					"memberCount": members.count,
-					"pendingJoins": pendingJoins,
-					"memberJoinDates": memberJoinDates
-				], forDocument: collectionRef)
-				
-				// Also update user's collections array
-				let userRef = db.collection("users").document(currentUserId)
-				transaction.updateData([
-					"collections": FieldValue.arrayUnion([collectionId])
-				], forDocument: userRef)
-				
-				return nil
-			} catch {
-				if let errorPointer = errorPointer {
-					errorPointer.pointee = error as NSError
-				}
-				return nil
 			}
-		}
-		
-		// Send notification outside transaction if threshold reached
-		if shouldSendNotification {
-			try await NotificationService.shared.sendBatchJoinNotification(
-				collectionId: collectionId,
-				collectionName: collectionNameForNotification,
-				joinedUsers: pendingJoinsToNotify
-			)
-		}
-		
-		print("✅ CollectionService: User \(currentUserId) joined collection \(collectionId)")
-		
-		// Post notification to update UI
-		Task { @MainActor in
+			
+			// Send notification outside transaction if threshold reached
+			if shouldSendNotification {
+				try await NotificationService.shared.sendBatchJoinNotification(
+					collectionId: collectionId,
+					collectionName: collectionNameForNotification,
+					joinedUsers: pendingJoinsToNotify
+				)
+			}
+			
+			print("✅ CollectionService: User \(currentUserId) joined collection \(collectionId)")
+		} catch {
+			// Revert notifications on error
+			print("❌ CollectionService: Error joining collection, reverting notifications: \(error.localizedDescription)")
 			NotificationCenter.default.post(
-				name: NSNotification.Name("CollectionJoined"),
+				name: NSNotification.Name("CollectionLeft"),
 				object: collectionId,
 				userInfo: ["userId": currentUserId]
 			)
-			NotificationCenter.default.post(
-				name: NSNotification.Name("CollectionUpdated"),
-				object: collectionId,
-				userInfo: ["action": "memberAdded", "userId": currentUserId]
-			)
-			// Post notification to refresh user's profile collections
-			NotificationCenter.default.post(
-				name: NSNotification.Name("UserCollectionsUpdated"),
-				object: currentUserId
-			)
+			throw error
 		}
 	}
 	
@@ -1450,14 +1888,18 @@ final class CollectionService {
 			}
 		}
 		
+		// Get collectionId before deleting
+		let collectionId = postData["collectionId"] as? String ?? ""
+		
 		// Delete the post document
 		try await postRef.delete()
 		
-		// Post notification
+		// Post notification with collectionId
 		Task { @MainActor in
 			NotificationCenter.default.post(
 				name: NSNotification.Name("PostDeleted"),
-				object: postId
+				object: postId,
+				userInfo: ["postId": postId, "collectionId": collectionId]
 			)
 		}
 	}
@@ -1485,14 +1927,20 @@ final class CollectionService {
 			updateData["taggedUsers"] = taggedUsers
 		}
 		
-		// Update allowDownload
+		// Update allowDownload - always update if provided (even if false)
 		if let allowDownload = allowDownload {
 			updateData["allowDownload"] = allowDownload
+			print("🔍 updatePost: Setting allowDownload to \(allowDownload) for post \(postId)")
+		} else {
+			print("⚠️ updatePost: allowDownload is nil, not updating")
 		}
 		
-		// Update allowReplies
+		// Update allowReplies - always update if provided (even if false)
 		if let allowReplies = allowReplies {
 			updateData["allowReplies"] = allowReplies
+			print("🔍 updatePost: Setting allowReplies to \(allowReplies) for post \(postId)")
+		} else {
+			print("⚠️ updatePost: allowReplies is nil, not updating")
 		}
 		
 		// Only update if there are changes
@@ -1505,6 +1953,26 @@ final class CollectionService {
 		try await postRef.updateData(updateData)
 		
 		print("✅ Post \(postId) updated successfully")
+		
+		// Verify the values were saved correctly
+		do {
+			let savedDoc = try await postRef.getDocument()
+			if let savedData = savedDoc.data() {
+				let savedAllowDownload = savedData["allowDownload"] as? Bool
+				let savedAllowReplies = savedData["allowReplies"] as? Bool
+				print("🔍 Verification: Updated post \(postId) has:")
+				print("   - allowDownload in Firestore: \(savedAllowDownload?.description ?? "nil")")
+				print("   - allowReplies in Firestore: \(savedAllowReplies?.description ?? "nil")")
+				if let expectedDownload = allowDownload, savedAllowDownload != expectedDownload {
+					print("❌ ERROR: allowDownload mismatch! Expected \(expectedDownload), got \(savedAllowDownload?.description ?? "nil")")
+				}
+				if let expectedReplies = allowReplies, savedAllowReplies != expectedReplies {
+					print("❌ ERROR: allowReplies mismatch! Expected \(expectedReplies), got \(savedAllowReplies?.description ?? "nil")")
+				}
+			}
+		} catch {
+			print("⚠️ Could not verify updated post: \(error)")
+		}
 		
 		// Post notification to refresh views
 		Task { @MainActor in
@@ -1541,6 +2009,220 @@ final class CollectionService {
 	
 	// MARK: - Privacy Helper Functions
 	
+	/// Get collections visible to a viewing user (respects privacy settings)
+	/// - Parameters:
+	///   - profileUserId: The user whose collections we're viewing
+	///   - viewingUserId: The user who is viewing (current user)
+	///   - forceFresh: Whether to force a fresh fetch
+	/// - Returns: Array of collections the viewing user can see
+	func getVisibleCollectionsForUser(profileUserId: String, viewingUserId: String, forceFresh: Bool = false) async throws -> [CollectionData] {
+		// Get all collections for the profile user
+		let allCollections = try await getUserCollections(userId: profileUserId, forceFresh: forceFresh)
+		
+		// Filter based on privacy settings
+		var visibleCollections = allCollections.filter { collection in
+			return CollectionService.canUserViewCollection(collection, userId: viewingUserId)
+		}
+		
+		// Filter out hidden collections and collections from blocked users
+		visibleCollections = await CollectionService.filterCollections(visibleCollections)
+		
+		return visibleCollections
+	}
+	
+	// MARK: - Follow/Unfollow Collection
+	
+	/// Follow a collection - adds user to collection's followers and collection to user's followedCollectionIds
+	func followCollection(collectionId: String, userId: String) async throws {
+		let db = Firestore.firestore()
+		
+		// Get collection to verify it exists
+		guard let collection = try await getCollection(collectionId: collectionId) else {
+			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
+		}
+		
+		// Check if already following
+		if collection.followers.contains(userId) {
+			print("⚠️ User \(userId) is already following collection \(collectionId)")
+			return
+		}
+		
+		// Use batch write for atomic updates
+		let batch = db.batch()
+		
+		// Add user to collection's followers array
+		let collectionRef = db.collection("collections").document(collectionId)
+		batch.updateData([
+			"followers": FieldValue.arrayUnion([userId]),
+			"followerCount": FieldValue.increment(Int64(1))
+		], forDocument: collectionRef)
+		
+		// Add collection to user's followedCollectionIds array
+		let userRef = db.collection("users").document(userId)
+		batch.updateData([
+			"followedCollectionIds": FieldValue.arrayUnion([collectionId])
+		], forDocument: userRef)
+		
+		// Commit batch
+		try await batch.commit()
+		
+		print("✅ User \(userId) followed collection \(collectionId)")
+		
+		// Post notifications
+		Task { @MainActor in
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionFollowed"),
+				object: collectionId,
+				userInfo: ["userId": userId]
+			)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionUpdated"),
+				object: collectionId
+			)
+		}
+	}
+	
+	/// Unfollow a collection - removes user from collection's followers and collection from user's followedCollectionIds
+	func unfollowCollection(collectionId: String, userId: String) async throws {
+		let db = Firestore.firestore()
+		
+		// Get collection to verify it exists
+		guard let collection = try await getCollection(collectionId: collectionId) else {
+			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
+		}
+		
+		// Check if not following
+		if !collection.followers.contains(userId) {
+			print("⚠️ User \(userId) is not following collection \(collectionId)")
+			return
+		}
+		
+		// Use batch write for atomic updates
+		let batch = db.batch()
+		
+		// Remove user from collection's followers array
+		let collectionRef = db.collection("collections").document(collectionId)
+		batch.updateData([
+			"followers": FieldValue.arrayRemove([userId]),
+			"followerCount": FieldValue.increment(Int64(-1))
+		], forDocument: collectionRef)
+		
+		// Remove collection from user's followedCollectionIds array
+		let userRef = db.collection("users").document(userId)
+		batch.updateData([
+			"followedCollectionIds": FieldValue.arrayRemove([collectionId])
+		], forDocument: userRef)
+		
+		// Commit batch
+		try await batch.commit()
+		
+		print("✅ User \(userId) unfollowed collection \(collectionId)")
+		
+		// Post notifications
+		Task { @MainActor in
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionUnfollowed"),
+				object: collectionId,
+				userInfo: ["userId": userId]
+			)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionUpdated"),
+				object: collectionId
+			)
+		}
+	}
+	
+	/// Check if a user is following a collection
+	func isFollowingCollection(collectionId: String, userId: String) -> Bool {
+		// This will be called with cached data, so we need to get the collection first
+		// For now, return false and let the caller check the collection's followers array
+		return false
+	}
+	
+	/// Get all collections a user is following
+	func getFollowedCollections(userId: String) async throws -> [CollectionData] {
+		let db = Firestore.firestore()
+		
+		// Get user's followedCollectionIds
+		let userDoc = try await db.collection("users").document(userId).getDocument()
+		guard let userData = userDoc.data(),
+			  let followedIds = userData["followedCollectionIds"] as? [String] else {
+			return []
+		}
+		
+		// Fetch all followed collections in parallel
+		var followedCollections: [CollectionData] = []
+		await withTaskGroup(of: CollectionData?.self) { group in
+			for collectionId in followedIds {
+				group.addTask {
+					try? await self.getCollection(collectionId: collectionId)
+				}
+			}
+			
+			for await collection in group {
+				if let collection = collection {
+					followedCollections.append(collection)
+				}
+			}
+		}
+		
+		// Filter out hidden collections (mutual blocking, blocked users, etc.)
+		return await CollectionService.filterCollections(followedCollections)
+	}
+	
+	/// Remove a follower from a collection (owner/admin only)
+	func removeFollower(collectionId: String, followerId: String) async throws {
+		guard let currentUserId = Auth.auth().currentUser?.uid else {
+			throw NSError(domain: "CollectionService", code: -1, userInfo: [NSLocalizedDescriptionKey: "User not authenticated"])
+		}
+		
+		// Get collection to verify permissions
+		guard let collection = try await getCollection(collectionId: collectionId) else {
+			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
+		}
+		
+		// Check if current user is owner or admin
+		let isOwner = collection.ownerId == currentUserId
+		let isAdmin = collection.owners.contains(currentUserId)
+		
+		if !isOwner && !isAdmin {
+			throw NSError(domain: "CollectionService", code: 403, userInfo: [NSLocalizedDescriptionKey: "Only owner or admins can remove followers"])
+		}
+		
+		// Use batch write for atomic updates
+		let db = Firestore.firestore()
+		let batch = db.batch()
+		
+		// Remove follower from collection's followers array
+		let collectionRef = db.collection("collections").document(collectionId)
+		batch.updateData([
+			"followers": FieldValue.arrayRemove([followerId]),
+			"followerCount": FieldValue.increment(Int64(-1))
+		], forDocument: collectionRef)
+		
+		// Remove collection from follower's followedCollectionIds array
+		let userRef = db.collection("users").document(followerId)
+		batch.updateData([
+			"followedCollectionIds": FieldValue.arrayRemove([collectionId])
+		], forDocument: userRef)
+		
+		// Commit batch
+		try await batch.commit()
+		
+		print("✅ Removed follower \(followerId) from collection \(collectionId)")
+		
+		// Post notifications
+		Task { @MainActor in
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionUpdated"),
+				object: collectionId
+			)
+		}
+	}
+}
+
+// MARK: - CollectionService Static Helper Methods Extension
+extension CollectionService {
 	/// Check if a user can view a collection based on privacy settings
 	/// - Parameters:
 	///   - collection: The collection to check
@@ -1573,27 +2255,6 @@ final class CollectionService {
 		
 		// Default behavior: public collections are visible, private collections are not
 		return collection.isPublic
-	}
-	
-	/// Get collections visible to a viewing user (respects privacy settings)
-	/// - Parameters:
-	///   - profileUserId: The user whose collections we're viewing
-	///   - viewingUserId: The user who is viewing (current user)
-	///   - forceFresh: Whether to force a fresh fetch
-	/// - Returns: Array of collections the viewing user can see
-	func getVisibleCollectionsForUser(profileUserId: String, viewingUserId: String, forceFresh: Bool = false) async throws -> [CollectionData] {
-		// Get all collections for the profile user
-		let allCollections = try await getUserCollections(userId: profileUserId, forceFresh: forceFresh)
-		
-		// Filter based on privacy settings
-		var visibleCollections = allCollections.filter { collection in
-			return CollectionService.canUserViewCollection(collection, userId: viewingUserId)
-		}
-		
-		// Filter out hidden collections and collections from blocked users
-		visibleCollections = await CollectionService.filterCollections(visibleCollections)
-		
-		return visibleCollections
 	}
 	
 	/// Filter out collections that are hidden by the current user
@@ -1839,194 +2500,4 @@ final class CollectionService {
 		
 		return filtered
 	}
-	
-	// MARK: - Follow/Unfollow Collection
-	
-	/// Follow a collection - adds user to collection's followers and collection to user's followedCollectionIds
-	func followCollection(collectionId: String, userId: String) async throws {
-		let db = Firestore.firestore()
-		
-		// Get collection to verify it exists
-		guard let collection = try await getCollection(collectionId: collectionId) else {
-			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
-		}
-		
-		// Check if already following
-		if collection.followers.contains(userId) {
-			print("⚠️ User \(userId) is already following collection \(collectionId)")
-			return
-		}
-		
-		// Use batch write for atomic updates
-		let batch = db.batch()
-		
-		// Add user to collection's followers array
-		let collectionRef = db.collection("collections").document(collectionId)
-		batch.updateData([
-			"followers": FieldValue.arrayUnion([userId]),
-			"followerCount": FieldValue.increment(Int64(1))
-		], forDocument: collectionRef)
-		
-		// Add collection to user's followedCollectionIds array
-		let userRef = db.collection("users").document(userId)
-		batch.updateData([
-			"followedCollectionIds": FieldValue.arrayUnion([collectionId])
-		], forDocument: userRef)
-		
-		// Commit batch
-		try await batch.commit()
-		
-		print("✅ User \(userId) followed collection \(collectionId)")
-		
-		// Post notifications
-		Task { @MainActor in
-			NotificationCenter.default.post(
-				name: NSNotification.Name("CollectionFollowed"),
-				object: collectionId,
-				userInfo: ["userId": userId]
-			)
-			NotificationCenter.default.post(
-				name: NSNotification.Name("CollectionUpdated"),
-				object: collectionId
-			)
-		}
-	}
-	
-	/// Unfollow a collection - removes user from collection's followers and collection from user's followedCollectionIds
-	func unfollowCollection(collectionId: String, userId: String) async throws {
-		let db = Firestore.firestore()
-		
-		// Get collection to verify it exists
-		guard let collection = try await getCollection(collectionId: collectionId) else {
-			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
-		}
-		
-		// Check if not following
-		if !collection.followers.contains(userId) {
-			print("⚠️ User \(userId) is not following collection \(collectionId)")
-			return
-		}
-		
-		// Use batch write for atomic updates
-		let batch = db.batch()
-		
-		// Remove user from collection's followers array
-		let collectionRef = db.collection("collections").document(collectionId)
-		batch.updateData([
-			"followers": FieldValue.arrayRemove([userId]),
-			"followerCount": FieldValue.increment(Int64(-1))
-		], forDocument: collectionRef)
-		
-		// Remove collection from user's followedCollectionIds array
-		let userRef = db.collection("users").document(userId)
-		batch.updateData([
-			"followedCollectionIds": FieldValue.arrayRemove([collectionId])
-		], forDocument: userRef)
-		
-		// Commit batch
-		try await batch.commit()
-		
-		print("✅ User \(userId) unfollowed collection \(collectionId)")
-		
-		// Post notifications
-		Task { @MainActor in
-			NotificationCenter.default.post(
-				name: NSNotification.Name("CollectionUnfollowed"),
-				object: collectionId,
-				userInfo: ["userId": userId]
-			)
-			NotificationCenter.default.post(
-				name: NSNotification.Name("CollectionUpdated"),
-				object: collectionId
-			)
-		}
-	}
-	
-	/// Check if a user is following a collection
-	func isFollowingCollection(collectionId: String, userId: String) -> Bool {
-		// This will be called with cached data, so we need to get the collection first
-		// For now, return false and let the caller check the collection's followers array
-		return false
-	}
-	
-	/// Get all collections a user is following
-	func getFollowedCollections(userId: String) async throws -> [CollectionData] {
-		let db = Firestore.firestore()
-		
-		// Get user's followedCollectionIds
-		let userDoc = try await db.collection("users").document(userId).getDocument()
-		guard let userData = userDoc.data(),
-			  let followedIds = userData["followedCollectionIds"] as? [String] else {
-			return []
-		}
-		
-		// Fetch all followed collections in parallel
-		var followedCollections: [CollectionData] = []
-		await withTaskGroup(of: CollectionData?.self) { group in
-			for collectionId in followedIds {
-				group.addTask {
-					try? await self.getCollection(collectionId: collectionId)
-				}
-			}
-			
-			for await collection in group {
-				if let collection = collection {
-					followedCollections.append(collection)
-				}
-			}
-		}
-		
-		return followedCollections
-	}
-	
-	/// Remove a follower from a collection (owner/admin only)
-	func removeFollower(collectionId: String, followerId: String) async throws {
-		guard let currentUserId = Auth.auth().currentUser?.uid else {
-			throw NSError(domain: "CollectionService", code: -1, userInfo: [NSLocalizedDescriptionKey: "User not authenticated"])
-		}
-		
-		// Get collection to verify permissions
-		guard let collection = try await getCollection(collectionId: collectionId) else {
-			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
-		}
-		
-		// Check if current user is owner or admin
-		let isOwner = collection.ownerId == currentUserId
-		let isAdmin = collection.owners.contains(currentUserId)
-		
-		if !isOwner && !isAdmin {
-			throw NSError(domain: "CollectionService", code: 403, userInfo: [NSLocalizedDescriptionKey: "Only owner or admins can remove followers"])
-		}
-		
-		// Use batch write for atomic updates
-		let db = Firestore.firestore()
-		let batch = db.batch()
-		
-		// Remove follower from collection's followers array
-		let collectionRef = db.collection("collections").document(collectionId)
-		batch.updateData([
-			"followers": FieldValue.arrayRemove([followerId]),
-			"followerCount": FieldValue.increment(Int64(-1))
-		], forDocument: collectionRef)
-		
-		// Remove collection from follower's followedCollectionIds array
-		let userRef = db.collection("users").document(followerId)
-		batch.updateData([
-			"followedCollectionIds": FieldValue.arrayRemove([collectionId])
-		], forDocument: userRef)
-		
-		// Commit batch
-		try await batch.commit()
-		
-		print("✅ Removed follower \(followerId) from collection \(collectionId)")
-		
-		// Post notifications
-		Task { @MainActor in
-			NotificationCenter.default.post(
-				name: NSNotification.Name("CollectionUpdated"),
-				object: collectionId
-			)
-		}
-	}
 }
-

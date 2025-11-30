@@ -66,16 +66,22 @@ class UpdatesService {
 		print("🔍 UpdatesService: Fetching star updates for user \(userId)")
 		
 		// Get all posts owned by current user
+		// CRITICAL FIX: Add limit to prevent loading thousands of posts
+		// Only check recent posts (last 100) for updates to keep it fast
 		let postsSnapshot = try await db.collection("posts")
 			.whereField("authorId", isEqualTo: userId)
+			.order(by: "createdAt", descending: true)
+			.limit(to: 100) // Only check last 100 posts for stars/comments
 			.getDocuments()
 		
 		print("✅ UpdatesService: Found \(postsSnapshot.documents.count) posts owned by user \(userId)")
 		
 		// Also check if user is owner of collections and get posts from those collections
 		// This handles cases where posts might be in collections owned by the user
+		// CRITICAL FIX: Add limit to prevent loading all collections
 		let collectionsSnapshot = try await db.collection("collections")
 			.whereField("ownerId", isEqualTo: userId)
+			.limit(to: 50) // Limit to 50 collections max
 			.getDocuments()
 		
 		let ownedCollectionIds = Set(collectionsSnapshot.documents.map { $0.documentID })
@@ -84,11 +90,14 @@ class UpdatesService {
 		// Get all unique post IDs from author-owned posts
 		var allPostIds = Set(postsSnapshot.documents.map { $0.documentID })
 		
-		// Get posts from owned collections as well
+		// Get posts from owned collections as well (with limit)
 		if !ownedCollectionIds.isEmpty {
 			for collectionId in ownedCollectionIds {
+				// CRITICAL FIX: Add limit to prevent loading all posts
 				if let collectionPostsSnapshot = try? await db.collection("posts")
 					.whereField("collectionId", isEqualTo: collectionId)
+					.order(by: "createdAt", descending: true)
+					.limit(to: 50) // Only check last 50 posts per collection
 					.getDocuments() {
 					print("✅ UpdatesService: Found \(collectionPostsSnapshot.documents.count) posts in owned collection \(collectionId)")
 					for doc in collectionPostsSnapshot.documents {
@@ -103,11 +112,14 @@ class UpdatesService {
 		// Process all posts - start with author-owned posts
 		var allPostsToCheck = postsSnapshot.documents
 		
-		// Add posts from owned collections that aren't already included
+		// Add posts from owned collections that aren't already included (with limit)
 		if !ownedCollectionIds.isEmpty {
 			for collectionId in ownedCollectionIds {
+				// CRITICAL FIX: Add limit to prevent loading all posts
 				if let collectionPostsSnapshot = try? await db.collection("posts")
 					.whereField("collectionId", isEqualTo: collectionId)
+					.order(by: "createdAt", descending: true)
+					.limit(to: 50) // Only check last 50 posts per collection
 					.getDocuments() {
 					for doc in collectionPostsSnapshot.documents {
 						// Only add if not already in author-owned posts
@@ -210,8 +222,12 @@ class UpdatesService {
 		print("🔍 UpdatesService: Fetching comment updates for user \(userId)")
 		
 		// Get all posts owned by current user
+		// CRITICAL FIX: Add limit to prevent loading thousands of posts
+		// Only check recent posts (last 100) for updates to keep it fast
 		let postsSnapshot = try await db.collection("posts")
 			.whereField("authorId", isEqualTo: userId)
+			.order(by: "createdAt", descending: true)
+			.limit(to: 100) // Only check last 100 posts for comments
 			.getDocuments()
 		
 		print("✅ UpdatesService: Found \(postsSnapshot.documents.count) posts owned by user \(userId)")
@@ -288,8 +304,10 @@ class UpdatesService {
 		var updates: [UpdateItem] = []
 		
 		// Get all collections where user is a member
+		// CRITICAL FIX: Add limit to prevent loading all collections
 		let collectionsSnapshot = try await db.collection("collections")
 			.whereField("members", arrayContains: userId)
+			.limit(to: 100) // Limit to 100 collections max
 			.getDocuments()
 		
 		for collectionDoc in collectionsSnapshot.documents {
@@ -335,8 +353,11 @@ class UpdatesService {
 					firstMediaItem: mediaItems.first,
 					mediaItems: mediaItems,
 					isPinned: postData["isPinned"] as? Bool ?? false,
+					pinnedAt: (postData["pinnedAt"] as? Timestamp)?.dateValue(),
 					caption: postData["caption"] as? String,
-					allowReplies: postData["allowReplies"] as? Bool ?? true
+					allowReplies: postData["allowReplies"] as? Bool ?? true,
+					allowDownload: postData["allowDownload"] as? Bool ?? false,
+					taggedUsers: postData["taggedUsers"] as? [String] ?? []
 				)
 				
 				if postsByAuthor[authorId] == nil {
@@ -393,10 +414,12 @@ class UpdatesService {
 	
 	// MARK: - Fetch Starred By Users (for Starred By list)
 	func fetchStarredByUsers(postId: String) async throws -> [CYUser] {
+		// CRITICAL FIX: Add limit to prevent loading thousands of stars
 		let starsSnapshot = try await db.collection("posts")
 			.document(postId)
 			.collection("stars")
 			.order(by: "starredAt", descending: true)
+			.limit(to: 100) // Only show first 100 users who starred
 			.getDocuments()
 		
 		var users: [CYUser] = []
@@ -427,10 +450,12 @@ class UpdatesService {
 		let db = Firestore.firestore()
 		
 		// Fetch all pending notifications that require action
+		// CRITICAL FIX: Add limit to prevent loading all notifications
 		let snapshot = try await db.collection("notifications")
 			.whereField("userId", isEqualTo: currentUserId)
 			.whereField("status", isEqualTo: "pending")
 			.order(by: "timestamp", descending: true)
+			.limit(to: 50) // Only show first 50 pending notifications
 			.getDocuments()
 		
 		var actionUpdates: [ActionRequiredUpdate] = []

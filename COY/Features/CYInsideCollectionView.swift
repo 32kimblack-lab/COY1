@@ -1,6 +1,7 @@
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
+import GoogleMobileAds
 
 struct CYInsideCollectionView: View {
 	@Environment(\.dismiss) var dismiss
@@ -10,6 +11,10 @@ struct CYInsideCollectionView: View {
 	@State private var collection: CollectionData
 	@State private var posts: [CollectionPost] = []
 	@State private var isLoadingPosts = false
+	@State private var isLoadingMorePosts = false
+	@State private var hasMorePosts = true
+	@State private var lastPostDocument: DocumentSnapshot?
+	@State private var postListener: ListenerRegistration?
 	@State private var userProfileImageURL: String?
 	@State private var showPhotoPicker = false
 	@State private var selectedMedia: [CreatePostMediaItem] = []
@@ -21,6 +26,15 @@ struct CYInsideCollectionView: View {
 	@State private var showDeleteError = false
 	@State private var deleteErrorMessage = ""
 	@State private var refreshTrigger = UUID()
+	@State private var ownerProfileListener: ListenerRegistration? // Real-time listener for owner's profile
+	@StateObject private var cyServiceManager = CYServiceManager.shared // Observe ServiceManager for real-time updates
+	@StateObject private var adManager = AdManager.shared
+	@Environment(\.horizontalSizeClass) var horizontalSizeClass
+	
+	// Check if device is iPad
+	private var isIPad: Bool {
+		horizontalSizeClass == .regular
+	}
 	
 	// Navigation states
 	@State private var showEditCollection = false
@@ -28,7 +42,8 @@ struct CYInsideCollectionView: View {
 	@State private var showFollowersView = false
 	@State private var showMembersView = false
 	@State private var isFollowing: Bool = false
-	// Request state is managed by CollectionRequestStateManager.shared
+	// Request state is managed by CollectionRequestStateManager.shared - observe it for automatic updates
+	@StateObject private var requestStateManager = CollectionRequestStateManager.shared
 	@State private var selectedOwnerId: String?
 	
 	// Sort/Organization states
@@ -40,6 +55,33 @@ struct CYInsideCollectionView: View {
 	@State private var isProcessing = false
 	@State private var postToDelete: CollectionPost?
 	@State private var showPostDeleteAlert = false
+	
+	// Cache for collection posts (keyed by collection ID)
+	private class CollectionPostsCache {
+		static let shared = CollectionPostsCache()
+		private init() {}
+		
+		private var cache: [String: [CollectionPost]] = [:]
+		private var hasData: [String: Bool] = [:]
+		
+		func getCachedPosts(for collectionId: String) -> [CollectionPost]? {
+			return hasData[collectionId] == true ? cache[collectionId] : nil
+		}
+		
+		func setCachedPosts(_ posts: [CollectionPost], for collectionId: String) {
+			cache[collectionId] = posts
+			hasData[collectionId] = true
+		}
+		
+		func hasDataLoaded(for collectionId: String) -> Bool {
+			return hasData[collectionId] == true
+		}
+		
+		func clearCache(for collectionId: String) {
+			cache.removeValue(forKey: collectionId)
+			hasData.removeValue(forKey: collectionId)
+		}
+	}
 	
 	init(collection: CollectionData) {
 		_collection = State(initialValue: collection)
@@ -58,16 +100,39 @@ struct CYInsideCollectionView: View {
 				CollectionMembersView(collection: collection)
 					.environmentObject(authService)
 			}
+			.refreshable {
+				// Pull-to-refresh: Check for new posts, reorder if none found
+				await refreshCollectionPosts()
+			}
 			.onAppear {
 				loadCollectionData()
-				loadPosts()
-				setupPostListener()
+				// ALWAYS use cache first - no auto-refresh on view appearance
+				if CollectionPostsCache.shared.hasDataLoaded(for: collection.id) {
+					if let cachedPosts = CollectionPostsCache.shared.getCachedPosts(for: collection.id) {
+						// Use cached data immediately (no network call)
+						posts = cachedPosts
+					} else {
+						loadInitialPosts()
+					}
+				} else {
+					// No cache exists, load fresh
+					loadInitialPosts()
+				}
+				// Remove real-time listener - use pagination instead
+				// setupPostListener() // REMOVED - using pagination
+				// Set up real-time listener for owner's profile (so other users see updates)
+				setupOwnerProfileListener()
 				// Initialize shared request state manager
 				Task {
 					await CollectionRequestStateManager.shared.initializeState()
 					// Then update follow state
 					await updateFollowState()
 				}
+			}
+			.onDisappear {
+				// Clean up listener when view disappears
+				postListener?.remove()
+				postListener = nil
 			}
 			.onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
 				// Refresh request state when app comes to foreground
@@ -121,6 +186,58 @@ struct CYInsideCollectionView: View {
 				// Refresh posts when a user is unblocked
 				loadPosts()
 			}
+			.onChange(of: cyServiceManager.currentUser) { oldValue, newValue in
+				// Real-time update when current user's profile changes via ServiceManager
+				// Only update if profile-relevant fields actually changed (prevent infinite loops)
+				guard collection.ownerId == Auth.auth().currentUser?.uid, let cyUser = newValue else { return }
+				
+				let profileChanged = oldValue?.profileImageURL != cyUser.profileImageURL ||
+				oldValue?.backgroundImageURL != cyUser.backgroundImageURL ||
+				oldValue?.name != cyUser.name ||
+				oldValue?.username != cyUser.username
+				
+				if profileChanged {
+					// Immediately update owner profile image from ServiceManager
+					userProfileImageURL = cyUser.profileImageURL
+					print("✅ CYInsideCollectionView: Updated owner profile image from ServiceManager")
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProfileUpdated"))) { notification in
+				// Update owner profile image when profile is updated (for both current user and other users)
+				if let userId = notification.userInfo?["userId"] as? String,
+				   userId == collection.ownerId {
+					// If it's the current user, update immediately from ServiceManager
+					if userId == Auth.auth().currentUser?.uid, let cyUser = cyServiceManager.currentUser {
+						userProfileImageURL = cyUser.profileImageURL
+						print("✅ CYInsideCollectionView: Updated owner profile image from ServiceManager (ProfileUpdated)")
+					} else {
+						// For other users, reload from Firebase
+						Task {
+							do {
+								if let ownerUser = try await UserService.shared.getUser(userId: collection.ownerId) {
+									await MainActor.run {
+										userProfileImageURL = ownerUser.profileImageURL
+										print("✅ CYInsideCollectionView: Updated owner profile image from Firebase (ProfileUpdated)")
+									}
+								}
+							} catch {
+								print("❌ CYInsideCollectionView: Error loading owner profile image: \(error.localizedDescription)")
+							}
+						}
+					}
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("OwnerProfileImageUpdated"))) { notification in
+				// Update owner profile image when real-time Firestore listener detects changes (for other users)
+				if let collectionId = notification.object as? String,
+				   collectionId == collection.id,
+				   let ownerId = notification.userInfo?["ownerId"] as? String,
+				   ownerId == collection.ownerId,
+				   let newProfileImageURL = notification.userInfo?["profileImageURL"] as? String {
+					userProfileImageURL = newProfileImageURL
+					print("✅ CYInsideCollectionView: Updated owner profile image from real-time listener")
+				}
+			}
 			.sheet(isPresented: $showPhotoPicker) {
 				photoPickerSheet
 			}
@@ -131,8 +248,8 @@ struct CYInsideCollectionView: View {
 						isNavigatingToCreatePost = false
 					}
 			}
-			.confirmationDialog("Collection Options", isPresented: $showCustomMenu, titleVisibility: .hidden) {
-				collectionOptionsDialog
+			.sheet(isPresented: $showCustomMenu) {
+				collectionOptionsSheet
 			}
 			.sheet(isPresented: $showEditCollection) {
 				editCollectionSheet
@@ -158,7 +275,12 @@ struct CYInsideCollectionView: View {
 			} message: {
 				Text(deleteErrorMessage.isEmpty ? "Failed to delete collection. Please try again." : deleteErrorMessage)
 			}
-	}
+			.onDisappear {
+				// Clean up listener when view disappears
+				ownerProfileListener?.remove()
+				ownerProfileListener = nil
+			}
+		}
 	
 	// MARK: - View Components
 	private var mainContentView: some View {
@@ -177,11 +299,17 @@ struct CYInsideCollectionView: View {
 						emptyStateView
 							.padding()
 					} else {
+					// Check if viewing own profile - hide ads if so
+					let isOwnProfile = collection.ownerId == Auth.auth().currentUser?.uid
+					
 					PinterestPostGrid(
 						posts: sortedPosts,
 						collection: collection,
 						isIndividualCollection: collection.type == "Individual",
 						currentUserId: Auth.auth().currentUser?.uid,
+						showAds: !isOwnProfile, // Hide ads on own profile
+						adLocation: .insideCollection, // Use inside collection ad unit
+						roundedCorners: true, // Show rounded corners in inside collection view
 						onPinPost: { post in
 							Task {
 								await handlePinPost(post)
@@ -192,11 +320,36 @@ struct CYInsideCollectionView: View {
 							showPostDeleteAlert = true
 						}
 					)
+					
+					// Loading indicator at bottom when loading more
+					if isLoadingMorePosts {
+						HStack {
+							Spacer()
+							ProgressView()
+								.padding()
+							Spacer()
+						}
+					}
+					
+					// Load more trigger when scrolling near bottom
+					Color.clear
+						.frame(height: 1)
+						.onAppear {
+							if hasMorePosts && !isLoadingMorePosts {
+								loadMorePosts()
+							}
+						}
 					}
 				}
 			}
 			.coordinateSpace(name: "scroll")
 			.background(colorScheme == .dark ? Color.black : Color.white)
+			.onChange(of: sortOption) { oldValue, newValue in
+				// Reload posts with new sort option
+				if oldValue != newValue {
+					loadInitialPosts()
+				}
+			}
 			
 			sortMenuOverlay
 		}
@@ -262,27 +415,6 @@ struct CYInsideCollectionView: View {
 		}
 	}
 	
-	@ViewBuilder
-	private var collectionOptionsDialog: some View {
-		if isCollectionOwnerOrAdmin() {
-			Button("Edit Collection") {
-				showEditCollection = true
-			}
-			Button("Access") {
-				showAccessView = true
-			}
-			Button("Followers") {
-				showFollowersView = true
-			}
-		} else if !isCurrentUserOwnerOrMember {
-			Button("Hide Collection") {
-				hideCollection()
-			}
-			Button("Report Collection", role: .destructive) { }
-		}
-		Button("Cancel", role: .cancel) {}
-	}
-	
 	private var editCollectionSheet: some View {
 		CYEditCollectionView(collection: collection)
 			.environmentObject(authService)
@@ -299,6 +431,106 @@ struct CYInsideCollectionView: View {
 	private var followersViewSheet: some View {
 		CYFollowersView(collection: collection)
 			.environmentObject(authService)
+	}
+	
+	// MARK: - Collection Options Sheet (Bottom Sheet for iPad/Tablet)
+	private var collectionOptionsSheet: some View {
+		VStack(spacing: 0) {
+			// Handle bar
+			RoundedRectangle(cornerRadius: 3)
+				.fill(Color.gray.opacity(0.3))
+				.frame(width: 40, height: 5)
+				.padding(.top, 8)
+				.padding(.bottom, 16)
+			
+			// Title
+			Text("Collection Options")
+				.font(.system(size: isIPad ? 20 : 18, weight: .bold))
+				.foregroundColor(colorScheme == .dark ? .white : .black)
+				.padding(.bottom, 20)
+			
+			// Options
+			VStack(spacing: 0) {
+				if isCollectionOwnerOrAdmin() {
+					collectionOptionButton(title: "Edit Collection", icon: "pencil") {
+						showCustomMenu = false
+						showEditCollection = true
+					}
+					
+					Divider()
+						.padding(.horizontal)
+					
+					collectionOptionButton(title: "Access", icon: "person.2") {
+						showCustomMenu = false
+						showAccessView = true
+					}
+					
+					Divider()
+						.padding(.horizontal)
+					
+					collectionOptionButton(title: "Followers", icon: "heart") {
+						showCustomMenu = false
+						showFollowersView = true
+					}
+				} else if !isCurrentUserOwnerOrMember {
+					collectionOptionButton(title: "Hide Collection", icon: "eye.slash") {
+						showCustomMenu = false
+						hideCollection()
+					}
+					
+					Divider()
+						.padding(.horizontal)
+					
+					collectionOptionButton(title: "Report Collection", icon: "exclamationmark.triangle", isDestructive: true) {
+						showCustomMenu = false
+						// TODO: Implement report collection
+					}
+				}
+			}
+			.padding(.horizontal)
+			
+			Spacer()
+				.frame(height: 20)
+			
+			// Cancel button
+			Button(action: {
+				showCustomMenu = false
+			}) {
+				Text("Cancel")
+					.font(.system(size: isIPad ? 18 : 16, weight: .medium))
+					.foregroundColor(.blue)
+					.frame(maxWidth: .infinity)
+					.padding(.vertical, isIPad ? 16 : 14)
+					.background(Color.gray.opacity(0.1))
+					.cornerRadius(12)
+			}
+			.padding(.horizontal)
+			.padding(.bottom, isIPad ? 40 : 20)
+		}
+		.presentationDetents([.height(isIPad ? 400 : 350)])
+		.presentationDragIndicator(.visible)
+		.background(colorScheme == .dark ? Color.black : Color.white)
+	}
+	
+	private func collectionOptionButton(title: String, icon: String, isDestructive: Bool = false, action: @escaping () -> Void) -> some View {
+		Button(action: action) {
+			HStack(spacing: 16) {
+				Image(systemName: icon)
+					.font(.system(size: isIPad ? 20 : 18))
+					.foregroundColor(isDestructive ? .red : (colorScheme == .dark ? .white : .black))
+					.frame(width: isIPad ? 30 : 28)
+				
+				Text(title)
+					.font(.system(size: isIPad ? 18 : 16))
+					.foregroundColor(isDestructive ? .red : (colorScheme == .dark ? .white : .black))
+				
+				Spacer()
+			}
+			.padding(.horizontal)
+			.padding(.vertical, isIPad ? 18 : 16)
+			.contentShape(Rectangle())
+		}
+		.buttonStyle(.plain)
 	}
 	
 	@ViewBuilder
@@ -760,7 +992,8 @@ struct CYInsideCollectionView: View {
 		// Not a member - show Request or Join based on collection type
 		switch collection.type {
 		case "Request":
-			return CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id) ? "Requested" : "Request"
+			// Read from observed state manager (same as follow button pattern)
+			return requestStateManager.hasPendingRequest(for: collection.id) ? "Requested" : "Request"
 		case "Open":
 			return "Join"
 		default:
@@ -772,7 +1005,7 @@ struct CYInsideCollectionView: View {
 		if isCurrentUserOwner {
 			return .red
 		}
-		if collection.type == "Request" && CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id) {
+		if collection.type == "Request" && requestStateManager.hasPendingRequest(for: collection.id) {
 			return .blue
 		}
 		return .primary
@@ -782,7 +1015,7 @@ struct CYInsideCollectionView: View {
 		if isCurrentUserOwner {
 			return .red.opacity(0.1)
 		}
-		if collection.type == "Request" && CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id) {
+		if collection.type == "Request" && requestStateManager.hasPendingRequest(for: collection.id) {
 			return Color.blue.opacity(0.1)
 		}
 		return Color.gray.opacity(0.2)
@@ -792,7 +1025,7 @@ struct CYInsideCollectionView: View {
 		if isCurrentUserOwner {
 			return .red
 		}
-		if collection.type == "Request" && CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id) {
+		if collection.type == "Request" && requestStateManager.hasPendingRequest(for: collection.id) {
 			return .blue
 		}
 		return .clear
@@ -850,16 +1083,40 @@ struct CYInsideCollectionView: View {
 		}
 	}
 	
-	private func loadPosts() {
+	// Load initial page of posts
+	private func loadInitialPosts() {
+		guard !isLoadingPosts else { return }
 		isLoadingPosts = true
+		lastPostDocument = nil
+		hasMorePosts = true
+		
 		Task {
 			do {
-				// Fetch directly from Firebase (source of truth)
-				var firebasePosts = try await fetchPostsFromFirebase()
+				let (firebasePosts, lastDoc, hasMore) = try await PostService.shared.getCollectionPostsPaginated(
+					collectionId: collection.id,
+					limit: isIPad ? 30 : 20,
+					lastDocument: nil,
+					sortBy: sortOption
+				)
+				
 				// Filter out posts from hidden collections and blocked users
-				firebasePosts = await CollectionService.filterPosts(firebasePosts)
+				var filteredPosts = await CollectionService.filterPosts(firebasePosts)
+				
+				// Handle pinned posts sorting
+				if sortOption == "Pinned First" {
+					// Separate pinned and unpinned
+					let pinned = filteredPosts.filter { $0.isPinned }
+					let unpinned = filteredPosts.filter { !$0.isPinned }
+					// Sort pinned by pinnedAt, unpinned by createdAt
+					let sortedPinned = pinned.sorted { ($0.pinnedAt ?? $0.createdAt) > ($1.pinnedAt ?? $1.createdAt) }
+					let sortedUnpinned = unpinned.sorted { $0.createdAt > $1.createdAt }
+					filteredPosts = sortedPinned + sortedUnpinned
+				}
+				
 				await MainActor.run {
-					posts = firebasePosts
+					posts = filteredPosts
+					lastPostDocument = lastDoc
+					hasMorePosts = hasMore
 					
 					// Initialize pin order for already-pinned posts
 					for post in posts where post.isPinned {
@@ -874,17 +1131,152 @@ struct CYInsideCollectionView: View {
 				await MainActor.run {
 					posts = []
 					isLoadingPosts = false
+					hasMorePosts = false
 				}
+				print("❌ Error loading posts: \(error)")
 			}
 		}
 	}
 	
-	// Fetch posts directly from Firebase (source of truth)
+	// Load more posts (pagination)
+	private func loadMorePosts() {
+		guard !isLoadingMorePosts && !isLoadingPosts && hasMorePosts else { return }
+		guard let lastDoc = lastPostDocument else { return }
+		
+		isLoadingMorePosts = true
+		
+		Task {
+			do {
+				let (newPosts, lastDoc, hasMore) = try await PostService.shared.getCollectionPostsPaginated(
+					collectionId: collection.id,
+					limit: isIPad ? 18 : 15,
+					lastDocument: lastDoc,
+					sortBy: sortOption
+				)
+				
+				// Filter out posts from hidden collections and blocked users
+				var filteredPosts = await CollectionService.filterPosts(newPosts)
+				
+				// Handle pinned posts sorting
+				if sortOption == "Pinned First" {
+					// Separate pinned and unpinned
+					let pinned = filteredPosts.filter { $0.isPinned }
+					let unpinned = filteredPosts.filter { !$0.isPinned }
+					// Sort pinned by pinnedAt, unpinned by createdAt
+					let sortedPinned = pinned.sorted { ($0.pinnedAt ?? $0.createdAt) > ($1.pinnedAt ?? $1.createdAt) }
+					let sortedUnpinned = unpinned.sorted { $0.createdAt > $1.createdAt }
+					filteredPosts = sortedPinned + sortedUnpinned
+				}
+				
+				await MainActor.run {
+					posts.append(contentsOf: filteredPosts)
+					lastPostDocument = lastDoc
+					hasMorePosts = hasMore
+					isLoadingMorePosts = false
+				}
+			} catch {
+				await MainActor.run {
+					isLoadingMorePosts = false
+				}
+				print("❌ Error loading more posts: \(error)")
+			}
+		}
+	}
+	
+	// MARK: - Pull-to-Refresh with Reordering
+	/// Refresh collection posts: Check for new posts, reorder if none found
+	private func refreshCollectionPosts() async {
+		guard !isLoadingPosts else { return }
+		isLoadingPosts = true
+		lastPostDocument = nil
+		hasMorePosts = true
+		
+		do {
+			let (firebasePosts, lastDoc, hasMore) = try await PostService.shared.getCollectionPostsPaginated(
+				collectionId: collection.id,
+				limit: isIPad ? 30 : 20,
+				lastDocument: nil,
+				sortBy: sortOption
+			)
+			
+			// Filter out posts from hidden collections and blocked users
+			var filteredPosts = await CollectionService.filterPosts(firebasePosts)
+			
+			// Handle pinned posts sorting
+			if sortOption == "Pinned First" {
+				// Separate pinned and unpinned
+				let pinned = filteredPosts.filter { $0.isPinned }
+				let unpinned = filteredPosts.filter { !$0.isPinned }
+				// Sort pinned by pinnedAt, unpinned by createdAt
+				let sortedPinned = pinned.sorted { ($0.pinnedAt ?? $0.createdAt) > ($1.pinnedAt ?? $1.createdAt) }
+				let sortedUnpinned = unpinned.sorted { $0.createdAt > $1.createdAt }
+				filteredPosts = sortedPinned + sortedUnpinned
+			}
+			
+			await MainActor.run {
+				// Check if we have new posts compared to cached data
+				if CollectionPostsCache.shared.hasDataLoaded(for: collection.id) {
+					if let cachedPosts = CollectionPostsCache.shared.getCachedPosts(for: collection.id) {
+						let cachedPostIds = Set(cachedPosts.map { $0.id })
+						let newPostIds = Set(filteredPosts.map { $0.id })
+						let hasNewPosts = !newPostIds.subtracting(cachedPostIds).isEmpty
+						
+						if hasNewPosts {
+							// New posts found - use them
+							posts = filteredPosts
+							CollectionPostsCache.shared.setCachedPosts(filteredPosts, for: collection.id)
+						} else {
+							// No new posts - reorder/shuffle existing feed
+							var reorderedPosts = cachedPosts
+							reorderedPosts.shuffle()
+							posts = reorderedPosts
+							CollectionPostsCache.shared.setCachedPosts(reorderedPosts, for: collection.id)
+						}
+					} else {
+						// No cached posts, use new ones
+						posts = filteredPosts
+						CollectionPostsCache.shared.setCachedPosts(filteredPosts, for: collection.id)
+					}
+				} else {
+					// No cached data exists - use new posts
+					posts = filteredPosts
+					CollectionPostsCache.shared.setCachedPosts(filteredPosts, for: collection.id)
+				}
+				
+				lastPostDocument = lastDoc
+				hasMorePosts = hasMore
+				
+				// Initialize pin order for already-pinned posts
+				for post in posts where post.isPinned {
+					if self.pinOrder[post.id] == nil {
+						self.pinOrder[post.id] = post.createdAt
+					}
+				}
+				
+				isLoadingPosts = false
+			}
+		} catch {
+			await MainActor.run {
+				posts = []
+				isLoadingPosts = false
+				hasMorePosts = false
+			}
+			print("❌ Error refreshing posts: \(error)")
+		}
+	}
+	
+	// Legacy method - kept for compatibility but uses pagination
+	private func loadPosts() {
+		loadInitialPosts()
+	}
+	
+	// DEPRECATED: Fetch posts directly from Firebase (source of truth) - Use pagination instead
 	private func fetchPostsFromFirebase() async throws -> [CollectionPost] {
 				let db = Firestore.firestore()
 				// Query without orderBy to avoid index requirement, then sort in memory
 				let snapshot = try await db.collection("posts")
 					.whereField("collectionId", isEqualTo: collection.id)
+					.limit(to: 20) // Add limit for safety
 					.getDocuments()
 				
 				let loadedPosts = snapshot.documents.compactMap { doc -> CollectionPost? in
@@ -986,8 +1378,8 @@ struct CYInsideCollectionView: View {
 		
 		// Handle Request/Unrequest toggle for Request-type collections
 		if collection.type == "Request" && !isCurrentUserMember && !isCurrentUserOwner {
-			// Get current state from shared manager
-			let wasRequested = CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id)
+			// Get current state from observed state manager
+			let wasRequested = requestStateManager.hasPendingRequest(for: collection.id)
 			
 			// Post notification immediately for synchronization (same pattern as follow button)
 			if let currentUserId = authService.user?.uid {
@@ -1038,8 +1430,25 @@ struct CYInsideCollectionView: View {
 		}
 		// Handle Join action for Open collections
 		else if collection.type == "Open" && !isCurrentUserMember && !isCurrentUserOwner {
+			guard let currentUserId = authService.user?.uid else { return }
+			
+			// Post notification immediately for synchronization (same pattern as follow button)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionJoined"),
+				object: collection.id,
+				userInfo: ["userId": currentUserId]
+			)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionUpdated"),
+				object: collection.id,
+				userInfo: ["action": "memberAdded", "userId": currentUserId]
+			)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("UserCollectionsUpdated"),
+				object: currentUserId
+			)
+			
 			// Update local state immediately for instant feedback
-			let currentUserId = Auth.auth().currentUser?.uid ?? ""
 			if !collection.members.contains(currentUserId) {
 				collection.members.append(currentUserId)
 				collection.memberCount += 1
@@ -1051,11 +1460,17 @@ struct CYInsideCollectionView: View {
 				loadCollectionData()
 			} catch {
 				print("Error joining collection: \(error.localizedDescription)")
-				// Revert local state on error
+				// Revert local state and notifications on error
 				if let index = collection.members.firstIndex(of: currentUserId) {
 					collection.members.remove(at: index)
 					collection.memberCount = max(0, collection.memberCount - 1)
 				}
+				// Revert notifications
+				NotificationCenter.default.post(
+					name: NSNotification.Name("CollectionLeft"),
+					object: collection.id,
+					userInfo: ["userId": currentUserId]
+				)
 			}
 		}
 		// Handle Leave action (already implemented in handleLeaveCollection)
@@ -1201,88 +1616,41 @@ struct CYInsideCollectionView: View {
 		isProcessing = false
 	}
 	
-	// MARK: - Real-time Post Listener
-	private func setupPostListener() {
+	// MARK: - Real-time Listener for Owner's Profile
+	private func setupOwnerProfileListener() {
+		// Remove existing listener if any
+		ownerProfileListener?.remove()
+		
+		// Set up real-time Firestore listener for the owner's profile
+		// This allows other users to see real-time updates when the owner edits their profile
 		let db = Firestore.firestore()
-		db.collection("posts")
-			.whereField("collectionId", isEqualTo: collection.id)
-			.addSnapshotListener { [self] snapshot, error in
+		let collectionId = collection.id
+		let ownerId = collection.ownerId
+		ownerProfileListener = db.collection("users").document(ownerId).addSnapshotListener { snapshot, error in
+			Task { @MainActor in
 				if let error = error {
-					print("❌ Post listener error: \(error.localizedDescription)")
+					print("❌ CYInsideCollectionView: Error listening to owner profile updates: \(error.localizedDescription)")
 					return
 				}
 				
-				guard let documents = snapshot?.documents else { return }
-				
-				let loadedPosts = documents.compactMap { doc -> CollectionPost? in
-					let data = doc.data()
-					
-					// Parse all mediaItems
-					var allMediaItems: [MediaItem] = []
-					
-					// First, try to get all mediaItems array
-					if let mediaItemsArray = data["mediaItems"] as? [[String: Any]] {
-						allMediaItems = mediaItemsArray.compactMap { mediaData in
-							MediaItem(
-								imageURL: mediaData["imageURL"] as? String,
-								thumbnailURL: mediaData["thumbnailURL"] as? String,
-								videoURL: mediaData["videoURL"] as? String,
-								videoDuration: mediaData["videoDuration"] as? Double,
-								isVideo: mediaData["isVideo"] as? Bool ?? false
-							)
-						}
-					}
-					
-					// Fallback to firstMediaItem if mediaItems array is empty
-					if allMediaItems.isEmpty, let firstMediaData = data["firstMediaItem"] as? [String: Any] {
-						let firstItem = MediaItem(
-							imageURL: firstMediaData["imageURL"] as? String,
-							thumbnailURL: firstMediaData["thumbnailURL"] as? String,
-							videoURL: firstMediaData["videoURL"] as? String,
-							videoDuration: firstMediaData["videoDuration"] as? Double,
-							isVideo: firstMediaData["isVideo"] as? Bool ?? false
-						)
-						allMediaItems = [firstItem]
-					}
-					
-					let firstMediaItem = allMediaItems.first
-					let isPinned = data["isPinned"] as? Bool ?? false
-					let caption = data["caption"] as? String
-					
-					let titleValue: String = {
-						if let title = data["title"] as? String, !title.isEmpty {
-							return title
-						}
-						return caption ?? ""
-					}()
-					let collectionIdValue = data["collectionId"] as? String ?? ""
-					let authorIdValue = data["authorId"] as? String ?? ""
-					let authorNameValue = data["authorName"] as? String ?? ""
-					
-					return CollectionPost(
-						id: doc.documentID,
-						title: titleValue,
-						collectionId: collectionIdValue,
-						authorId: authorIdValue,
-						authorName: authorNameValue,
-						createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
-						firstMediaItem: firstMediaItem,
-						mediaItems: allMediaItems,
-						isPinned: isPinned,
-						pinnedAt: (data["pinnedAt"] as? Timestamp)?.dateValue(),
-						caption: caption
-					)
+				guard let snapshot = snapshot, let data = snapshot.data() else {
+					return
 				}
-				.sorted { $0.createdAt > $1.createdAt }
 				
-				Task { @MainActor in
-					// Filter out posts from hidden collections and blocked users
-					let filteredPosts = await CollectionService.filterPosts(loadedPosts)
-					posts = filteredPosts
-					isLoadingPosts = false
-					print("✅ Real-time update: Loaded \(filteredPosts.count) posts")
-				}
+				// Immediately update owner profile image from Firestore (real-time)
+				// Use NotificationCenter to update the view since we can't capture self in struct
+				let newProfileImageURL = data["profileImageURL"] as? String
+				NotificationCenter.default.post(
+					name: Notification.Name("OwnerProfileImageUpdated"),
+					object: collectionId,
+					userInfo: ["ownerId": ownerId, "profileImageURL": newProfileImageURL as Any]
+				)
+				print("🔄 CYInsideCollectionView: Owner profile image updated in real-time from Firestore")
 			}
+		}
 	}
+	
+	// MARK: - Real-time Post Listener (REMOVED - Using Pagination Instead)
+	// Real-time listeners are expensive and don't scale. Using pagination + manual refresh instead.
 }
 

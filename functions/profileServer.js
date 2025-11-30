@@ -178,6 +178,13 @@ app.get('/preview/:username', async (req, res) => {
 
 // Route: Profile by username - https://coy.services/{username}
 app.get('/:username', async (req, res) => {
+  // Set headers to prevent caching - ensure fresh data on every request
+  res.set({
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0'
+  });
+  
   try {
     const { username } = req.params;
     const path = req.path;

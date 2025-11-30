@@ -55,6 +55,11 @@ struct ProfileView: View {
 				await CollectionRequestStateManager.shared.initializeState()
 			}
 				
+				// Start real-time listener for user data via ServiceManager
+				Task {
+					try? await CYServiceManager.shared.loadCurrentUser()
+				}
+				
 				if !hasLoadedUserDataOnce {
 					refreshUserData()
 				} else {
@@ -806,9 +811,14 @@ struct CustomizeCollectionsView: View {
 					onFollowTapped: {},
 					onActionTapped: {},
 				onProfileTapped: {
-					// Navigate to owner's profile
+					// Check if users are mutually blocked before navigating
+					Task {
+						let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: collection.ownerId)
+						if !areMutuallyBlocked {
 					selectedUserId = collection.ownerId
 					showingProfile = true
+						}
+					}
 				},
 				onCollectionTapped: {
 					Task {
@@ -1006,10 +1016,31 @@ struct UserCollectionsView: View {
 			loadCollections(forceRefresh: true)
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUpdated"))) { notification in
-			// Refresh when collection is updated (e.g., user joined)
-			if let userInfo = notification.userInfo,
-			   let action = userInfo["action"] as? String,
-			   action == "memberAdded" {
+			// Refresh when collection is updated (e.g., user joined, privacy changed, etc.)
+			var shouldReload = false
+			
+			// Check if collection ID is in notification object
+			if let collectionId = notification.object as? String {
+				// Check if this collection is in the user's collections
+				if userCollections.contains(where: { $0.id == collectionId }) {
+					shouldReload = true
+				}
+			}
+			
+			// Also check userInfo for collectionId (fallback)
+			if !shouldReload, let userInfo = notification.userInfo {
+				if let updatedData = userInfo["updatedData"] as? [String: Any],
+				   let collectionId = updatedData["collectionId"] as? String,
+				   userCollections.contains(where: { $0.id == collectionId }) {
+					shouldReload = true
+				} else if let action = userInfo["action"] as? String,
+				   action == "memberAdded" {
+					shouldReload = true
+				}
+			}
+			
+			// Reload if this is one of the user's collections or if it's a member addition
+			if shouldReload {
 				loadCollections(forceRefresh: true)
 			}
 		}
@@ -1050,6 +1081,20 @@ struct UserCollectionsView: View {
 					userCollections.removeAll { $0.id == collectionId }
 					print("✅ UserCollectionsView: Removed deleted collection \(collectionId) from list immediately (permanent: \(isPermanent))")
 				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionHidden"))) { notification in
+			// Immediately remove hidden collection from the list
+			if let collectionId = notification.object as? String {
+				userCollections.removeAll { $0.id == collectionId }
+				print("🚫 UserCollectionsView: Removed hidden collection \(collectionId) from list immediately")
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUnhidden"))) { notification in
+			// Reload collections when a collection is unhidden
+			if let collectionId = notification.object as? String {
+				print("✅ UserCollectionsView: Collection \(collectionId) was unhidden, reloading collections")
+				loadCollections(forceRefresh: true)
 			}
 		}
 		.navigationDestination(isPresented: $showingInsideCollection) {

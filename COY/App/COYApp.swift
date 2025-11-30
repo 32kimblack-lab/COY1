@@ -22,7 +22,9 @@ struct COYApp: App {
 			RootView()
 				.environmentObject(authService)
 				.onOpenURL { url in
+					#if DEBUG
 					print("🔗 COYApp: onOpenURL called with: \(url.absoluteString)")
+					#endif
 					DeepLinkManager.shared.handleCustomURL(url)
 				}
 		}
@@ -62,9 +64,13 @@ struct RootView: View {
 			}
 		}
 		.onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { userActivity in
+			#if DEBUG
 			print("🔗 RootView: Handling universal link activity")
+			#endif
 			if let url = userActivity.webpageURL {
+				#if DEBUG
 				print("🔗 RootView: Universal link URL: \(url.absoluteString)")
+				#endif
 				DeepLinkManager.shared.handleUniversalLink(url)
 			}
 		}

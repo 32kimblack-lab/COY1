@@ -9,6 +9,9 @@ struct CYBuildCollectionDesign: View {
 	@Environment(\.colorScheme) var colorScheme
 	@EnvironmentObject var authService: AuthService
 	
+	// Use presentation mode as fallback for when dismiss doesn't work
+	@Environment(\.presentationMode) var presentationMode
+	
 	@State private var collectionName = ""
 	@State private var description = ""
 	@State private var isPublic = true
@@ -49,14 +52,23 @@ struct CYBuildCollectionDesign: View {
 			// MARK: Fixed Header (like settings)
 			HStack {
 				Button(action: {
+					// Since this is the root view in NavigationStack, dismiss won't work
+					// Post notification to switch to Profile tab (tab 4)
+					NotificationCenter.default.post(
+						name: NSNotification.Name("SwitchToTab"),
+						object: nil,
+						userInfo: ["tabIndex": 4]
+					)
+					// Also try dismiss in case it works
 					dismiss()
 				}) {
 					Image(systemName: "chevron.left")
 						.font(.title2)
 						.foregroundColor(colorScheme == .dark ? .white : .black)
 						.frame(width: 44, height: 44)
-						.contentShape(Rectangle())
 				}
+				.buttonStyle(.plain)
+				.contentShape(Rectangle())
 				
 				Spacer()
 				Text("Build a Collection")

@@ -13,7 +13,8 @@ struct TKTextField: View {
 				.foregroundColor(.secondary)
 			if isSecure {
 				SecureField(placeholder, text: $text)
-					.textContentType(.password)
+					.textContentType(.none)
+					.autocorrectionDisabled()
 			} else {
 				TextField(placeholder, text: $text)
 					.autocorrectionDisabled()

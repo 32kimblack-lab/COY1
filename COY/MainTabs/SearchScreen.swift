@@ -24,6 +24,7 @@ struct SearchScreen: View {
 	
 	@Environment(\.colorScheme) private var colorScheme
 	@Environment(\.dismiss) private var dismiss
+	@Environment(\.scenePhase) private var scenePhase
 	@EnvironmentObject var authService: AuthService
 	
 	private let apiClient = APIClient.shared
@@ -67,6 +68,16 @@ struct SearchScreen: View {
 			.onAppear {
 				loadRecentSearches()
 			}
+			.onChange(of: scenePhase) { oldPhase, newPhase in
+				// When app becomes active (from background or completely closed), refresh if we have an active search
+				if newPhase == .active {
+					if !searchText.isEmpty {
+						Task {
+							await performSearch()
+						}
+					}
+				}
+			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionFollowed"))) { notification in
 				if let collectionId = notification.object as? String {
 					collectionFollowStatus[collectionId] = true
@@ -85,6 +96,33 @@ struct SearchScreen: View {
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostDeleted"))) { notification in
 				// Refresh posts when a post is deleted
+				Task {
+					await performSearch()
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { notification in
+				// Immediately filter out blocked user from search results
+				if let blockedUserId = notification.userInfo?["blockedUserId"] as? String {
+					Task {
+						await MainActor.run {
+							// Remove blocked user from users list
+							users.removeAll { $0.id == blockedUserId }
+							// Remove collections owned by blocked user
+							collections.removeAll { $0.ownerId == blockedUserId }
+							// Remove posts from blocked user
+							posts.removeAll { $0.authorId == blockedUserId }
+							// Update postsCollectionMap
+							postsCollectionMap = postsCollectionMap.filter { key, _ in
+								!posts.contains(where: { $0.id == key })
+							}
+						}
+						// Then refresh to ensure consistency
+						await performSearch()
+					}
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { _ in
+				// Refresh search results when a user is unblocked
 				Task {
 					await performSearch()
 				}
@@ -110,47 +148,15 @@ struct SearchScreen: View {
 	// MARK: - Search Bar
 	private var searchBar: some View {
 		HStack {
+			// Only show the magnifying glass icon, no text field
 			Image(systemName: "magnifyingglass")
 				.foregroundColor(.secondary)
-			TextField("Search...", text: $searchText)
-				.textFieldStyle(.plain)
-				.autocapitalization(.none)
-				.autocorrectionDisabled()
-				.onChange(of: searchText) { oldValue, newValue in
-					searchTask?.cancel()
-					
-					if newValue.isEmpty {
-						collections = []
-						posts = []
-						users = []
-						return
-					}
-					
-					// Debounce search
-					searchTask = Task {
-						try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 second delay
-						if !Task.isCancelled {
-							await performSearch()
-						}
-					}
-				}
+				.font(.system(size: 18))
 			
-			if !searchText.isEmpty {
-				Button {
-					searchText = ""
-					collections = []
-					posts = []
-					users = []
-				} label: {
-					Image(systemName: "xmark.circle.fill")
-						.foregroundColor(.secondary)
-				}
-			}
+			Spacer()
 		}
 		.padding(.horizontal, 12)
 		.padding(.vertical, 10)
-		.background(Color.gray.opacity(0.15))
-		.cornerRadius(10)
 	}
 	
 	// MARK: - Recent Searches View
@@ -220,17 +226,22 @@ struct SearchScreen: View {
 	// MARK: - Tab Switcher
 	private var tabSwitcher: some View {
 		VStack(spacing: 10) {
-			HStack(spacing: 40) {
+			HStack(spacing: 0) {
+				Spacer()
 				tabButton(title: "Collections", index: 0)
+				Spacer()
 				tabButton(title: "Post", index: 1)
+				Spacer()
 				tabButton(title: "Usernames", index: 2)
+				Spacer()
 			}
-			.padding(.horizontal, 24)
+			.padding(.horizontal, 16)
 			
-			// Moving underline
+			// Moving underline - fixed width to match tab spacing
 			GeometryReader { proxy in
-				let width = (proxy.size.width - 0) / 3
-				let underlineFraction: CGFloat = 0.9
+				let totalWidth = proxy.size.width
+				let tabWidth = totalWidth / 3
+				let underlineWidth = tabWidth * 0.85 // 85% of tab width for better fit
 				ZStack(alignment: .leading) {
 					Rectangle()
 						.fill(Color.clear)
@@ -238,8 +249,8 @@ struct SearchScreen: View {
 					
 					Rectangle()
 						.fill(Color.blue)
-						.frame(width: width * underlineFraction, height: 2)
-						.offset(x: CGFloat(selectedTab) * width + (width * (1 - underlineFraction) / 2))
+						.frame(width: underlineWidth, height: 2)
+						.offset(x: CGFloat(selectedTab) * tabWidth + (tabWidth - underlineWidth) / 2)
 				}
 			}
 			.frame(height: 2)
@@ -325,6 +336,9 @@ struct SearchScreen: View {
 					}
 					.padding(.vertical)
 				}
+				.refreshable {
+					await refreshCollections()
+				}
 			}
 		}
 	}
@@ -350,8 +364,12 @@ struct SearchScreen: View {
 					posts: posts,
 					collection: nil,
 					isIndividualCollection: false,
-					currentUserId: authService.user?.uid
+					currentUserId: authService.user?.uid,
+					postsCollectionMap: postsCollectionMap
 				)
+				.refreshable {
+					await refreshPosts()
+				}
 			}
 		}
 	}
@@ -376,7 +394,13 @@ struct SearchScreen: View {
 					LazyVStack(spacing: 12) {
 						ForEach(users) { user in
 							Button(action: {
+								Task {
+									// Check if users are mutually blocked before navigating
+									let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: user.id)
+									if !areMutuallyBlocked {
 								selectedUserId = user.id
+									}
+								}
 							}) {
 								UserSearchCard(user: user)
 							}
@@ -385,6 +409,9 @@ struct SearchScreen: View {
 						}
 					}
 					.padding(.vertical)
+				}
+				.refreshable {
+					await refreshUsernames()
 				}
 			}
 		}
@@ -418,10 +445,14 @@ struct SearchScreen: View {
 		isLoadingCollections = true
 		
 		do {
+			// CRITICAL FIX: Rate limiting handled by APIRateLimiter in APIClient
 			let responses = try await apiClient.searchCollections(query: query)
 			let currentUserId = Auth.auth().currentUser?.uid ?? ""
 			
-			let allCollections = responses.map { response in
+			// CRITICAL FIX: Limit results to prevent loading too much data
+			let limitedResponses = Array(responses.prefix(100))
+			
+			let allCollections = limitedResponses.map { response in
 				let dateFormatter = ISO8601DateFormatter()
 				dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 				let createdAt = dateFormatter.date(from: response.createdAt) ?? Date()
@@ -460,14 +491,27 @@ struct SearchScreen: View {
 				let descriptionMatches = collection.description.lowercased().contains(query)
 				
 				// Check if collection owner is blocked (mutual block check)
-				let isOwnerBlocked = await friendService.isBlocked(userId: collection.ownerId)
-				let isOwnerBlockedBy = await friendService.isBlockedBy(userId: collection.ownerId)
+				// Check mutual blocking for collection owner
+				let isOwnerMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: collection.ownerId)
 				
-				// Only include if accessible, matches query, and owner is not blocked
-				if canView && (nameMatches || descriptionMatches) && !isOwnerBlocked && !isOwnerBlockedBy {
+				// Only include if accessible, matches query, and owner is not mutually blocked
+				if canView && (nameMatches || descriptionMatches) && !isOwnerMutuallyBlocked {
 					filteredCollections.append(collection)
 				}
 			}
+			
+			// Filter out hidden collections and collections from blocked users (mutual blocking, blocked users, etc.)
+			filteredCollections = await CollectionService.filterCollections(filteredCollections)
+			
+			// Additional check: filter out collections from mutually blocked users
+			var finalFiltered: [CollectionData] = []
+			for collection in filteredCollections {
+				let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: collection.ownerId)
+				if !areMutuallyBlocked {
+					finalFiltered.append(collection)
+				}
+			}
+			filteredCollections = finalFiltered
 			
 			collections = filteredCollections
 			
@@ -531,11 +575,15 @@ struct SearchScreen: View {
 		isLoadingPosts = true
 		
 		do {
-			// First, get all accessible collections
+			// CRITICAL FIX: Limit collections fetched to prevent loading too much data
+			// First, get accessible collections with limit (backend should handle this, but add safety)
 			let responses = try await apiClient.searchCollections(query: nil) // Get all collections
 			let currentUserId = Auth.auth().currentUser?.uid ?? ""
 			
-			let allCollections = responses.map { response in
+			// CRITICAL FIX: Limit to first 100 collections to prevent memory issues
+			let limitedResponses = Array(responses.prefix(100))
+			
+			let allCollections = limitedResponses.map { response in
 				let dateFormatter = ISO8601DateFormatter()
 				dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 				let createdAt = dateFormatter.date(from: response.createdAt) ?? Date()
@@ -614,7 +662,17 @@ struct SearchScreen: View {
 			}
 			
 			// Use main filter function which includes access filtering, blocked users, and hidden collections
-			let visiblePosts = await CollectionService.filterPosts(filteredPosts)
+			var visiblePosts = await CollectionService.filterPosts(filteredPosts)
+			
+			// Additional check: filter out posts from mutually blocked users
+			var finalFilteredPosts: [CollectionPost] = []
+			for post in visiblePosts {
+				let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: post.authorId)
+				if !areMutuallyBlocked {
+					finalFilteredPosts.append(post)
+				}
+			}
+			visiblePosts = finalFilteredPosts
 			
 			posts = visiblePosts
 			postsCollectionMap = newPostsCollectionMap.filter { key, _ in
@@ -679,12 +737,10 @@ struct SearchScreen: View {
 			
 			// Also try backend API search
 			if let usernameUser = try? await userService.getUserByUsername(query) {
-				// Check if user is blocked
-				let isBlocked = await friendService.isBlocked(userId: usernameUser.userId)
-				let isBlockedBy = await friendService.isBlockedBy(userId: usernameUser.userId)
-				
-				// Only add if not blocked and not already in list
-				if !isBlocked && !isBlockedBy && !foundUsers.contains(where: { $0.id == usernameUser.userId }) {
+				// getUserByUsername already checks mutual blocking and returns nil if blocked
+				// So if we get a user here, they're not blocked
+				// Only add if not already in list
+				if !foundUsers.contains(where: { $0.id == usernameUser.userId }) {
 					foundUsers.append(UserSearchResult(
 						id: usernameUser.userId,
 						name: usernameUser.name,
@@ -832,12 +888,56 @@ struct SearchScreen: View {
 		
 		// Handle Request action for Request-type collections
 		if collection.type == "Request" && !isMember && !isOwner {
+			// Check if there's already a pending request
+			let hasRequested = CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id)
+			
+			// Post notification immediately for synchronization
+			if let currentUserId = authService.user?.uid {
+				if hasRequested {
+					// Post cancellation notification immediately
+					NotificationCenter.default.post(
+						name: NSNotification.Name("CollectionRequestCancelled"),
+						object: collection.id,
+						userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+					)
+				} else {
+					// Post request notification immediately
+					NotificationCenter.default.post(
+						name: NSNotification.Name("CollectionRequestSent"),
+						object: collection.id,
+						userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+					)
+				}
+			}
+			
 			do {
-				try await CollectionService.shared.sendCollectionRequest(collectionId: collection.id)
+				if hasRequested {
+					// Cancel/unrequest
+					try await CollectionService.shared.cancelCollectionRequest(collectionId: collection.id)
+				} else {
+					// Send request
+					try await CollectionService.shared.sendCollectionRequest(collectionId: collection.id)
+				}
 				// Refresh collections to update button state
 				await performSearch()
 			} catch {
-				print("Error sending collection request: \(error.localizedDescription)")
+				print("Error \(hasRequested ? "cancelling" : "sending") collection request: \(error.localizedDescription)")
+				// Revert the notification on error
+				if let currentUserId = authService.user?.uid {
+					if hasRequested {
+						NotificationCenter.default.post(
+							name: NSNotification.Name("CollectionRequestSent"),
+							object: collection.id,
+							userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+						)
+					} else {
+						NotificationCenter.default.post(
+							name: NSNotification.Name("CollectionRequestCancelled"),
+							object: collection.id,
+							userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+						)
+					}
+				}
 			}
 		}
 		// Handle Join action for Open collections
@@ -862,50 +962,85 @@ struct SearchScreen: View {
 			}
 		}
 	}
-}
-
-// MARK: - User Search Result
-struct UserSearchResult: Identifiable {
-	let id: String
-	let name: String
-	let username: String
-	let profileImageURL: String?
-}
-
-// MARK: - User Search Card
-struct UserSearchCard: View {
-	let user: UserSearchResult
 	
-	var body: some View {
-		HStack(spacing: 12) {
-			// Profile Image
-			if let imageURL = user.profileImageURL, let url = URL(string: imageURL) {
-				WebImage(url: url)
-					.resizable()
-					.indicator(.activity)
-					.scaledToFill()
-					.frame(width: 50, height: 50)
-					.clipShape(Circle())
-			} else {
-				Circle()
-					.fill(Color.gray.opacity(0.3))
-					.frame(width: 50, height: 50)
-			}
-			
-			// User Info
-			VStack(alignment: .leading, spacing: 4) {
-				Text(user.name)
-					.font(.system(size: 16, weight: .semibold))
-					.foregroundColor(.primary)
-				
-				Text("@\(user.username)")
-					.font(.system(size: 14))
-					.foregroundColor(.secondary)
-			}
-			
-			Spacer()
+	// MARK: - Refresh Functions (matching SearchView behavior)
+	/// Refresh collections: Check for new content, reorder if none found
+	@MainActor
+	private func refreshCollections() async {
+		// Only refresh if we have an active search
+		guard !searchText.isEmpty else { return }
+		let query = searchText.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !query.isEmpty else { return }
+		
+		// Store current collection IDs to check for new content
+		let currentCollectionIds = Set(collections.map { $0.id })
+		
+		// Fetch fresh data
+		await searchCollections(query: query)
+		
+		// Check if we have new collections
+		let newCollectionIds = Set(collections.map { $0.id })
+		let hasNewCollections = !newCollectionIds.subtracting(currentCollectionIds).isEmpty
+		
+		if !hasNewCollections && !collections.isEmpty {
+			// No new collections - reorder/shuffle existing feed
+			var reorderedCollections = collections
+			reorderedCollections.shuffle()
+			collections = reorderedCollections
 		}
-		.padding(.vertical, 8)
+	}
+	
+	/// Refresh posts: Check for new content, reorder if none found
+	@MainActor
+	private func refreshPosts() async {
+		// Only refresh if we have an active search
+		guard !searchText.isEmpty else { return }
+		let query = searchText.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !query.isEmpty else { return }
+		
+		// Store current post IDs to check for new content
+		let currentPostIds = Set(posts.map { $0.id })
+		
+		// Fetch fresh data
+		await searchPosts(query: query)
+		
+		// Check if we have new posts
+		let newPostIds = Set(posts.map { $0.id })
+		let hasNewPosts = !newPostIds.subtracting(currentPostIds).isEmpty
+		
+		if !hasNewPosts && !posts.isEmpty {
+			// No new posts - reorder/shuffle existing feed
+			var reorderedPosts = posts
+			reorderedPosts.shuffle()
+			posts = reorderedPosts
+		}
+	}
+	
+	/// Refresh usernames: Check for new content, reorder if none found
+	@MainActor
+	private func refreshUsernames() async {
+		// Only refresh if we have an active search
+		guard !searchText.isEmpty else { return }
+		let query = searchText.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !query.isEmpty else { return }
+		
+		// Store current user IDs to check for new content
+		let currentUserIds = Set(users.map { $0.id })
+		
+		// Fetch fresh data
+		await searchUsernames(query: query)
+		
+		// Check if we have new users
+		let newUserIds = Set(users.map { $0.id })
+		let hasNewUsers = !newUserIds.subtracting(currentUserIds).isEmpty
+		
+		if !hasNewUsers && !users.isEmpty {
+			// No new users - reorder/shuffle existing feed
+			var reorderedUsers = users
+			reorderedUsers.shuffle()
+			users = reorderedUsers
+		}
 	}
 }
+
 

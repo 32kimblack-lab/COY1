@@ -298,7 +298,11 @@ final class APIClient {
 				firstMediaItem: mediaItem,
 				mediaItems: allMediaItems,
 				isPinned: postData.isPinned ?? false,
-				caption: postData.caption
+				pinnedAt: nil,
+				caption: postData.caption,
+				allowReplies: postData.allowReplies ?? true,
+				allowDownload: postData.allowDownload ?? false,
+				taggedUsers: postData.taggedUsers ?? []
 			)
 		}
 	}
@@ -313,13 +317,26 @@ final class APIClient {
 	
 	/// Search collections - returns all public collections and collections user has access to
 	func searchCollections(query: String? = nil) async throws -> [CollectionResponse] {
+		// CRITICAL FIX: Use rate limiter to prevent overwhelming backend
+		return try await APIRateLimiter.shared.execute {
+			// CRITICAL FIX: Add retry logic for backend errors
+			return try await FirebaseRetryManager.shared.executeWithRetry(
+				operation: {
+					try await self.performSearchCollections(query: query)
+				},
+				operationName: "Search collections"
+			)
+		}
+	}
+	
+	private func performSearchCollections(query: String?) async throws -> [CollectionResponse] {
 		var endpoint = "/collections/discover/collections"
 		if let query = query, !query.isEmpty {
 			let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
 			endpoint += "?query=\(encodedQuery)"
 		}
 		print("🔍 Searching collections at: \(baseURL)/api\(endpoint)")
-		let request = try await createRequest(endpoint: endpoint, method: "GET")
+			let request = try await self.createRequest(endpoint: endpoint, method: "GET")
 		let (data, response) = try await URLSession.shared.data(for: request)
 		
 		// Log response for debugging
@@ -332,12 +349,25 @@ final class APIClient {
 			}
 		}
 		
-		try validateResponse(response, data: data)
+			try self.validateResponse(response, data: data)
 		return try JSONDecoder().decode([CollectionResponse].self, from: data)
-	}
+		}
 	
 	/// Search posts - returns posts from all accessible collections
 	func searchPosts(query: String? = nil) async throws -> [CollectionPost] {
+		// CRITICAL FIX: Use rate limiter to prevent overwhelming backend
+		return try await APIRateLimiter.shared.execute {
+			// CRITICAL FIX: Add retry logic for backend errors
+			return try await FirebaseRetryManager.shared.executeWithRetry(
+				operation: {
+					try await self.performSearchPosts(query: query)
+				},
+				operationName: "Search posts"
+			)
+		}
+	}
+	
+	private func performSearchPosts(query: String?) async throws -> [CollectionPost] {
 		var endpoint = "/collections/discover/posts"
 		if let query = query, !query.isEmpty {
 			let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
@@ -405,7 +435,13 @@ final class APIClient {
 				authorName: postData.authorName,
 				createdAt: createdAt,
 				firstMediaItem: mediaItem,
-				mediaItems: allMediaItems
+				mediaItems: allMediaItems,
+				isPinned: postData.isPinned ?? false,
+				pinnedAt: nil,
+				caption: postData.caption,
+				allowReplies: postData.allowReplies ?? true,
+				allowDownload: postData.allowDownload ?? false,
+				taggedUsers: postData.taggedUsers ?? []
 			)
 		}
 	}
@@ -609,6 +645,18 @@ final class APIClient {
 			} else {
 				print("❌ Backend API Error (\(httpResponse.statusCode)): No error details available")
 			}
+			
+			// CRITICAL FIX: Handle rate limiting and backend overload
+			if httpResponse.statusCode == 429 {
+				// Rate limited - backend is overloaded
+				print("⚠️ Backend rate limited (429) - backend may be overloaded")
+				throw APIError.httpError(statusCode: 429, message: "Too many requests. Please try again in a moment.")
+			} else if httpResponse.statusCode == 503 {
+				// Service unavailable - backend down or overloaded
+				print("⚠️ Backend unavailable (503) - backend may be down or overloaded")
+				throw APIError.httpError(statusCode: 503, message: "Service temporarily unavailable. Please try again later.")
+			}
+			
 			throw APIError.httpError(statusCode: httpResponse.statusCode, message: errorMessage)
 		}
 	}

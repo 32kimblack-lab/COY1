@@ -10,19 +10,33 @@ struct ViewerProfileView: View {
 	@State private var userCollections: [CollectionData] = []
 	@State private var isLoadingCollections = false
 	@State private var isUserBlocked = false
+	@State private var areMutuallyBlocked = false
 	@State private var isFriend = false
+	@State private var hasOutgoingRequest = false // Request sent by current user
+	@State private var hasIncomingRequest = false // Request sent to current user
 	@State private var showUserActionsDialog = false
 	@State private var showBlockReportMenu = false
 	@State private var showReportUserAlert = false
+	@State private var showReportSuccessAlert = false
+	@State private var showReportErrorAlert = false
+	@State private var reportErrorMessage = ""
+	@State private var isReporting = false
 	@State private var selectedCollection: CollectionData?
 	@State private var showingInsideCollection = false
 	@State private var selectedOwnerId: String?
 	@State private var profileRefreshTrigger = UUID()
 	@State private var collectionsListener: ListenerRegistration?
+	@State private var viewedUserListener: ListenerRegistration? // Real-time listener for the viewed user's profile
 	@State private var userSortPreference: String = "Newest to Oldest"
 	@State private var userCustomOrder: [String] = []
-	@State private var pendingRequests: Set<String> = [] // Track collections with pending requests
+	@State private var isReloadingCollections = false // Guard to prevent concurrent reloads
+	@State private var showChatScreen = false
+	@State private var chatId: String?
+	// Request state is managed by CollectionRequestStateManager.shared - no local state needed
 	@Environment(\.colorScheme) var colorScheme
+	@StateObject private var cyServiceManager = CYServiceManager.shared // Observe ServiceManager for real-time updates
+	private let friendService = FriendService.shared
+	private let chatService = ChatService.shared
 	
 	var isViewingOwnProfile: Bool {
 		authService.user?.uid == userId
@@ -54,6 +68,45 @@ struct ViewerProfileView: View {
 	
 	var body: some View {
 		PhoneSizeContainer {
+			// If users are mutually blocked, show nothing - user doesn't exist
+			if areMutuallyBlocked {
+				VStack(spacing: 0) {
+					// Back button at the top
+					HStack {
+						Button(action: {
+							dismiss()
+						}) {
+							HStack(spacing: 8) {
+								Image(systemName: "chevron.backward")
+									.font(.system(size: 18, weight: .semibold))
+								Text("Back")
+									.font(.system(size: 17))
+							}
+							.foregroundColor(colorScheme == .dark ? .white : .black)
+						}
+						.padding(.horizontal)
+						.padding(.top, 8)
+						Spacer()
+					}
+					
+					// Content
+					VStack(spacing: 16) {
+						Spacer()
+						Image(systemName: "eye.slash.fill")
+							.font(.system(size: 48))
+							.foregroundColor(.gray)
+						Text("User not found")
+							.font(.headline)
+							.foregroundColor(colorScheme == .dark ? .white : .black)
+						Text("This user is not available")
+							.font(.subheadline)
+							.foregroundColor(.gray)
+						Spacer()
+					}
+				}
+				.frame(maxWidth: .infinity, maxHeight: .infinity)
+				.background(colorScheme == .dark ? Color.black : Color.white)
+			} else {
 			ZStack(alignment: .top) {
 				// Background
 				(colorScheme == .dark ? Color.black : Color.white)
@@ -68,6 +121,7 @@ struct ViewerProfileView: View {
 					if !isUserBlocked {
 						userCollectionsSection
 							.padding(.top, -20)
+						}
 					}
 				}
 			}
@@ -89,6 +143,12 @@ struct ViewerProfileView: View {
 					.environmentObject(authService)
 			}
 		}
+		.navigationDestination(isPresented: $showChatScreen) {
+			if let chatId = chatId {
+				ChatScreen(chatId: chatId, otherUserId: userId)
+					.environmentObject(authService)
+			}
+		}
 		.confirmationDialog("User Options", isPresented: $showBlockReportMenu, titleVisibility: .hidden) {
 			if isUserBlocked {
 				Button("Unblock User") {
@@ -105,48 +165,97 @@ struct ViewerProfileView: View {
 			Button("Cancel", role: .cancel) { }
 		}
 		.onAppear {
+			// Start ServiceManager listener for real-time user updates
 			Task {
+				try? await CYServiceManager.shared.loadCurrentUser()
+			}
+			
+			Task {
+				// Check blocking FIRST - if mutually blocked, don't load anything
+				checkBlockedStatus()
+				
+				// Wait a moment for blocking check to complete
+				try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+				
+				// Only load data if not mutually blocked
+				if !areMutuallyBlocked {
 				await loadUserData()
 				await loadUserSortPreference()
 				await loadUserCollections()
 				checkFriendshipStatus()
-				checkBlockedStatus()
-				initializeRequestState()
+				checkFriendRequestStatus()
+				Task {
+					await CollectionRequestStateManager.shared.initializeState()
+					}
+				}
 			}
 			setupCollectionsListener()
+			setupViewedUserListener() // Set up real-time listener for the viewed user's profile
 		}
 		.onDisappear {
 			collectionsListener?.remove()
 			collectionsListener = nil
+			viewedUserListener?.remove()
+			viewedUserListener = nil
 		}
-		.sheet(isPresented: $showReportUserAlert) {
-			// TODO: Add ReportView when available
-			Text("Report User")
+		.alert("Report User", isPresented: $showReportUserAlert) {
+			Button("Cancel", role: .cancel) { }
+			Button("Report", role: .destructive) {
+				reportUser()
+			}
+		} message: {
+			Text("Are you sure you want to report this user? This action will send a report to our team for review.")
+		}
+		.alert("Report Submitted", isPresented: $showReportSuccessAlert) {
+			Button("OK") { }
+		} message: {
+			Text("Your report has been sent successfully. We will review it and take appropriate action.")
+		}
+		.alert("Error", isPresented: $showReportErrorAlert) {
+			Button("OK") { }
+		} message: {
+			Text(reportErrorMessage.isEmpty ? "Failed to submit report. Please try again." : reportErrorMessage)
 		}
 		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { notification in
-			if let blockedUserId = notification.userInfo?["blockedUserId"] as? String,
-			   blockedUserId == userId {
+			if let blockedUserId = notification.userInfo?["blockedUserId"] as? String {
 				Task {
 					try? await CYServiceManager.shared.loadCurrentUser()
 					await MainActor.run {
 						checkBlockedStatus()
+						// If now mutually blocked, clear everything
+						if areMutuallyBlocked {
+							user = nil
+							userCollections = []
+						} else if blockedUserId == userId {
+						// Reload collections when blocking/unblocking
+						Task {
+							await loadUserCollections(forceFresh: false)
+							}
+						}
 					}
 				}
 			}
 		}
 		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { notification in
-			if let unblockedUserId = notification.userInfo?["unblockedUserId"] as? String,
-			   unblockedUserId == userId {
+			if let unblockedUserId = notification.userInfo?["unblockedUserId"] as? String {
 				Task {
 					try? await CYServiceManager.shared.loadCurrentUser()
 					await MainActor.run {
 						checkBlockedStatus()
+						// If no longer mutually blocked, reload data
+						if !areMutuallyBlocked && unblockedUserId == userId {
+						Task {
+								await loadUserData()
+								await loadUserCollections(forceFresh: true)
+							}
+						}
 					}
 				}
 			}
 		}
 		.refreshable {
-			await refreshUserProfileData()
+			// Simple refresh - just reload collections, real-time listener handles profile updates
+			await loadUserCollections(forceFresh: true)
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionDeleted"))) { notification in
 			if let deletedId = notification.object as? String {
@@ -168,36 +277,109 @@ struct ViewerProfileView: View {
 				}
 			}
 		}
-		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { notification in
-			// Update user profile when it's updated
-			if let userId = notification.object as? String,
-			   userId == self.userId {
-				print("🔄 ViewerProfileView: User profile updated, refreshing")
-				Task {
-					await loadUserData()
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("ViewerProfileViewUserUpdated"))) { notification in
+			// Update user data when real-time Firestore listener detects changes (for other users)
+			if let viewedUserId = notification.object as? String,
+			   viewedUserId == userId {
+				if var updatedUser = user {
+					if let newProfileImageURL = notification.userInfo?["profileImageURL"] as? String {
+						updatedUser.profileImageURL = newProfileImageURL
+					}
+					if let newBackgroundImageURL = notification.userInfo?["backgroundImageURL"] as? String {
+						updatedUser.backgroundImageURL = newBackgroundImageURL
+					}
+					if let newName = notification.userInfo?["name"] as? String {
+						updatedUser.name = newName
+					}
+					if let newUsername = notification.userInfo?["username"] as? String {
+						updatedUser.username = newUsername
+					}
+					user = updatedUser
 					profileRefreshTrigger = UUID()
+					print("✅ ViewerProfileView: Updated user profile from real-time listener")
+				} else {
+					// If user not loaded yet, load it
+					Task {
+						await loadUserData()
+					}
 				}
+			}
+		}
+		.onChange(of: cyServiceManager.currentUser) { oldValue, newValue in
+			// Real-time update when current user's profile changes via ServiceManager
+			// Only update if profile-relevant fields actually changed (prevent infinite loops)
+			guard isViewingOwnProfile, let cyUser = newValue, var updatedUser = self.user else { return }
+			
+			let profileChanged = oldValue?.profileImageURL != cyUser.profileImageURL ||
+			oldValue?.backgroundImageURL != cyUser.backgroundImageURL ||
+			oldValue?.name != cyUser.name ||
+			oldValue?.username != cyUser.username
+			
+			if profileChanged {
+				// Immediately update all fields from ServiceManager (like ProfileView)
+				updatedUser.profileImageURL = cyUser.profileImageURL
+				updatedUser.backgroundImageURL = cyUser.backgroundImageURL
+				updatedUser.name = cyUser.name
+				updatedUser.username = cyUser.username
+				self.user = updatedUser
+				self.profileRefreshTrigger = UUID()
+				print("✅ ViewerProfileView: Immediately updated from ServiceManager onChange")
 			}
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUpdated"))) { notification in
-			// Refresh collections when a collection is updated
-			if notification.object as? String != nil {
-				print("🔄 ViewerProfileView: Collection updated, refreshing collections")
+			// Only refresh if the updated collection belongs to the viewed user
+			if let collectionId = notification.object as? String,
+			   userCollections.contains(where: { $0.id == collectionId }) {
 				Task {
-					await loadUserCollections(forceFresh: true)
+					await loadUserCollections(forceFresh: false) // Use cache if available
 				}
 			}
 		}
-		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { _ in
-			// Refresh collections when a user is blocked
-			Task {
-				await loadUserCollections(forceFresh: true)
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserCollectionsUpdated"))) { notification in
+			// Refresh collections when user's collections list changes (join/leave)
+			if let updatedUserId = notification.object as? String,
+			   updatedUserId == userId {
+				Task {
+					await loadUserCollections(forceFresh: false)
+				}
 			}
 		}
-		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { _ in
-			// Refresh collections when a user is unblocked
-			Task {
-				await loadUserCollections(forceFresh: true)
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FriendRequestAccepted"))) { notification in
+			// Update friend status when request is accepted
+			if let acceptedUid = notification.object as? String,
+			   acceptedUid == userId {
+				Task {
+					checkFriendshipStatus()
+					checkFriendRequestStatus()
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FriendRequestDenied"))) { notification in
+			// Update friend status when request is denied
+			if let deniedUid = notification.object as? String,
+			   deniedUid == userId {
+				Task {
+					checkFriendshipStatus()
+					checkFriendRequestStatus()
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FriendRequestSent"))) { notification in
+			// Update request status when a request is sent
+			if let toUid = notification.object as? String,
+			   toUid == userId {
+				Task {
+					checkFriendRequestStatus()
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FriendRequestCancelled"))) { notification in
+			// Update request status when a request is cancelled
+			if let toUid = notification.object as? String,
+			   toUid == userId {
+				Task {
+					checkFriendRequestStatus()
+				}
 			}
 		}
 	}
@@ -238,6 +420,55 @@ struct ViewerProfileView: View {
 					// Right Buttons
 					HStack(spacing: 16) {
 						if !isViewingOwnProfile {
+							// Friend Request/Message Button
+							if isFriend {
+								// Message button when friends
+								Button(action: {
+									Task {
+										await navigateToChat()
+									}
+								}) {
+									CircleButton(systemName: "message", colorScheme: colorScheme)
+								}
+							} else if hasIncomingRequest {
+								// Accept/Deny buttons when there's an incoming request
+								HStack(spacing: 8) {
+									Button(action: {
+										Task {
+											await acceptFriendRequest()
+										}
+									}) {
+										CircleButton(systemName: "checkmark", colorScheme: colorScheme)
+									}
+									Button(action: {
+										Task {
+											await denyFriendRequest()
+										}
+									}) {
+										CircleButton(systemName: "xmark", colorScheme: colorScheme)
+									}
+								}
+							} else if hasOutgoingRequest {
+								// Pending button when request is sent
+								Button(action: {
+									Task {
+										await cancelFriendRequest()
+									}
+								}) {
+									CircleButton(systemName: "clock", colorScheme: colorScheme)
+								}
+							} else {
+								// Add button when no request exists
+								Button(action: {
+									Task {
+										await sendFriendRequest()
+									}
+								}) {
+									CircleButton(systemName: "person.badge.plus", colorScheme: colorScheme)
+								}
+							}
+							
+							// Three-dot menu button
 							Button(action: {
 								showBlockReportMenu = true
 							}) {
@@ -377,7 +608,7 @@ struct ViewerProfileView: View {
 							onOwnerProfileTapped: { ownerId in
 								selectedOwnerId = ownerId
 							},
-							hasRequested: pendingRequests.contains(collection.id),
+							hasRequested: CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id),
 							onActionTapped: {
 								handleCollectionAction(collection: collection)
 							},
@@ -449,16 +680,26 @@ struct ViewerProfileView: View {
 	}
 	
 	private func loadUserCollections(forceFresh: Bool = false) async {
-		do {
-			await MainActor.run {
+		// Prevent concurrent reloads
+		guard !isReloadingCollections else { return }
+		
+		await MainActor.run {
+			isReloadingCollections = true
+			if userCollections.isEmpty {
 				self.isLoadingCollections = true
 			}
-			
+		}
+		
+		defer {
+			Task { @MainActor in
+				isReloadingCollections = false
+				isLoadingCollections = false
+			}
+		}
+		
+		do {
 			// Use privacy-aware method to only get collections the viewing user can see
 			guard let currentUserId = authService.user?.uid else {
-				await MainActor.run {
-					self.isLoadingCollections = false
-				}
 				return
 			}
 			
@@ -480,14 +721,9 @@ struct ViewerProfileView: View {
 			
 			await MainActor.run {
 				self.userCollections = filteredCollections
-				self.isLoadingCollections = false
-				self.profileRefreshTrigger = UUID()
 			}
 		} catch {
 			print("Error loading collections: \(error)")
-			await MainActor.run {
-				self.isLoadingCollections = false
-			}
 		}
 	}
 	
@@ -496,40 +732,99 @@ struct ViewerProfileView: View {
 		// For now, collections are loaded on appear and refresh
 	}
 	
-	private func initializeRequestState() {
-		// Check for existing pending request notifications
-		Task {
-			guard let currentUserId = Auth.auth().currentUser?.uid else { return }
-			do {
-				let notifications = try await NotificationService.shared.getNotifications(userId: currentUserId)
-				await MainActor.run {
-					for notification in notifications {
-						if notification.type == "collection_request" && notification.status == "pending",
-						   let collectionId = notification.collectionId {
-							pendingRequests.insert(collectionId)
-						}
-					}
+	// MARK: - Real-time Listener for Viewed User's Profile
+	private func setupViewedUserListener() {
+		// Remove existing listener if any
+		viewedUserListener?.remove()
+		
+		// Set up real-time Firestore listener for the viewed user's document
+		// This allows other users to see real-time updates when the profile is edited
+		let db = Firestore.firestore()
+		let viewedUserId = userId
+		viewedUserListener = db.collection("users").document(viewedUserId).addSnapshotListener { snapshot, error in
+			Task { @MainActor in
+				if let error = error {
+					print("❌ ViewerProfileView: Error listening to viewed user updates: \(error.localizedDescription)")
+					return
 				}
-			} catch {
-				print("Error initializing request state: \(error)")
+				
+				guard let snapshot = snapshot, let data = snapshot.data() else {
+					return
+				}
+				
+				// Immediately update user data from Firestore (real-time)
+				// Use NotificationCenter to update the view since we can't capture self in struct
+				let newProfileImageURL = data["profileImageURL"] as? String
+				let newBackgroundImageURL = data["backgroundImageURL"] as? String
+				let newName = data["name"] as? String ?? ""
+				let newUsername = data["username"] as? String ?? ""
+				NotificationCenter.default.post(
+					name: Notification.Name("ViewerProfileViewUserUpdated"),
+					object: viewedUserId,
+					userInfo: [
+						"profileImageURL": newProfileImageURL as Any,
+						"backgroundImageURL": newBackgroundImageURL as Any,
+						"name": newName,
+						"username": newUsername
+					]
+				)
+				print("🔄 ViewerProfileView: Viewed user profile updated in real-time from Firestore")
 			}
 		}
 	}
+	
+	// Request state initialization is handled by CollectionRequestStateManager.shared
 	
 	private func checkFriendshipStatus() {
 		Task {
 			guard authService.user?.uid != nil else { return }
 			
-			// TODO: Implement areUsersFriends check
+			let areFriends = await friendService.isFriend(userId: userId)
 			await MainActor.run {
-				isFriend = false
+				isFriend = areFriends
+			}
+		}
+	}
+	
+	private func checkFriendRequestStatus() {
+		Task {
+			guard authService.user?.uid != nil else { return }
+			
+			// Check for outgoing request (sent by current user)
+			let outgoingRequests = try? await friendService.getOutgoingFriendRequests()
+			let hasOutgoing = outgoingRequests?.contains(where: { $0.toUid == userId }) ?? false
+			
+			// Check for incoming request (sent to current user)
+			let incomingRequests = try? await friendService.getIncomingFriendRequests()
+			let hasIncoming = incomingRequests?.contains(where: { $0.fromUid == userId }) ?? false
+			
+			await MainActor.run {
+				hasOutgoingRequest = hasOutgoing
+				hasIncomingRequest = hasIncoming
 			}
 		}
 	}
 	
 	private func checkBlockedStatus() {
 		let userId = self.userId
-		isUserBlocked = CYServiceManager.shared.isUserBlocked(userId: userId)
+		Task {
+			// Check mutual blocking - if either user blocked the other, they're mutually blocked
+			let mutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: userId)
+			let currentBlockedOther = CYServiceManager.shared.isUserBlocked(userId: userId)
+			
+			await MainActor.run {
+				areMutuallyBlocked = mutuallyBlocked
+				isUserBlocked = currentBlockedOther
+				
+				// If mutually blocked, clear all user data - they don't exist
+				if mutuallyBlocked {
+					user = nil
+					userCollections = []
+					viewedUserListener?.remove()
+					viewedUserListener = nil
+				}
+			}
+		}
 	}
 	
 	private func blockUser() {
@@ -542,6 +837,30 @@ struct ViewerProfileView: View {
 				}
 			} catch {
 				print("Error blocking user: \(error)")
+			}
+		}
+	}
+	
+	private func reportUser() {
+		guard !isReporting else { return }
+		isReporting = true
+		
+		Task {
+			do {
+				try await ReportService.shared.reportUser(reportedUserId: userId)
+				await MainActor.run {
+					isReporting = false
+					showReportUserAlert = false
+					showReportSuccessAlert = true
+				}
+			} catch {
+				print("❌ ViewerProfileView: Error reporting user: \(error.localizedDescription)")
+				await MainActor.run {
+					isReporting = false
+					showReportUserAlert = false
+					reportErrorMessage = error.localizedDescription
+					showReportErrorAlert = true
+				}
 			}
 		}
 	}
@@ -634,6 +953,98 @@ struct ViewerProfileView: View {
 		}
 	}
 	
+	private func sendFriendRequest() async {
+		guard authService.user?.uid != nil else { return }
+		
+		do {
+			// Check if this is a one-way un-add scenario where we can restore friendship directly
+			let canRestore = await friendService.canRestoreFriendship(userId: userId)
+			
+			if canRestore {
+				// One-way un-add: restore friendship immediately (no friend request needed)
+				try await friendService.restoreFriendship(userId: userId)
+				await MainActor.run {
+					isFriend = true
+					hasOutgoingRequest = false
+					hasIncomingRequest = false
+				}
+			} else {
+				// Both-way un-add or new friend: send friend request
+				try await friendService.sendFriendRequest(toUid: userId)
+				await MainActor.run {
+					hasOutgoingRequest = true
+					hasIncomingRequest = false
+				}
+				// Post notification
+				NotificationCenter.default.post(name: NSNotification.Name("FriendRequestSent"), object: userId)
+			}
+		} catch {
+			print("❌ Error sending friend request: \(error.localizedDescription)")
+		}
+	}
+	
+	private func acceptFriendRequest() async {
+		do {
+			try await friendService.acceptRequest(fromUid: userId)
+			await MainActor.run {
+				isFriend = true
+				hasIncomingRequest = false
+				hasOutgoingRequest = false
+			}
+			// Post notification
+			NotificationCenter.default.post(name: NSNotification.Name("FriendRequestAccepted"), object: userId)
+		} catch {
+			print("❌ Error accepting friend request: \(error.localizedDescription)")
+		}
+	}
+	
+	private func denyFriendRequest() async {
+		do {
+			try await friendService.denyRequest(fromUid: userId)
+			await MainActor.run {
+				hasIncomingRequest = false
+				hasOutgoingRequest = false
+			}
+			// Post notification
+			NotificationCenter.default.post(name: NSNotification.Name("FriendRequestDenied"), object: userId)
+		} catch {
+			print("❌ Error denying friend request: \(error.localizedDescription)")
+		}
+	}
+	
+	private func cancelFriendRequest() async {
+		guard let currentUserId = authService.user?.uid else { return }
+		
+		do {
+			// Cancel the outgoing friend request by deleting it
+			let requestId = "\(currentUserId)_\(userId)"
+			let db = Firestore.firestore()
+			try await db.collection("friend_requests").document(requestId).delete()
+			
+			await MainActor.run {
+				hasOutgoingRequest = false
+			}
+			// Post notification
+			NotificationCenter.default.post(name: NSNotification.Name("FriendRequestCancelled"), object: userId)
+		} catch {
+			print("❌ Error cancelling friend request: \(error.localizedDescription)")
+		}
+	}
+	
+	private func navigateToChat() async {
+		guard let currentUserId = authService.user?.uid else { return }
+		
+		do {
+			let chatRoom = try await chatService.getOrCreateChatRoom(participants: [currentUserId, userId])
+			await MainActor.run {
+				chatId = chatRoom.id
+				showChatScreen = true
+			}
+		} catch {
+			print("❌ Error navigating to chat: \(error.localizedDescription)")
+		}
+	}
+	
 	private func handleCollectionAction(collection: CollectionData) {
 		guard let currentUserId = Auth.auth().currentUser?.uid else { return }
 		
@@ -645,18 +1056,77 @@ struct ViewerProfileView: View {
 		// Handle Request action for Request-type collections if user is NOT a member/owner/admin
 		if collection.type == "Request" && !isMember && !isOwner && !isAdmin {
 			Task {
-				do {
-					try await CollectionService.shared.sendCollectionRequest(collectionId: collection.id)
-					_ = await MainActor.run {
-						pendingRequests.insert(collection.id)
+				// Check if there's already a pending request
+				let hasRequested = CollectionRequestStateManager.shared.hasPendingRequest(for: collection.id)
+				
+				// Post notification immediately for synchronization
+				if let currentUserId = authService.user?.uid {
+					if hasRequested {
+						// Post cancellation notification immediately
+						NotificationCenter.default.post(
+							name: NSNotification.Name("CollectionRequestCancelled"),
+							object: collection.id,
+							userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+						)
+					} else {
+						// Post request notification immediately
+						NotificationCenter.default.post(
+							name: NSNotification.Name("CollectionRequestSent"),
+							object: collection.id,
+							userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+						)
 					}
+				}
+				
+				do {
+					if hasRequested {
+						// Cancel/unrequest
+						try await CollectionService.shared.cancelCollectionRequest(collectionId: collection.id)
+					} else {
+						// Send request
+						try await CollectionService.shared.sendCollectionRequest(collectionId: collection.id)
+					}
+					// Refresh collections to update button state
+					await loadUserCollections(forceFresh: true)
 				} catch {
-					print("Error sending collection request: \(error.localizedDescription)")
+					print("Error \(hasRequested ? "cancelling" : "sending") collection request: \(error.localizedDescription)")
+					// Revert the notification on error
+					if let currentUserId = authService.user?.uid {
+						if hasRequested {
+							NotificationCenter.default.post(
+								name: NSNotification.Name("CollectionRequestSent"),
+								object: collection.id,
+								userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+							)
+						} else {
+							NotificationCenter.default.post(
+								name: NSNotification.Name("CollectionRequestCancelled"),
+								object: collection.id,
+								userInfo: ["requesterId": currentUserId, "collectionId": collection.id]
+							)
+						}
+					}
 				}
 			}
 		}
 		// Handle Join action for Open collections if user is NOT a member/owner/admin
 		else if collection.type == "Open" && !isMember && !isOwner && !isAdmin {
+			// Post notification immediately for synchronization (same pattern as follow button)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionJoined"),
+				object: collection.id,
+				userInfo: ["userId": currentUserId]
+			)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionUpdated"),
+				object: collection.id,
+				userInfo: ["action": "memberAdded", "userId": currentUserId]
+			)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("UserCollectionsUpdated"),
+				object: currentUserId
+			)
+			
 			Task {
 				do {
 					try await CollectionService.shared.joinCollection(collectionId: collection.id)
@@ -664,6 +1134,12 @@ struct ViewerProfileView: View {
 					await loadUserCollections(forceFresh: true)
 				} catch {
 					print("Error joining collection: \(error.localizedDescription)")
+					// Revert notifications on error
+					NotificationCenter.default.post(
+						name: NSNotification.Name("CollectionLeft"),
+						object: collection.id,
+						userInfo: ["userId": currentUserId]
+					)
 				}
 			}
 		}

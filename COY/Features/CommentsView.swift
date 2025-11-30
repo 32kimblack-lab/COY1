@@ -3,6 +3,7 @@ import Combine
 import FirebaseAuth
 import FirebaseFirestore
 import SDWebImageSwiftUI
+import GoogleMobileAds
 
 struct CommentsView: View {
 	let post: CollectionPost
@@ -33,6 +34,22 @@ struct CommentsView: View {
 				
 				if post.allowReplies {
 					VStack(spacing: 0) {
+						// Banner Ad at top (like Reddit)
+						BannerAdView(adUnitID: {
+							#if DEBUG
+							return "ca-app-pub-3940256099942544/2934735716" // Test banner ad unit ID
+							#else
+							return "ca-app-pub-1522482018148796/8721412363" // Real comment ad unit
+							#endif
+						}())
+							.frame(height: 50)
+							.frame(maxWidth: .infinity)
+							.background(Color(colorScheme == .dark ? .black : .white))
+							.padding(.top, 8)
+							.onAppear {
+								print("✅ CommentsView: Banner ad view appeared")
+							}
+						
 						// Comments List
 						if viewModel.comments.isEmpty && !viewModel.isLoading {
 							VStack(spacing: 16 * scaleFactor) {
@@ -97,7 +114,7 @@ struct CommentsView: View {
 														await viewModel.loadMoreReplies(parentCommentId: comment.id)
 													}
 												}) {
-													Text("View \(replyCount - (viewModel.replies[comment.id]?.count ?? 0)) more replies")
+													Text("View \(replyCount - (viewModel.replies[comment.id]?.count ?? 0)) more comments")
 														.font(.subheadline)
 														.foregroundColor(.blue)
 														.padding(.leading, 32)
@@ -179,6 +196,31 @@ struct CommentsView: View {
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CommentDeleted"))) { notification in
 				if let postId = notification.object as? String, postId == post.id {
+					Task {
+						await viewModel.loadComments(postId: post.id)
+					}
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { notification in
+				// Immediately filter out comments from blocked user
+				if let blockedUserId = notification.userInfo?["blockedUserId"] as? String {
+					Task {
+						await MainActor.run {
+							// Remove comments from blocked user immediately
+							viewModel.comments.removeAll { $0.userId == blockedUserId }
+							// Also remove from replies
+							for key in viewModel.replies.keys {
+								viewModel.replies[key]?.removeAll { $0.userId == blockedUserId }
+							}
+							print("🚫 CommentsView: Removed comments from blocked user '\(blockedUserId)'")
+						}
+					}
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { notification in
+				// Reload comments when user is unblocked to show their comments again
+				if let unblockedUserId = notification.userInfo?["unblockedUserId"] as? String {
+					print("✅ CommentsView: User '\(unblockedUserId)' was unblocked, reloading comments")
 					Task {
 						await viewModel.loadComments(postId: post.id)
 					}
@@ -285,6 +327,9 @@ class CommentsViewModel: ObservableObject {
 	func loadComments(postId: String) async {
 		isLoading = true
 		do {
+			// Setup real-time listener BEFORE loading to catch new comments immediately
+			setupCommentsListener(postId: postId)
+			
 			var loadedComments = try await CommentService.shared.loadComments(postId: postId)
 			// Filter out comments from blocked users
 			loadedComments = await filterBlockedUsersComments(loadedComments)
@@ -313,9 +358,6 @@ class CommentsViewModel: ObservableObject {
 					await loadReplies(parentCommentId: comment.id)
 				}
 			}
-			
-			// Setup real-time listener after initial load
-			setupCommentsListener(postId: postId)
 		} catch {
 			print("❌ Error loading comments: \(error)")
 		}
@@ -329,7 +371,7 @@ class CommentsViewModel: ObservableObject {
 		// Remove existing listener
 		commentsListener?.remove()
 		
-		// Listen to comments for this post
+		// Listen to comments for this post - listen to ALL comments (not just top-level)
 		commentsListener = db.collection("posts").document(postId)
 			.collection("comments")
 			.addSnapshotListener { [weak self] snapshot, error in
@@ -372,6 +414,11 @@ class CommentsViewModel: ObservableObject {
 						let parentCommentId = data["parentCommentId"] as? String
 						let replyCount = data["replyCount"] as? Int ?? 0
 						
+						// Skip deleted comments
+						if text == "[deleted]" || (data["isDeleted"] as? Bool == true) {
+							continue
+						}
+						
 						let comment = Comment(
 							id: commentId,
 							postId: postId,
@@ -392,6 +439,7 @@ class CommentsViewModel: ObservableObject {
 							let blockedUserIds = Set(CYServiceManager.shared.getBlockedUsers())
 							if blockedUserIds.contains(comment.userId) {
 								// Don't add comments from blocked users
+								print("🚫 CommentsViewModel: Skipping comment from blocked user \(comment.userId)")
 								return
 							}
 							
@@ -403,6 +451,7 @@ class CommentsViewModel: ObservableObject {
 								   let commenterBlockedUsers = data["blockedUsers"] as? [String],
 								   commenterBlockedUsers.contains(currentUserId) {
 									// Don't add comments from users who blocked current user
+									print("🚫 CommentsViewModel: Skipping comment from user who blocked current user \(comment.userId)")
 									return
 								}
 							} catch {
@@ -422,11 +471,18 @@ class CommentsViewModel: ObservableObject {
 										if !self.replies[parentId]!.contains(where: { $0.id == comment.id }) {
 											self.replies[parentId]!.append(comment)
 										}
+										// Auto-expand parent comment if it has replies
+										if !self.expandedComments.contains(parentId) {
+											self.expandedComments.insert(parentId)
+										}
 									} else {
+										// Top-level comment
 										self.commentReplyCounts[comment.id] = comment.replyCount
 									}
 									
-									print("✅ CommentsViewModel: Added new comment \(comment.id)")
+									print("✅ CommentsViewModel: Added new comment \(comment.id) - parentCommentId: \(parentCommentId ?? "nil")")
+								} else {
+									print("⚠️ CommentsViewModel: Comment \(comment.id) already exists, skipping")
 								}
 							} else if change.type == .modified {
 								// Updated comment - replace existing
@@ -478,7 +534,9 @@ class CommentsViewModel: ObservableObject {
 				name: NSNotification.Name("CommentAdded"),
 				object: postId
 			)
-			// Reload comments to ensure it appears
+			// Wait a brief moment for Firestore to index the new comment, then reload
+			// The real-time listener should also catch it, but this ensures it appears
+			try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
 			await loadComments(postId: postId)
 		} catch {
 			print("❌ Error adding comment: \(error)")
@@ -496,7 +554,9 @@ class CommentsViewModel: ObservableObject {
 				name: NSNotification.Name("CommentAdded"),
 				object: postId
 			)
-			// Reload comments to ensure it appears
+			// Wait a brief moment for Firestore to index the new reply, then reload
+			// The real-time listener should also catch it, but this ensures it appears
+			try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
 			await loadComments(postId: postId)
 			// Auto-expand parent comment
 			expandedComments.insert(parentCommentId)

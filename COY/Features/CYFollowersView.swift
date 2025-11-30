@@ -13,6 +13,8 @@ struct CYFollowersView: View {
 	@State private var isLoading = false
 	@State private var showError = false
 	@State private var errorMessage = ""
+	@State private var selectedUserId: String?
+	@State private var showingProfile = false
 	
 	// Check if current user is owner or admin
 	private var canRemoveFollowers: Bool {
@@ -80,8 +82,32 @@ struct CYFollowersView: View {
 		.navigationBarHidden(true)
 		.navigationBarBackButtonHidden(true)
 		.toolbar(.hidden, for: .navigationBar)
+		.navigationDestination(isPresented: $showingProfile) {
+			if let userId = selectedUserId {
+				ViewerProfileView(userId: userId)
+					.environmentObject(authService)
+			}
+		}
 		.onAppear {
 			loadFollowers()
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { notification in
+			// Immediately filter out blocked user from followers list
+			if let blockedUserId = notification.userInfo?["blockedUserId"] as? String {
+				Task {
+					await MainActor.run {
+						followers.removeAll { $0.userId == blockedUserId }
+						print("🚫 CYFollowersView: Removed blocked user '\(blockedUserId)' from followers list")
+					}
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { notification in
+			// Reload followers when user is unblocked
+			if let unblockedUserId = notification.userInfo?["unblockedUserId"] as? String {
+				print("✅ CYFollowersView: User '\(unblockedUserId)' was unblocked, reloading followers")
+				loadFollowers()
+			}
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUnfollowed"))) { notification in
 			// Reload followers when someone unfollows (including if removed by owner)
@@ -99,8 +125,17 @@ struct CYFollowersView: View {
 	// MARK: - Follower Row
 	private func followerRow(follower: FollowerInfo) -> some View {
 		HStack(spacing: 12) {
-			// Profile Image
-			NavigationLink(destination: ViewerProfileView(userId: follower.userId).environmentObject(authService)) {
+			// Profile Image - Check mutual blocking before navigating
+			Button(action: {
+				Task {
+					// Check if users are mutually blocked before navigating
+					let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: follower.userId)
+					if !areMutuallyBlocked {
+						selectedUserId = follower.userId
+						showingProfile = true
+					}
+				}
+			}) {
 				if let imageURL = follower.profileImageURL, !imageURL.isEmpty {
 					CachedProfileImageView(url: imageURL, size: 50)
 				} else {
@@ -109,7 +144,17 @@ struct CYFollowersView: View {
 			}
 			.buttonStyle(.plain)
 			
-			// User Info
+			// User Info - Also clickable
+			Button(action: {
+				Task {
+					// Check if users are mutually blocked before navigating
+					let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: follower.userId)
+					if !areMutuallyBlocked {
+						selectedUserId = follower.userId
+						showingProfile = true
+					}
+				}
+			}) {
 			VStack(alignment: .leading, spacing: 2) {
 				Text(follower.username)
 					.font(.system(size: 16, weight: .bold))
@@ -119,6 +164,9 @@ struct CYFollowersView: View {
 					.font(.system(size: 14))
 					.foregroundColor(.gray)
 			}
+			}
+			.buttonStyle(.plain)
+			.contentShape(Rectangle())
 			
 			Spacer()
 			
@@ -170,11 +218,11 @@ struct CYFollowersView: View {
 				var loadedFollowers: [FollowerInfo] = []
 				
 				for userId in followerIds {
-					// Check if user is blocked (mutual block check for full invisibility)
-					let isBlocked = await areUsersMutuallyBlocked(userId1: authService.user?.uid ?? "", userId2: userId)
+					// Check mutual blocking
+					let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: userId)
 					
 					// Filter out blocked users
-					if isBlocked {
+					if areMutuallyBlocked {
 						continue
 					}
 					
@@ -232,25 +280,6 @@ struct CYFollowersView: View {
 		}
 	}
 	
-	// MARK: - Helper Functions
-	private func areUsersMutuallyBlocked(userId1: String, userId2: String) async -> Bool {
-		// Load both users' blocked lists
-		let db = Firestore.firestore()
-		
-		do {
-			let user1Doc = try await db.collection("users").document(userId1).getDocument()
-			let user2Doc = try await db.collection("users").document(userId2).getDocument()
-			
-			let user1Blocked = (user1Doc.data()?["blockedUsers"] as? [String]) ?? []
-			let user2Blocked = (user2Doc.data()?["blockedUsers"] as? [String]) ?? []
-			
-			// Check if either user has blocked the other
-			return user1Blocked.contains(userId2) || user2Blocked.contains(userId1)
-		} catch {
-			print("⚠️ Error checking mutual block status: \(error)")
-			return false
-		}
-	}
 }
 
 // MARK: - Follower Info

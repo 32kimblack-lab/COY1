@@ -185,8 +185,10 @@ class ChatService {
 			// If index is missing, use fallback query without ordering
 			if error.localizedDescription.contains("index") {
 				print("⚠️ ChatService: Index missing, using fallback query (unsorted)")
+				// CRITICAL FIX: Add limit even to fallback query
 				let snapshot = try await db.collection("chat_rooms")
 					.whereField("participants", arrayContains: currentUid)
+					.limit(to: 100) // Limit fallback query too
 					.getDocuments()
 				
 				allChatRooms = snapshot.documents.compactMap { ChatRoomModel(queryDocument: $0) }
@@ -306,6 +308,7 @@ class ChatService {
 		let otherParticipant = participants.first { $0 != currentUid } ?? participants[0]
 		
 		// Create message
+		// Mark as delivered and read by sender immediately (they sent it, so they've received and read it)
 		var messageData: [String: Any] = [
 			"chatId": chatId,
 			"senderUid": currentUid,
@@ -315,7 +318,9 @@ class ChatService {
 			"isDeleted": false,
 			"isEdited": false,
 			"reactions": [:],
-			"deletedFor": []
+			"deletedFor": [],
+			"deliveredTo": [currentUid], // Sender has received it
+			"readBy": [currentUid] // Sender has read it (they sent it)
 		]
 		
 		if let replyTo = replyTo {
@@ -327,7 +332,14 @@ class ChatService {
 		batch.setData(messageData, forDocument: messageRef)
 		
 		// Update chat room
-		let lastMessage = type == "text" ? content : "[\(type.capitalized)]"
+		let lastMessage: String
+		if type == "text" {
+			lastMessage = content
+		} else if type == "shared_post" {
+			lastMessage = "Shared a post"
+		} else {
+			lastMessage = "[\(type.capitalized)]"
+		}
 		batch.updateData([
 			"lastMessageTs": Timestamp(date: Date()),
 			"lastMessage": lastMessage,
@@ -795,16 +807,108 @@ class ChatService {
 	
 	// MARK: - Mark as Read
 	
+	func markMessagesAsDelivered(chatId: String, messageIds: [String]) async throws {
+		guard let currentUid = currentUid else {
+			throw ChatServiceError.notAuthenticated
+		}
+		
+		// Mark messages as delivered when they're loaded in the chat screen
+		// This happens when the recipient opens the chat and sees the messages
+		let batch = db.batch()
+		var updateCount = 0
+		
+		for messageId in messageIds {
+			let messageRef = db.collection("chat_rooms")
+				.document(chatId)
+				.collection("messages")
+				.document(messageId)
+			
+			let messageDoc = try? await messageRef.getDocument()
+			guard let messageData = messageDoc?.data(),
+				  let senderUid = messageData["senderUid"] as? String,
+				  senderUid != currentUid else {
+				// Skip messages from current user or invalid messages
+				continue
+			}
+			
+			let deliveredTo = messageData["deliveredTo"] as? [String] ?? []
+			
+			// Add current user to deliveredTo if not already there
+			if !deliveredTo.contains(currentUid) && updateCount < 500 {
+				batch.updateData([
+					"deliveredTo": FieldValue.arrayUnion([currentUid])
+				], forDocument: messageRef)
+				updateCount += 1
+			}
+		}
+		
+		// Commit batch if there are updates
+		if updateCount > 0 {
+			try await batch.commit()
+		}
+	}
+	
 	func markChatAsRead(chatId: String) async throws {
 		guard let currentUid = currentUid else {
 			throw ChatServiceError.notAuthenticated
 		}
 		
+		// Update chat room unread count
 		try await db.collection("chat_rooms")
 			.document(chatId)
 			.updateData([
 				"unreadCount.\(currentUid)": 0
 			])
+		
+		// Mark all undelivered messages as delivered and read
+		// Get all messages that haven't been read by current user yet
+		// CRITICAL FIX: Add limit to prevent loading all messages in a chat
+		// Only mark recent messages as read (last 500) to keep it fast
+		let messagesSnapshot = try await db.collection("chat_rooms")
+			.document(chatId)
+			.collection("messages")
+			.whereField("senderUid", isNotEqualTo: currentUid) // Only messages from others
+			.order(by: "timestamp", descending: true)
+			.limit(to: 500) // Only mark last 500 messages as read
+			.getDocuments()
+		
+		let batch = db.batch()
+		var updateCount = 0
+		
+		for doc in messagesSnapshot.documents {
+			let data = doc.data()
+			let deliveredTo = data["deliveredTo"] as? [String] ?? []
+			let readBy = data["readBy"] as? [String] ?? []
+			
+			var needsUpdate = false
+			var newDeliveredTo = deliveredTo
+			var newReadBy = readBy
+			
+			// Add current user to deliveredTo if not already there
+			if !deliveredTo.contains(currentUid) {
+				newDeliveredTo.append(currentUid)
+				needsUpdate = true
+			}
+			
+			// Add current user to readBy if not already there
+			if !readBy.contains(currentUid) {
+				newReadBy.append(currentUid)
+				needsUpdate = true
+			}
+			
+			if needsUpdate && updateCount < 500 {
+				batch.updateData([
+					"deliveredTo": newDeliveredTo,
+					"readBy": newReadBy
+				], forDocument: doc.reference)
+				updateCount += 1
+			}
+		}
+		
+		// Commit batch if there are updates
+		if updateCount > 0 {
+			try await batch.commit()
+		}
 	}
 	
 	// MARK: - Search Messages

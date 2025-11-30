@@ -23,16 +23,12 @@ struct SharePostView: View {
 	private let db = Firestore.firestore()
 	
 	var allUsers: [ShareUser] {
-		let combined = friends + messageContacts
-		// Remove duplicates by userId
-		let unique = Dictionary(grouping: combined, by: { $0.userId })
-			.compactMap { $0.value.first }
-		
+		// Only show friends (sharing is only allowed to friends)
 		if searchText.isEmpty {
-			return unique.sorted { $0.username < $1.username }
+			return friends.sorted { $0.username < $1.username }
 		} else {
 			let query = searchText.lowercased()
-			return unique.filter { user in
+			return friends.filter { user in
 				user.username.lowercased().contains(query) ||
 				user.name.lowercased().contains(query)
 			}.sorted { $0.username < $1.username }
@@ -211,46 +207,9 @@ struct SharePostView: View {
 	}
 	
 	private func loadMessageContacts(currentUserId: String, friends: [ShareUser]) async -> [ShareUser] {
-		do {
-			// Load chat rooms directly from Firebase
-			let chatRoomsSnapshot = try await db.collection("chatRooms")
-				.whereField("participants", arrayContains: currentUserId)
-				.getDocuments()
-			
-			var contactIds: Set<String> = []
-			
-			for doc in chatRoomsSnapshot.documents {
-				if let participants = doc.data()["participants"] as? [String] {
-					for participantId in participants where participantId != currentUserId {
-						contactIds.insert(participantId)
-					}
-				}
-			}
-			
-			// Get friend IDs to exclude from contacts
-			let friendIds = Set(friends.map { $0.userId })
-			
-			var loadedContacts: [ShareUser] = []
-			for contactId in contactIds {
-				// Skip if already in friends list
-				if friendIds.contains(contactId) {
-					continue
-				}
-				
-				if let user = try? await userService.getUser(userId: contactId) {
-					loadedContacts.append(ShareUser(
-						userId: user.id,
-						username: user.username,
-						name: user.name,
-						profileImageURL: user.profileImageURL
-					))
-				}
-			}
-			return loadedContacts
-		} catch {
-			print("Error loading message contacts: \(error)")
+		// Only return friends - no need to load message contacts separately
+		// Sharing is only allowed to friends
 			return []
-		}
 	}
 	
 	private func sharePost() async {
@@ -267,42 +226,54 @@ struct SharePostView: View {
 			return
 		}
 		
-		// Build share message content
-		var shareContent = ""
-		if let caption = post.caption, !caption.isEmpty {
-			shareContent = caption
-		} else if !post.title.isEmpty {
-			shareContent = post.title
-		} else {
-			shareContent = "Check out this post!"
+		// Verify all selected users are friends
+		let friendService = FriendService.shared
+		for userId in selectedUsers {
+			let isFriend = await friendService.isFriend(userId: userId)
+			if !isFriend {
+				await MainActor.run {
+					errorMessage = "You can only share posts with friends"
+					isSharing = false
+				}
+				return
+			}
 		}
 		
-		// Add post link/identifier so recipient can open it in the app
-		let postLink = "coy://post/\(post.id)"
-		if !shareContent.isEmpty {
-			shareContent += "\n\n\(postLink)"
-		} else {
-			shareContent = postLink
-		}
-		
-		// Determine message type based on post media
-		// For now, send as text with link - the recipient can click to view the post
-		let messageType = "text"
-		
-		// Share with each selected user
+		// Share with each selected user using ChatService
 		var successCount = 0
 		var errorCount = 0
 		
 		for userId in selectedUsers {
 			do {
-				// Get or create chat room
-				let chatRoomId = try await getOrCreateChatRoom(participants: [currentUserId, userId])
+				// Get or create chat room using ChatService
+				let chatRoom = try await ChatService.shared.getOrCreateChatRoom(participants: [currentUserId, userId])
 				
-				// Send post as message
-				try await sendMessage(
-					chatId: chatRoomId,
-					type: messageType,
-					content: shareContent
+				// Create shared post message content (JSON with post data)
+				let firstMediaItem = post.mediaItems.first
+				let firstMediaURL = firstMediaItem?.imageURL ?? firstMediaItem?.videoURL ?? ""
+				let firstMediaType = (firstMediaItem?.isVideo == true) ? "video" : "image"
+				
+				let postData: [String: Any] = [
+					"postId": post.id,
+					"collectionId": post.collectionId,
+					"authorId": post.authorId,
+					"authorName": post.authorName,
+					"caption": post.caption ?? "",
+					"title": post.title,
+					"mediaCount": post.mediaItems.count,
+					"firstMediaURL": firstMediaURL,
+					"firstMediaType": firstMediaType
+				]
+				
+				// Convert to JSON string for content
+				let jsonData = try JSONSerialization.data(withJSONObject: postData)
+				let jsonString = String(data: jsonData, encoding: .utf8) ?? ""
+				
+				// Send as shared_post type
+				try await ChatService.shared.sendMessage(
+					chatId: chatRoom.chatId,
+					type: "shared_post",
+					content: jsonString
 				)
 				successCount += 1
 			} catch {
@@ -324,50 +295,6 @@ struct SharePostView: View {
 		}
 	}
 	
-	// MARK: - Chat Helper Functions
-	private func getOrCreateChatRoom(participants: [String]) async throws -> String {
-		let sortedParticipants = participants.sorted()
-		
-		// Try to find existing chat room
-		let existingRooms = try await db.collection("chatRooms")
-			.whereField("participants", isEqualTo: sortedParticipants)
-			.limit(to: 1)
-			.getDocuments()
-		
-		if let existingRoom = existingRooms.documents.first {
-			return existingRoom.documentID
-		}
-		
-		// Create new chat room
-		let newRoomRef = db.collection("chatRooms").document()
-		try await newRoomRef.setData([
-			"participants": sortedParticipants,
-			"createdAt": Timestamp(),
-			"lastMessageAt": Timestamp()
-		])
-		
-		return newRoomRef.documentID
-	}
-	
-	private func sendMessage(chatId: String, type: String, content: String) async throws {
-		guard let currentUserId = Auth.auth().currentUser?.uid else {
-			throw NSError(domain: "SharePostView", code: -1, userInfo: [NSLocalizedDescriptionKey: "User not authenticated"])
-		}
-		
-		let messageRef = db.collection("chatRooms").document(chatId).collection("messages").document()
-		try await messageRef.setData([
-			"senderId": currentUserId,
-			"type": type,
-			"content": content,
-			"createdAt": Timestamp(),
-			"read": false
-		])
-		
-		// Update chat room's last message timestamp
-		try await db.collection("chatRooms").document(chatId).updateData([
-			"lastMessageAt": Timestamp()
-		])
-	}
 }
 
 // MARK: - Share User Model

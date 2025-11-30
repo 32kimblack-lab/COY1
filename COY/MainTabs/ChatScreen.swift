@@ -1,9 +1,36 @@
 import SwiftUI
+import Combine
 import FirebaseAuth
 import FirebaseFirestore
 import UIKit
 import SDWebImageSwiftUI
 import AVFoundation
+
+// MARK: - Chat ViewModel
+class ChatViewModel: ObservableObject {
+	@Published var messages: [MessageModel] = []
+	
+	func updateMessage(_ updatedMessage: MessageModel) {
+		guard let index = messages.firstIndex(where: { $0.messageId == updatedMessage.messageId }) else { return }
+		messages[index] = updatedMessage
+	}
+	
+	func replaceAllMessages(_ newMessages: [MessageModel]) {
+		messages = newMessages
+	}
+	
+	func insertMessage(_ message: MessageModel, at index: Int) {
+		messages.insert(message, at: index)
+	}
+	
+	func appendMessage(_ message: MessageModel) {
+		messages.append(message)
+	}
+	
+	func removeMessage(withId messageId: String) {
+		messages.removeAll { $0.messageId == messageId }
+	}
+}
 
 struct ChatScreen: View {
 	let chatId: String
@@ -11,7 +38,7 @@ struct ChatScreen: View {
 	private let chatService = ChatService.shared
 	private let friendService = FriendService.shared
 	private let userService = UserService.shared
-	@State private var messages: [MessageModel] = []
+	@StateObject private var viewModel = ChatViewModel()
 	@State private var otherUser: UserService.AppUser?
 	@State private var currentUser: UserService.AppUser?
 	@State private var chatRoom: ChatRoomModel?
@@ -38,6 +65,9 @@ struct ChatScreen: View {
 	@State private var showReactionDetails = false
 	@State private var selectedReactionEmoji: String?
 	@State private var selectedReactionMessage: MessageModel?
+	@State private var selectedPostId: String?
+	@State private var selectedPost: CollectionPost?
+	@State private var showPostDetail = false
 	@Environment(\.dismiss) var dismiss
 	@EnvironmentObject var authService: AuthService
 	
@@ -489,73 +519,62 @@ struct ChatScreen: View {
 					await MainActor.run {
 						let reversedList = Array(messageList.reversed())
 						
-						if self.messages.isEmpty {
+						if self.viewModel.messages.isEmpty {
 							// First load: replace entire array
-							self.messages = reversedList
+							self.viewModel.replaceAllMessages(reversedList)
+							
+							// Mark messages from other user as delivered when first loaded
+							if let currentUid = self.currentUid {
+								let messageIdsToMark = reversedList
+									.filter { $0.senderUid != currentUid && !$0.deliveredTo.contains(currentUid) }
+									.map { $0.messageId }
+								
+								if !messageIdsToMark.isEmpty {
+									Task {
+										try? await chatService.markMessagesAsDelivered(chatId: chatId, messageIds: messageIdsToMark)
+									}
+								}
+							}
 						} else {
-							// Subsequent updates: merge changes to preserve optimistic updates
-							var updatedMessages = self.messages
+							// Subsequent updates: merge server data with local optimistic updates
+							// This ensures reactions, edits, and read receipts update immediately
+							var updatedMessages = self.viewModel.messages
 							let messageDict = Dictionary(uniqueKeysWithValues: reversedList.map { ($0.messageId, $0) })
 							
-							guard let currentUid = currentUid else {
-								// No current user - just use server data
-								self.messages = reversedList
-								return
-							}
+							var hasChanges = false
 							
-							// Update existing messages - merge server updates intelligently
-							// Preserve optimistic updates until server confirms, but always show real-time updates from others
+							// Update existing messages with server data (real-time updates)
+							// CRITICAL: Always use server as source of truth for reactions and edits
+							// Firestore updates propagate immediately, so server data is always current
 							for (index, existingMessage) in updatedMessages.enumerated() {
 								if let serverMessage = messageDict[existingMessage.messageId] {
-									// Check if this is an optimistic edit from current user that hasn't been confirmed yet
-									let localIsEdited = existingMessage.isEdited
-									let serverIsEdited = serverMessage.isEdited
-									let localEditCount = existingMessage.editCount
-									let serverEditCount = serverMessage.editCount
-									let isMyOptimisticEdit = localIsEdited && 
-										existingMessage.senderUid == currentUid &&
-										(!serverIsEdited || localEditCount > serverEditCount)
+									// Check if message actually changed (reactions, edits, etc.)
+									let reactionsChanged = serverMessage.reactions != existingMessage.reactions
+									let editChanged = serverMessage.isEdited != existingMessage.isEdited || 
+													  serverMessage.content != existingMessage.content ||
+													  serverMessage.editCount != existingMessage.editCount
 									
-									// Check if there are optimistic reactions from current user
-									// Compare reactions: if local has current user's reaction that server doesn't have, it's optimistic
-									let localMyReaction = existingMessage.reactions[currentUid]
-									let serverMyReaction = serverMessage.reactions[currentUid]
-									let hasMyOptimisticReaction = localMyReaction != nil && localMyReaction != serverMyReaction
-									
-									// Always merge reactions from server to show real-time updates from other users
-									// But preserve current user's optimistic reaction if it hasn't been confirmed
-									var mergedReactions = serverMessage.reactions
-									if hasMyOptimisticReaction, let myReaction = localMyReaction {
-										// Keep current user's optimistic reaction until server confirms
-										mergedReactions[currentUid] = myReaction
-									}
-									
-									if isMyOptimisticEdit || hasMyOptimisticReaction {
-										// Keep optimistic update, but merge all other fields from server (including reactions from others)
-										var mergedMessage = existingMessage
-										// Preserve optimistic edit if it's from current user
-										if !isMyOptimisticEdit {
-											mergedMessage.content = serverMessage.content
-											mergedMessage.isEdited = serverMessage.isEdited
-											mergedMessage.editedAt = serverMessage.editedAt
-											mergedMessage.editCount = serverMessage.editCount
+									if reactionsChanged || editChanged {
+										hasChanges = true
+										if reactionsChanged {
+											print("🔄 ChatScreen: Reaction update detected for message \(serverMessage.messageId)")
 										}
-										// Always use merged reactions (server + optimistic)
-										mergedMessage.reactions = mergedReactions
-										// Always update other fields that might have changed
-										mergedMessage.isDeleted = serverMessage.isDeleted
-										mergedMessage.deletedFor = serverMessage.deletedFor
-										updatedMessages[index] = mergedMessage
-									} else {
-										// No optimistic updates - use server version (includes all real-time updates)
-										updatedMessages[index] = serverMessage
+										if editChanged {
+											print("🔄 ChatScreen: Edit update detected for message \(serverMessage.messageId)")
+										}
 									}
+									
+									// Use server message directly (source of truth for real-time updates)
+									// This ensures reactions and edits appear immediately for both users
+									// Optimistic updates will be replaced by server data within milliseconds
+									updatedMessages[index] = serverMessage
 								}
 							}
 							
 							// Add any new messages that don't exist yet
 							for newMessage in reversedList {
 								if !updatedMessages.contains(where: { $0.messageId == newMessage.messageId }) {
+									hasChanges = true
 									// Insert new message in correct position (maintain chronological order)
 									if let insertIndex = updatedMessages.firstIndex(where: { $0.timestamp > newMessage.timestamp }) {
 										updatedMessages.insert(newMessage, at: insertIndex)
@@ -565,13 +584,35 @@ struct ChatScreen: View {
 								}
 							}
 							
+							// Mark new messages from other user as delivered
+							if let currentUid = self.currentUid {
+								let newMessageIds = reversedList
+									.filter { $0.senderUid != currentUid && !$0.deliveredTo.contains(currentUid) }
+									.map { $0.messageId }
+								
+								if !newMessageIds.isEmpty {
+									Task {
+										try? await chatService.markMessagesAsDelivered(chatId: chatId, messageIds: newMessageIds)
+									}
+								}
+							}
+							
+							// ALWAYS update the array to trigger SwiftUI refresh
+							// Real-time listener fires for all updates, so we must always refresh
+							// This ensures reactions and edits appear immediately
 							// Create new array reference to trigger SwiftUI update
-							self.messages = updatedMessages
+							// Force a new array instance to ensure SwiftUI detects the change
+							if hasChanges {
+								print("✅ ChatScreen: Real-time update detected - updating UI")
+							}
+							// Always update to ensure SwiftUI refreshes (even if no changes detected)
+							// This is critical for real-time updates to appear immediately
+							self.viewModel.replaceAllMessages(Array(updatedMessages))
 						}
 						
 						// Update pagination state
 						// Since we reversed, the first one is now the oldest
-						if let oldestMessage = self.messages.first {
+						if let oldestMessage = self.viewModel.messages.first {
 							self.oldestMessageId = oldestMessage.messageId
 							// If we got less than 50 messages, there are no more
 							self.hasMoreMessages = messageList.count >= 50
@@ -580,7 +621,7 @@ struct ChatScreen: View {
 						}
 						
 						// Reset scroll flag when messages first load
-						if !self.messages.isEmpty && !hasScrolledToBottom {
+						if !self.viewModel.messages.isEmpty && !hasScrolledToBottom {
 							hasScrolledToBottom = false
 						}
 					}
@@ -614,11 +655,12 @@ struct ChatScreen: View {
 					// Prepend older messages to the beginning (they're older, so go at top)
 					// Since loadOlderMessages returns descending (newest first), reverse them
 					// to get chronological order (oldest first)
-					self.messages = olderMessages.reversed() + self.messages
+					let combinedMessages = olderMessages.reversed() + self.viewModel.messages
+					self.viewModel.replaceAllMessages(combinedMessages)
 					
 					// Update pagination state
 					// The first message is now the oldest
-					if let newOldest = self.messages.first {
+					if let newOldest = self.viewModel.messages.first {
 						self.oldestMessageId = newOldest.messageId
 					}
 					
@@ -756,12 +798,12 @@ struct ChatScreen: View {
 		
 		// Optimistic update: immediately replace message with deleted version
 		// The backend will delete the original and create a replacement message
-		if let index = messages.firstIndex(where: { $0.messageId == messageIdToDelete }) {
-			var deletedMessage = message
+		if let existingMessage = viewModel.messages.first(where: { $0.messageId == messageIdToDelete }) {
+			var deletedMessage = existingMessage
 			deletedMessage.isDeleted = true
 			deletedMessage.content = (deletedMessage.type == "text") ? "This message was deleted" : "This media was deleted"
 			deletedMessage.messageId = "\(messageIdToDelete)_deleted" // Temporary ID until real-time listener updates
-			messages[index] = deletedMessage
+			viewModel.updateMessage(deletedMessage)
 		}
 		
 		showActions = false
@@ -774,10 +816,10 @@ struct ChatScreen: View {
 				print("Error deleting message: \(error)")
 				// Revert optimistic update on error - restore original message
 				await MainActor.run {
-					if let index = messages.firstIndex(where: { $0.messageId == "\(messageIdToDelete)_deleted" }) {
-						messages[index] = originalMessage
-					} else if let index = messages.firstIndex(where: { $0.messageId == messageIdToDelete }) {
-						messages[index] = originalMessage
+					if viewModel.messages.contains(where: { $0.messageId == "\(messageIdToDelete)_deleted" }) {
+						viewModel.updateMessage(originalMessage)
+					} else if viewModel.messages.contains(where: { $0.messageId == messageIdToDelete }) {
+						viewModel.updateMessage(originalMessage)
 					}
 				}
 			}
@@ -796,19 +838,16 @@ struct ChatScreen: View {
 		
 		// Optimistic update: immediately update local state on main thread
 		Task { @MainActor in
-			withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-				if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-					var updatedMessage = message
-					updatedMessage.content = newText
-					updatedMessage.isEdited = true
-					updatedMessage.editedAt = Date()
-					updatedMessage.editCount = message.editCount + 1
-					
-					// Create a new array to trigger SwiftUI update
-					var updatedMessages = messages
-					updatedMessages[index] = updatedMessage
-					messages = updatedMessages
-				}
+			// Update immediately without animation to show instantly
+			if let existingMessage = viewModel.messages.first(where: { $0.messageId == message.messageId }) {
+				var updatedMessage = existingMessage // Use current state, not parameter
+				updatedMessage.content = newText
+				updatedMessage.isEdited = true
+				updatedMessage.editedAt = Date()
+				updatedMessage.editCount = updatedMessage.editCount + 1
+				
+				// Use ViewModel's update method which triggers @Published
+				viewModel.updateMessage(updatedMessage)
 			}
 			
 			showActions = false
@@ -820,13 +859,11 @@ struct ChatScreen: View {
 				// Real-time listener will confirm the update
 			} catch {
 				print("Error editing message: \(error)")
-				// Revert optimistic update on error
+				// Revert optimistic update on error - reload from server
 				await MainActor.run {
-					if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-						var updatedMessages = messages
-						updatedMessages[index] = message
-						messages = updatedMessages
-					}
+					// The real-time listener will update it with correct state
+					// Force refresh by triggering a view update
+					viewModel.objectWillChange.send()
 				}
 			}
 		}
@@ -835,28 +872,29 @@ struct ChatScreen: View {
 	private func reactToMessage(_ message: MessageModel, emoji: String) {
 		guard let currentUid = Auth.auth().currentUser?.uid else { return }
 		
+		// Read current message state BEFORE async operations
+		guard let existingMessage = viewModel.messages.first(where: { $0.messageId == message.messageId }) else { return }
+		let shouldRemove = existingMessage.reactions[currentUid] == emoji
+		
 		// Optimistic update: immediately update local state on main thread
 		Task { @MainActor in
-			withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-				if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-					var updatedMessage = message
-					var updatedReactions = message.reactions
-					
-					if message.reactions[currentUid] == emoji {
-						// Remove reaction if already reacted
-						updatedReactions.removeValue(forKey: currentUid)
-					} else {
-						// Add reaction
-						updatedReactions[currentUid] = emoji
-					}
-					
-					updatedMessage.reactions = updatedReactions
-					
-					// Create a new array to trigger SwiftUI update
-					var updatedMessages = messages
-					updatedMessages[index] = updatedMessage
-					messages = updatedMessages
+			// Update immediately without animation to show instantly
+			if let currentMessage = viewModel.messages.first(where: { $0.messageId == message.messageId }) {
+				var updatedMessage = currentMessage // Use current state from ViewModel
+				var updatedReactions = updatedMessage.reactions
+				
+				if shouldRemove {
+					// Remove reaction if already reacted
+					updatedReactions.removeValue(forKey: currentUid)
+				} else {
+					// Add reaction
+					updatedReactions[currentUid] = emoji
 				}
+				
+				updatedMessage.reactions = updatedReactions
+				
+				// Use ViewModel's update method which triggers @Published
+				viewModel.updateMessage(updatedMessage)
 			}
 			
 			showActions = false
@@ -864,8 +902,7 @@ struct ChatScreen: View {
 		
 		Task {
 			do {
-				// Check if user already reacted with this emoji
-				if message.reactions[currentUid] == emoji {
+				if shouldRemove {
 					// Remove reaction if already reacted
 					try await chatService.removeReaction(chatId: chatId, messageId: message.messageId)
 				} else {
@@ -877,11 +914,9 @@ struct ChatScreen: View {
 				print("Error adding/removing reaction: \(error)")
 				// Revert optimistic update on error
 				await MainActor.run {
-					if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-						var updatedMessages = messages
-						updatedMessages[index] = message
-						messages = updatedMessages
-					}
+					// The real-time listener will update it with correct state
+					// Force refresh by triggering view update
+					viewModel.objectWillChange.send()
 				}
 			}
 		}
@@ -892,18 +927,15 @@ struct ChatScreen: View {
 		
 		// Optimistic update: immediately update local state on main thread
 		Task { @MainActor in
-			withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-				if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-					var updatedMessage = message
-					var updatedReactions = message.reactions
-					updatedReactions.removeValue(forKey: currentUid)
-					updatedMessage.reactions = updatedReactions
-					
-					// Create a new array to trigger SwiftUI update
-					var updatedMessages = messages
-					updatedMessages[index] = updatedMessage
-					messages = updatedMessages
-				}
+			// Update immediately without animation to show instantly
+			if let existingMessage = viewModel.messages.first(where: { $0.messageId == message.messageId }) {
+				var updatedMessage = existingMessage // Use current state from ViewModel
+				var updatedReactions = updatedMessage.reactions
+				updatedReactions.removeValue(forKey: currentUid)
+				updatedMessage.reactions = updatedReactions
+				
+				// Use ViewModel's update method which triggers @Published
+				viewModel.updateMessage(updatedMessage)
 			}
 		}
 		
@@ -915,11 +947,9 @@ struct ChatScreen: View {
 				print("Error removing reaction: \(error)")
 				// Revert optimistic update on error
 				await MainActor.run {
-					if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-						var updatedMessages = messages
-						updatedMessages[index] = message
-						messages = updatedMessages
-					}
+					// The real-time listener will update it with correct state
+					// Force refresh by triggering view update
+					viewModel.objectWillChange.send()
 				}
 			}
 		}
@@ -1340,13 +1370,13 @@ struct ChatScreen: View {
 			.onAppear {
 				scrollToBottomOnAppear(proxy: proxy)
 			}
-			.onChange(of: messages.count) { oldCount, newCount in
+			.onChange(of: viewModel.messages.count) { oldCount, newCount in
 				handleMessageCountChange(proxy: proxy, oldCount: oldCount, newCount: newCount)
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ScrollToMessage"))) { notification in
 				if let messageId = notification.object as? String {
 					// Find message in the chronological array
-					if let message = messages.first(where: { $0.messageId == messageId }) {
+					if let message = viewModel.messages.first(where: { $0.messageId == messageId }) {
 						withAnimation {
 							proxy.scrollTo(message.id, anchor: .center)
 						}
@@ -1369,7 +1399,7 @@ struct ChatScreen: View {
 	
 	@ViewBuilder
 	private var loadMoreButton: some View {
-		if hasMoreMessages && !messages.isEmpty {
+		if hasMoreMessages && !viewModel.messages.isEmpty {
 			Button(action: {
 				loadOlderMessages()
 			}) {
@@ -1398,7 +1428,7 @@ struct ChatScreen: View {
 	private var messagesList: some View {
 		// Messages are already in chronological order (oldest first)
 		// So we display them directly - oldest at top, newest at bottom
-		ForEach(messages) { message in
+		ForEach(viewModel.messages) { message in
 			messageBubbleView(message: message)
 				.id(message.id)
 				.padding(.vertical, 4)
@@ -1417,7 +1447,7 @@ struct ChatScreen: View {
 		// Find the replied-to message if this message is a reply
 		let repliedToMessage: MessageModel? = {
 			guard let replyToId = message.replyToMessageId else { return nil }
-			return messages.first { $0.messageId == replyToId }
+			return viewModel.messages.first { $0.messageId == replyToId }
 		}()
 		
 		// Get the username for the replied-to message sender
@@ -1438,6 +1468,7 @@ struct ChatScreen: View {
 				: otherUser?.profileImageURL,
 			repliedToMessage: repliedToMessage,
 			repliedToSenderName: repliedToSenderName,
+			otherUserId: otherUserId,
 			onLongPress: {
 				selectedMessage = message
 				withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
@@ -1471,8 +1502,36 @@ struct ChatScreen: View {
 				} else if mediaType == "video" {
 					selectedVideoURL = mediaURL
 				}
+			},
+			onSharedPostTap: { postId in
+				// Navigate to post detail
+				Task {
+					await navigateToPost(postId: postId)
+				}
 			}
 		)
+		.sheet(isPresented: $showPostDetail) {
+			if let post = selectedPost {
+				CYPostDetailView(post: post, collection: nil)
+					.environmentObject(authService)
+			}
+		}
+	}
+	
+	private func navigateToPost(postId: String) async {
+		do {
+			// Load post from Firestore
+			if let post = try await CollectionService.shared.getPostById(postId: postId) {
+				await MainActor.run {
+					selectedPost = post
+					showPostDetail = true
+				}
+			} else {
+				print("Post not found: \(postId)")
+			}
+		} catch {
+			print("Error loading post: \(error)")
+		}
 	}
 	
 	@ViewBuilder

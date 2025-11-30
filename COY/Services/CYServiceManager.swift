@@ -8,7 +8,7 @@ final class CYServiceManager: ObservableObject {
 	static let shared = CYServiceManager()
 	private init() {}
 
-	struct CurrentUser {
+	struct CurrentUser: Equatable {
 		var profileImageURL: String
 		var backgroundImageURL: String
 		var name: String
@@ -35,54 +35,136 @@ final class CYServiceManager: ObservableObject {
 	}
 
 	@Published var currentUser: CurrentUser?
-
+	private var userListener: ListenerRegistration?
+	
 	func loadCurrentUser() async throws {
 		guard let userId = Auth.auth().currentUser?.uid else {
 			throw NSError(domain: "CYServiceManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "No authenticated user"])
 		}
 		
-		// Load from Firebase (source of truth)
-		let db = Firestore.firestore()
-		let doc = try await db.collection("users").document(userId).getDocument()
+		// Remove existing listener if any
+		userListener?.remove()
 		
-		if let data = doc.data() {
-			self.currentUser = CurrentUser(
-				profileImageURL: data["profileImageURL"] as? String ?? "",
-				backgroundImageURL: data["backgroundImageURL"] as? String ?? "",
-				name: data["name"] as? String ?? "",
-				username: data["username"] as? String ?? "",
-				blockedUsers: data["blockedUsers"] as? [String] ?? [],
-				blockedCollectionIds: data["blockedCollectionIds"] as? [String] ?? [],
-				hiddenPostIds: data["hiddenPostIds"] as? [String] ?? [],
-				starredPostIds: data["starredPostIds"] as? [String] ?? [],
-				collectionSortPreference: data["collectionSortPreference"] as? String,
-				customCollectionOrder: data["customCollectionOrder"] as? [String] ?? []
-			)
-			
-			// Using Firebase only
-		} else {
-			// Create default user if not found
-			self.currentUser = CurrentUser(
-				profileImageURL: "",
-				backgroundImageURL: "",
-				name: "",
-				username: "",
-				blockedUsers: [],
-				blockedCollectionIds: [],
-				hiddenPostIds: [],
-				starredPostIds: [],
-				collectionSortPreference: nil,
-				customCollectionOrder: []
-			)
+		// Set up real-time listener for user document
+		let db = Firestore.firestore()
+		userListener = db.collection("users").document(userId).addSnapshotListener { [weak self] snapshot, error in
+			Task { @MainActor in
+				guard let self = self else { return }
+				
+				if let error = error {
+					print("❌ CYServiceManager: Error listening to user updates: \(error.localizedDescription)")
+					return
+				}
+				
+				guard let snapshot = snapshot, let data = snapshot.data() else {
+					// Create default user if not found
+					self.currentUser = CurrentUser(
+						profileImageURL: "",
+						backgroundImageURL: "",
+						name: "",
+						username: "",
+						blockedUsers: [],
+						blockedCollectionIds: [],
+						hiddenPostIds: [],
+						starredPostIds: [],
+						collectionSortPreference: nil,
+						customCollectionOrder: []
+					)
+					return
+				}
+				
+				// Check if profile-relevant fields changed before updating
+				let newProfileImageURL = data["profileImageURL"] as? String ?? ""
+				let newBackgroundImageURL = data["backgroundImageURL"] as? String ?? ""
+				let newName = data["name"] as? String ?? ""
+				let newUsername = data["username"] as? String ?? ""
+				
+				let profileChanged = self.currentUser?.profileImageURL != newProfileImageURL ||
+					self.currentUser?.backgroundImageURL != newBackgroundImageURL ||
+					self.currentUser?.name != newName ||
+					self.currentUser?.username != newUsername
+				
+				// Update currentUser with real-time data
+				self.currentUser = CurrentUser(
+					profileImageURL: newProfileImageURL,
+					backgroundImageURL: newBackgroundImageURL,
+					name: newName,
+					username: newUsername,
+					blockedUsers: data["blockedUsers"] as? [String] ?? [],
+					blockedCollectionIds: data["blockedCollectionIds"] as? [String] ?? [],
+					hiddenPostIds: data["hiddenPostIds"] as? [String] ?? [],
+					starredPostIds: data["starredPostIds"] as? [String] ?? [],
+					collectionSortPreference: data["collectionSortPreference"] as? String,
+					customCollectionOrder: data["customCollectionOrder"] as? [String] ?? []
+				)
+				
+				// Only log if profile-relevant fields changed (reduce spam)
+				if profileChanged {
+					print("🔄 CYServiceManager: User profile data updated in real-time")
+				}
+			}
 		}
 	}
 	
+	func stopListening() {
+		userListener?.remove()
+		userListener = nil
+	}
+	
+	/// Get list of users that the CURRENT USER has blocked
+	/// This is for display purposes (e.g., block list in settings)
+	/// NOTE: This does NOT include users who blocked the current user
+	/// For visibility checks, use areUsersMutuallyBlocked() instead
 	func getBlockedUsers() -> [String] {
 		return currentUser?.blockedUsers ?? []
 	}
 	
+	/// Check if the CURRENT USER has blocked a specific user
+	/// This only checks one direction (current user -> other user)
+	/// For visibility checks, use areUsersMutuallyBlocked() instead
 	func isUserBlocked(userId: String) -> Bool {
 		return currentUser?.blockedUsers.contains(userId) ?? false
+	}
+	
+	/// Check if two users are mutually blocked (either direction blocks the other)
+	/// Returns true if current user blocked the other user OR if the other user blocked current user
+	/// 
+	/// BLOCKING RULE: When User A blocks User B, both users lose visibility of each other.
+	/// However, only User A's block list contains User B. User B's block list stays empty.
+	/// This function checks BOTH directions to enforce mutual visibility loss.
+	/// 
+	/// Use this for:
+	/// - Filtering posts, collections, comments, search results
+	/// - Hiding profiles, preventing navigation
+	/// - Any visibility/access checks
+	/// 
+	/// Do NOT use this for:
+	/// - Displaying block lists (use getBlockedUsers() instead)
+	func areUsersMutuallyBlocked(userId: String) async -> Bool {
+		guard let currentUserId = Auth.auth().currentUser?.uid else {
+			return false
+		}
+		
+		// Check if current user blocked the other user
+		let currentBlockedOther = isUserBlocked(userId: userId)
+		if currentBlockedOther {
+			return true
+		}
+		
+		// Check if the other user blocked current user
+		do {
+			let db = Firestore.firestore()
+			let otherUserDoc = try await db.collection("users").document(userId).getDocument()
+			if let data = otherUserDoc.data(),
+			   let otherUserBlockedUsers = data["blockedUsers"] as? [String],
+			   otherUserBlockedUsers.contains(currentUserId) {
+				return true
+			}
+		} catch {
+			print("Error checking if user blocked current user: \(error.localizedDescription)")
+		}
+		
+		return false
 	}
 	
 	func blockUser(userId: String) async throws {
@@ -106,8 +188,12 @@ final class CYServiceManager: ObservableObject {
 			self.currentUser = user
 		}
 		
-		// Post notification
-		NotificationCenter.default.post(name: Notification.Name("UserBlocked"), object: userId)
+		// Post notification with userInfo
+		NotificationCenter.default.post(
+			name: Notification.Name("UserBlocked"),
+			object: userId,
+			userInfo: ["blockedUserId": userId]
+		)
 	}
 	
 	func unblockUser(userId: String) async throws {
@@ -129,8 +215,12 @@ final class CYServiceManager: ObservableObject {
 			self.currentUser = user
 		}
 		
-		// Post notification
-		NotificationCenter.default.post(name: Notification.Name("UserUnblocked"), object: userId)
+		// Post notification with userInfo
+		NotificationCenter.default.post(
+			name: Notification.Name("UserUnblocked"),
+			object: userId,
+			userInfo: ["unblockedUserId": userId]
+		)
 	}
 	
 	func getStarredPostIds() -> [String] {

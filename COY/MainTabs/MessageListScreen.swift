@@ -29,6 +29,7 @@ struct ChatNavigationInfo: Hashable {
 struct MessageListScreen: View {
 	private let chatService = ChatService.shared
 	private let friendService = FriendService.shared
+	@StateObject private var cyServiceManager = CYServiceManager.shared // Observe ServiceManager for real-time updates
 	@State private var chatRooms: [ChatRoomModel] = []
 	@State private var isLoading = true
 	@State private var searchText = ""
@@ -40,6 +41,7 @@ struct MessageListScreen: View {
 	@State private var hasLoadedDataOnce = false // Track if data has been loaded once
 	@State private var hasSetupListeners = false // Track if listeners have been set up
 	@State private var isLoadingChatRooms = false // Prevent concurrent loadChatRooms calls
+	@State private var isLoadingFriends = false // Prevent concurrent loadFriendsListAsync calls
 	@State private var friendsSet: Set<String> = [] // Cache of friends list for filtering
 	@State private var blockedUsersSet: Set<String> = [] // Cache of blocked users for filtering
 	@State private var blockedByUsersSet: Set<String> = [] // Cache of users who blocked me
@@ -242,42 +244,38 @@ struct MessageListScreen: View {
 			ChatScreenWrapper(chatId: chatInfo.chatId, otherUserId: chatInfo.otherUserId, isChatScreenVisible: .constant(false))
 		}
 		.onAppear {
-				print("📱 MessageListScreen: onAppear called")
-				
-				// Load friends list first (needed for filtering and creating chat rooms)
+				// Start ServiceManager listener for real-time user updates
 				Task {
+					try? await CYServiceManager.shared.loadCurrentUser()
+				}
+				
 				// Only load on first appear - preserve state when switching tabs
 				// Real-time listeners will keep data fresh
 				if !hasLoadedDataOnce {
-						print("📱 MessageListScreen: First load - loading friends and chat rooms")
-						
 						// Load friends first to ensure friendsSet is populated
-						await loadFriendsListAsync()
-						
-						// Load chat rooms after friends are loaded
-						// This ensures we can check which friends are missing chat rooms
-						await MainActor.run {
-					loadChatRooms()
-					hasLoadedDataOnce = true
-				}
-					} else {
-						print("📱 MessageListScreen: Already loaded - just refreshing friends list")
-						await loadFriendsListAsync()
+						Task {
+							await loadFriendsListAsync()
+							
+							// Load chat rooms after friends are loaded
+							// This ensures we can check which friends are missing chat rooms
+							await MainActor.run {
+								loadChatRooms()
+								hasLoadedDataOnce = true
+							}
+						}
 					}
-				}
 				
 				// Only set up listeners once to prevent infinite loops
 				if !hasSetupListeners {
-				setupOutgoingRequestListener()
-				setupChatRoomsListener()
-				setupFriendRequestListener()
+					setupOutgoingRequestListener()
+					setupChatRoomsListener()
+					setupFriendRequestListener()
 					setupUserDocumentListener()
 					hasSetupListeners = true
 				}
 			}
 			.refreshable {
 				// Force refresh when user pulls to refresh (like Instagram)
-				print("📱 MessageListScreen: Pull to refresh triggered")
 				Task {
 					await loadFriendsListAsync()
 					await MainActor.run {
@@ -381,6 +379,25 @@ struct MessageListScreen: View {
 				loadFriendsList() // This also reloads blocked users
 				loadChatRooms()
 			}
+			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { notification in
+				// Immediately reload chat rooms when profile is updated to show new username/name/images
+				print("🔄 MessageListScreen: Profile updated, reloading chat rooms to show new user info")
+				loadChatRooms()
+			}
+			.onChange(of: cyServiceManager.currentUser) { oldValue, newValue in
+				// Real-time update when current user's profile changes via ServiceManager
+				// Only reload if profile-relevant fields actually changed (prevent infinite loops)
+				guard let newValue = newValue else { return }
+				
+				let profileChanged = oldValue?.profileImageURL != newValue.profileImageURL ||
+				oldValue?.backgroundImageURL != newValue.backgroundImageURL ||
+				oldValue?.name != newValue.name ||
+				oldValue?.username != newValue.username
+				
+				if profileChanged {
+					loadChatRooms()
+				}
+			}
 		}
 	}
 	
@@ -391,35 +408,41 @@ struct MessageListScreen: View {
 	}
 	
 	private func loadFriendsListAsync() async {
+		// Prevent concurrent calls
+		guard !isLoadingFriends else { return }
+		
 		guard let currentUid = Auth.auth().currentUser?.uid else {
-			print("❌ MessageListScreen: No current user ID")
 			return
 		}
 		
-		print("📱 MessageListScreen: Loading friends list for user \(currentUid)")
+		await MainActor.run {
+			isLoadingFriends = true
+		}
 		
-			do {
-				let db = Firestore.firestore()
-				let userDoc = try await db.collection("users").document(currentUid).getDocument()
-			
+		defer {
+			Task { @MainActor in
+				isLoadingFriends = false
+			}
+		}
+		
+		do {
+			let db = Firestore.firestore()
+			let userDoc = try await db.collection("users").document(currentUid).getDocument()
+		
 			guard userDoc.exists else {
-				print("❌ MessageListScreen: User document doesn't exist")
 				return
 			}
-			
-				let friends = (userDoc.data()?["friends"] as? [String]) ?? []
-			print("✅ MessageListScreen: Found \(friends.count) friends in user document: \(friends)")
+		
+			let friends = (userDoc.data()?["friends"] as? [String]) ?? []
 			
 			// Load blocked users
 			let blockedUsers = (userDoc.data()?["blockedUsers"] as? [String]) ?? []
 			let blockedByUsers = (userDoc.data()?["blockedByUsers"] as? [String]) ?? []
 			
-				await MainActor.run {
-					self.friendsSet = Set(friends)
+			await MainActor.run {
+				self.friendsSet = Set(friends)
 				self.blockedUsersSet = Set(blockedUsers)
 				self.blockedByUsersSet = Set(blockedByUsers)
-				print("✅ MessageListScreen: Loaded \(friends.count) friends into friendsSet: \(Array(self.friendsSet))")
-				print("✅ MessageListScreen: Loaded \(blockedUsers.count) blocked users and \(blockedByUsers.count) users who blocked me")
 			}
 			
 			// Only ensure chat rooms for friends if we're on first load
@@ -428,11 +451,11 @@ struct MessageListScreen: View {
 				// Ensure chat rooms exist for all friends
 				// This ensures friends appear in message list even if they don't have messages yet
 				await ensureChatRoomsForFriends(friendIds: friends)
-				}
-			} catch {
-			print("❌ MessageListScreen: Error loading friends list: \(error)")
 			}
+		} catch {
+			print("❌ MessageListScreen: Error loading friends list: \(error)")
 		}
+	}
 	
 	private func ensureChatRoomsForFriends(friendIds: [String]) async {
 		guard let currentUid = Auth.auth().currentUser?.uid else { return }
@@ -618,7 +641,7 @@ struct MessageListScreen: View {
 		// Listen for all outgoing friend requests to detect when they get accepted
 		outgoingRequestListener = db.collection("friend_requests")
 			.whereField("fromUid", isEqualTo: currentUid)
-			.addSnapshotListener { [self] snapshot, error in
+			.addSnapshotListener { snapshot, error in
 				guard error == nil, let snapshot = snapshot else {
 					print("Error listening to outgoing requests: \(error?.localizedDescription ?? "unknown")")
 					return
@@ -631,7 +654,7 @@ struct MessageListScreen: View {
 						if let status = data["status"] as? String,
 						   status == "accepted" {
 							// A friend request was accepted, refresh chat rooms
-							loadChatRooms()
+							self.loadChatRooms()
 							break
 						}
 					}
@@ -731,7 +754,7 @@ struct MessageListScreen: View {
 			.whereField("participants", arrayContains: currentUid)
 			.order(by: "lastMessageTs", descending: true)
 			.limit(to: 50)
-			.addSnapshotListener { [self] snapshot, error in
+			.addSnapshotListener { snapshot, error in
 				if let error = error {
 					print("❌ MessageListScreen: Chat rooms listener error: \(error.localizedDescription)")
 					
@@ -739,7 +762,7 @@ struct MessageListScreen: View {
 					// This will still work but won't be sorted by lastMessageTs
 					if error.localizedDescription.contains("index") {
 						print("⚠️ MessageListScreen: Index missing, using fallback query (unsorted)")
-						setupChatRoomsListenerFallback()
+						self.setupChatRoomsListenerFallback()
 						return
 					}
 					return
@@ -828,7 +851,7 @@ struct MessageListScreen: View {
 		// We'll sort client-side instead
 		chatRoomsListener = db.collection("chat_rooms")
 			.whereField("participants", arrayContains: currentUid)
-			.addSnapshotListener { [self] snapshot, error in
+			.addSnapshotListener { snapshot, error in
 				if let error = error {
 					print("❌ MessageListScreen: Fallback chat rooms listener error: \(error.localizedDescription)")
 					return
@@ -911,6 +934,8 @@ struct ChatRowViewModern: View {
 	let chat: ChatRoomModel
 	let onTap: () -> Void
 	@State private var otherUser: UserService.AppUser?
+	@StateObject private var cyServiceManager = CYServiceManager.shared // Observe ServiceManager for real-time updates
+	@State private var otherUserListener: ListenerRegistration? // Real-time listener for other user's profile
 	@Environment(\.colorScheme) var colorScheme
 	
 	// Consistent sizing system (scaled for iPad)
@@ -1009,6 +1034,48 @@ struct ChatRowViewModern: View {
 		.listRowBackground(Color.clear)
 		.onAppear {
 			loadOtherUser()
+			setupOtherUserListener() // Set up real-time listener for other user's profile
+		}
+		.onChange(of: cyServiceManager.currentUser) { oldValue, newValue in
+			// Real-time update when user profile changes via ServiceManager
+			// Reload other user info to show updated username/profile image
+			loadOtherUser()
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { notification in
+			// Reload other user info when profile is updated
+			if let userId = notification.userInfo?["userId"] as? String,
+			   userId == otherUid {
+				loadOtherUser()
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("ChatRowOtherUserProfileUpdated"))) { notification in
+			// Update other user info when real-time listener detects changes
+			if let chatId = notification.object as? String,
+			   chatId == chat.id,
+			   let otherUserId = notification.userInfo?["otherUserId"] as? String,
+			   otherUserId == otherUid {
+				if var updatedUser = otherUser {
+					if let newProfileImageURL = notification.userInfo?["profileImageURL"] as? String {
+						updatedUser.profileImageURL = newProfileImageURL
+					}
+					if let newName = notification.userInfo?["name"] as? String {
+						updatedUser.name = newName
+					}
+					if let newUsername = notification.userInfo?["username"] as? String {
+						updatedUser.username = newUsername
+					}
+					otherUser = updatedUser
+					print("✅ ChatRowViewModern: Updated other user profile from real-time listener")
+				} else {
+					// If user not loaded yet, load it
+					loadOtherUser()
+				}
+			}
+		}
+		.onDisappear {
+			// Clean up listener when view disappears
+			otherUserListener?.remove()
+			otherUserListener = nil
 		}
 	}
 	
@@ -1029,6 +1096,42 @@ struct ChatRowViewModern: View {
 			.clipShape(Capsule())
 			.frame(minWidth: 20, minHeight: 20)
 			.shadow(color: Color.blue.opacity(0.3), radius: 4, x: 0, y: 2)
+	}
+	
+	// MARK: - Real-time Listener for Other User's Profile
+	private func setupOtherUserListener() {
+		// Remove existing listener if any
+		otherUserListener?.remove()
+		
+		// Set up real-time Firestore listener for the other user's profile
+		// This allows seeing real-time updates when the other user edits their profile
+		let db = Firestore.firestore()
+		let chatId = chat.id
+		let otherUserId = otherUid
+		otherUserListener = db.collection("users").document(otherUserId).addSnapshotListener { snapshot, error in
+			Task { @MainActor in
+				if let error = error {
+					print("❌ ChatRowViewModern: Error listening to other user profile updates: \(error.localizedDescription)")
+					return
+				}
+				
+				guard let snapshot = snapshot, let data = snapshot.data() else {
+					return
+				}
+				
+				// Immediately update other user info from Firestore (real-time)
+				// Use NotificationCenter to update the view since we can't capture self in struct
+				let newProfileImageURL = data["profileImageURL"] as? String
+				let newName = data["name"] as? String ?? ""
+				let newUsername = data["username"] as? String ?? ""
+				NotificationCenter.default.post(
+					name: Notification.Name("ChatRowOtherUserProfileUpdated"),
+					object: chatId,
+					userInfo: ["otherUserId": otherUserId, "profileImageURL": newProfileImageURL as Any, "name": newName, "username": newUsername]
+				)
+				print("🔄 ChatRowViewModern: Other user profile updated in real-time from Firestore")
+			}
+		}
 	}
 	
 	// MARK: - Helper Methods

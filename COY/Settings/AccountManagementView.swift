@@ -162,53 +162,27 @@ struct AccountManagementView: View {
 			try? await CYServiceManager.shared.loadCurrentUser()
 			
 			await MainActor.run {
-				if let username = cyServiceManager.currentUser?.username, !username.isEmpty {
-					// Ensure clean URL with no extra spaces or characters
-					let cleanUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
-					// Only allow alphanumeric, underscore, and hyphen for username in URL
-					let allowedChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
-					let sanitizedUsername = cleanUsername.components(separatedBy: allowedChars.inverted).joined()
-					profileURL = "https://coy.services/\(sanitizedUsername)"
+				// CRITICAL: Always use user ID in shareable links (never breaks when username changes)
+				// Format: https://coy.services/profile/userId
+				if let userId = Auth.auth().currentUser?.uid {
+					profileURL = "https://coy.services/profile/\(userId)"
 				} else {
-					// Fallback to userId if username not available
-					if let userId = Auth.auth().currentUser?.uid {
-						profileURL = "https://coy.services/profile/\(userId)"
-					}
+					profileURL = "Loading..."
 				}
 			}
 		}
 	}
 	
 	private func copyProfileURL() {
-		// Get clean URL - reconstruct it to ensure it's valid
-		var cleanURL: String
-		
-		if let username = cyServiceManager.currentUser?.username, !username.isEmpty {
-			let cleanUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
-			// Only allow alphanumeric, underscore, and hyphen
-			let allowedChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
-			let sanitizedUsername = cleanUsername.components(separatedBy: allowedChars.inverted).joined()
-			cleanURL = "https://coy.services/\(sanitizedUsername)"
-		} else if let userId = Auth.auth().currentUser?.uid {
-			cleanURL = "https://coy.services/profile/\(userId)"
-		} else {
-			// Fallback to stored URL, but clean it
-			cleanURL = profileURL.trimmingCharacters(in: .whitespacesAndNewlines)
-			// Remove any null bytes or invalid characters
-			cleanURL = cleanURL.replacingOccurrences(of: "\0", with: "")
-			// Extract only the valid URL part (stop at first invalid character)
-			if let urlRange = cleanURL.range(of: "https://coy.services/") {
-				let startIndex = urlRange.upperBound
-				let pathPart = String(cleanURL[startIndex...])
-				// Only keep valid path characters
-				let validPath = pathPart.prefix { char in
-					char.isLetter || char.isNumber || char == "_" || char == "-"
-				}
-				cleanURL = "https://coy.services/\(validPath)"
-			}
+		// CRITICAL: Always use user ID in shareable links (never breaks when username changes)
+		guard let userId = Auth.auth().currentUser?.uid else {
+			print("❌ No user ID available for profile URL")
+			return
 		}
 		
-		// Validate URL one more time
+		let cleanURL = "https://coy.services/profile/\(userId)"
+		
+		// Validate URL
 		guard URL(string: cleanURL) != nil else {
 			print("❌ Invalid URL generated: \(cleanURL)")
 			return
@@ -221,17 +195,13 @@ struct AccountManagementView: View {
 		UIPasteboard.general.string = cleanURL
 		
 		showCopiedAlert = true
-		print("📋 Copied clean profile URL to clipboard: \(cleanURL)")
+		print("📋 Copied profile URL (user ID-based) to clipboard: \(cleanURL)")
 	}
 	
 	private var shareURL: URL? {
-		// Reconstruct clean URL for sharing
-		if let username = cyServiceManager.currentUser?.username, !username.isEmpty {
-			let cleanUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
-			let allowedChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
-			let sanitizedUsername = cleanUsername.components(separatedBy: allowedChars.inverted).joined()
-			return URL(string: "https://coy.services/\(sanitizedUsername)")
-		} else if let userId = Auth.auth().currentUser?.uid {
+		// CRITICAL: Always use user ID in shareable links (never breaks when username changes)
+		// Format: https://coy.services/profile/userId
+		if let userId = Auth.auth().currentUser?.uid {
 			return URL(string: "https://coy.services/profile/\(userId)")
 		}
 		return nil
@@ -307,12 +277,39 @@ struct AccountManagementView: View {
 				isDeleting = false
 				password = ""
 				
+				// Check for incorrect password errors - show simple, user-friendly message
+				let errorDescription = error.localizedDescription.lowercased()
+				let errorString = String(describing: error).lowercased()
+				
+				// Check if this is a password/authentication error
+				// Firebase Auth errors for wrong password include:
+				// - "malformed or has expired" (credential error)
+				// - "invalid credential"
+				// - "wrong password"
+				// - "incorrect password"
+				// - Error codes: 17009, 17026
+				let isPasswordError = errorDescription.contains("password") ||
+									  errorDescription.contains("credential") ||
+									  errorDescription.contains("malformed") ||
+									  errorDescription.contains("expired") ||
+									  errorDescription.contains("invalid") ||
+									  errorString.contains("password") ||
+									  errorString.contains("credential") ||
+									  errorString.contains("malformed") ||
+									  errorString.contains("expired") ||
+									  errorString.contains("invalid")
+				
+				// Also check Firebase Auth error codes
 				if let authError = error as NSError? {
-					if authError.code == 17026 || authError.localizedDescription.contains("password") {
-						deleteError = "Password incorrect"
+					let errorCode = authError.code
+					// Firebase Auth error codes for authentication failures
+					if errorCode == 17009 || errorCode == 17026 || errorCode == 17010 || isPasswordError {
+						deleteError = "Incorrect password. Please try again."
 					} else {
 						deleteError = "Failed to delete account: \(authError.localizedDescription)"
 					}
+				} else if isPasswordError {
+					deleteError = "Incorrect password. Please try again."
 				} else {
 					deleteError = "Failed to delete account: \(error.localizedDescription)"
 				}

@@ -102,12 +102,14 @@ final class UserService: ObservableObject {
 		
 			// If not found, try case-insensitive search by getting all users and filtering
 			// (This handles legacy users who might have mixed-case usernames)
+			// CRITICAL FIX: Reduce limit for better performance
 			if snapshot.documents.isEmpty {
 				print("⚠️ Username not found with exact match, trying case-insensitive search...")
-				// Get a larger batch and filter client-side (less efficient but handles edge cases)
+				// Get a smaller batch and filter client-side (less efficient but handles edge cases)
+				// NOTE: This is a fallback - ideally all usernames should be stored lowercase
 				let allUsersSnapshot = try await withTimeout(seconds: 8) {
 					try await db.collection("users")
-						.limit(to: 1000) // Reasonable limit
+						.limit(to: 100) // Reduced from 1000 to 100 for better performance
 						.getDocuments()
 				}
 			
@@ -116,9 +118,17 @@ final class UserService: ObservableObject {
 				let data = doc.data()
 				if let storedUsername = data["username"] as? String,
 				   storedUsername.lowercased() == normalizedUsername {
+					let foundUserId = doc.documentID
 					print("✅ Found user with case-insensitive match")
+					
+					// Check if user is blocked (mutual blocking)
+					if await CYServiceManager.shared.areUsersMutuallyBlocked(userId: foundUserId) {
+						print("🚫 User \(foundUserId) is blocked, returning nil")
+						return nil
+					}
+					
 					return AppUser(
-						userId: doc.documentID,
+						userId: foundUserId,
 						name: data["name"] as? String ?? "",
 						username: storedUsername,
 						profileImageURL: data["profileImageURL"] as? String,
@@ -141,9 +151,17 @@ final class UserService: ObservableObject {
 			}
 			
 			let data = doc.data()
-			print("✅ Found user: \(doc.documentID), email: \(data["email"] as? String ?? "none")")
+			let foundUserId = doc.documentID
+			print("✅ Found user: \(foundUserId), email: \(data["email"] as? String ?? "none")")
+			
+			// Check if user is blocked (mutual blocking)
+			if await CYServiceManager.shared.areUsersMutuallyBlocked(userId: foundUserId) {
+				print("🚫 User \(foundUserId) is blocked, returning nil")
+				return nil
+			}
+			
 			return AppUser(
-				userId: doc.documentID,
+				userId: foundUserId,
 				name: data["name"] as? String ?? "",
 				username: data["username"] as? String ?? "",
 				profileImageURL: data["profileImageURL"] as? String,
@@ -163,6 +181,14 @@ final class UserService: ObservableObject {
 	}
 
 	func getUser(userId: String) async throws -> AppUser? {
+		// Check if user is blocked (mutual blocking) before returning cached or fetching
+		if await CYServiceManager.shared.areUsersMutuallyBlocked(userId: userId) {
+			print("🚫 User \(userId) is blocked, returning nil")
+			// Remove from cache if blocked
+			cache[userId] = nil
+			return nil
+		}
+		
 		if let cached = cache[userId] { return cached }
 		
 		// Firebase is source of truth - load from Firebase first
@@ -170,6 +196,12 @@ final class UserService: ObservableObject {
 		let doc = try await db.collection("users").document(userId).getDocument()
 		
 		guard let data = doc.data() else { return nil }
+		
+		// Double-check blocking after fetching (in case blocking happened between check and fetch)
+		if await CYServiceManager.shared.areUsersMutuallyBlocked(userId: userId) {
+			print("🚫 User \(userId) is blocked after fetch, returning nil")
+			return nil
+		}
 		
 		let user = AppUser(
 			userId: userId,
@@ -190,9 +222,13 @@ final class UserService: ObservableObject {
 	
 	func getAllUsers() async throws -> [User] {
 		let db = Firestore.firestore()
-		let snapshot = try await db.collection("users").getDocuments()
+		// CRITICAL FIX: Add limit to prevent loading all users (could be millions)
+		// This should only be used for admin/search purposes with proper limits
+		let snapshot = try await db.collection("users")
+			.limit(to: 1000) // Maximum 1000 users (should use search/pagination instead)
+			.getDocuments()
 		
-		return snapshot.documents.compactMap { doc in
+		let users = snapshot.documents.compactMap { doc -> AppUser? in
 			let data = doc.data()
 			return AppUser(
 				userId: doc.documentID,
@@ -205,6 +241,67 @@ final class UserService: ObservableObject {
 				birthYear: data["birthYear"] as? String ?? "",
 				email: data["email"] as? String ?? ""
 			)
+		}
+		
+		// Filter out blocked users (mutual blocking)
+		return await filterUsersFromBlocked(users)
+	}
+	
+	/// Filter out users who are blocked or have blocked current user (mutual blocking)
+	@MainActor
+	func filterUsersFromBlocked(_ users: [User]) async -> [User] {
+		guard let currentUserId = Auth.auth().currentUser?.uid else {
+			return users
+		}
+		
+		do {
+			try await CYServiceManager.shared.loadCurrentUser()
+			let blockedUserIds = Set(CYServiceManager.shared.getBlockedUsers())
+			
+			// Get unique user IDs to check
+			let userIds = Set(users.map { $0.userId })
+			
+			// Batch fetch user data to check if they've blocked current user
+			var usersWhoBlockedCurrentUser: Set<String> = []
+			await withTaskGroup(of: (String, Bool).self) { group in
+				for userId in userIds {
+					group.addTask {
+						do {
+							let db = Firestore.firestore()
+							let userDoc = try await db.collection("users").document(userId).getDocument()
+							if let data = userDoc.data(),
+							   let userBlockedUsers = data["blockedUsers"] as? [String],
+							   userBlockedUsers.contains(currentUserId) {
+								return (userId, true)
+							}
+						} catch {
+							print("Error checking if user blocked current user: \(error.localizedDescription)")
+						}
+						return (userId, false)
+					}
+				}
+				
+				for await (userId, isBlocked) in group {
+					if isBlocked {
+						usersWhoBlockedCurrentUser.insert(userId)
+					}
+				}
+			}
+			
+			return users.filter { user in
+				// Exclude if current user has blocked this user
+				if blockedUserIds.contains(user.userId) {
+					return false
+				}
+				// Exclude if this user has blocked current user (mutual blocking)
+				if usersWhoBlockedCurrentUser.contains(user.userId) {
+					return false
+				}
+				return true
+			}
+		} catch {
+			print("Error filtering users from blocked: \(error.localizedDescription)")
+			return users
 		}
 	}
 	
@@ -309,6 +406,23 @@ final class UserService: ObservableObject {
 		let db = Firestore.firestore()
 		// Ensure username is always stored in lowercase for consistent lookup
 		let lowercaseUsername = username.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+		
+		// CRITICAL FIX: Final username availability check right before save to minimize race condition window
+		// This is the last check before we write to Firestore
+		let isUsernameAvailable = try await isUsernameAvailable(lowercaseUsername)
+		if !isUsernameAvailable {
+			// Check if it's the current user updating their profile with the same username
+			if let existingUser = try? await getUser(userId: userId),
+			   existingUser.username.lowercased() == lowercaseUsername {
+				// User already has this username, it's fine to keep it
+				print("ℹ️ User already has this username, proceeding with update")
+			} else {
+				// Username is taken by another user
+				throw UserError.usernameTaken
+			}
+		}
+		
+		// Now upload images and save data (username availability verified)
 		var userData: [String: Any] = [
 			"name": name,
 			"username": lowercaseUsername,
@@ -337,8 +451,13 @@ final class UserService: ObservableObject {
 			userData["backgroundImageURL"] = ""
 		}
 		
-		// Save to Firestore
+		// Save to Firestore with retry logic
+		try await FirebaseRetryManager.shared.executeWithRetry(
+			operation: {
 		try await db.collection("users").document(userId).setData(userData, merge: true)
+			},
+			operationName: "Save user profile"
+		)
 		print("✅ User profile saved to Firestore for user: \(userId)")
 		
 		// Clear cache to force fresh load

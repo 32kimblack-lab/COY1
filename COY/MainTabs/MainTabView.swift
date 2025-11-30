@@ -1,10 +1,10 @@
 import SwiftUI
+import UIKit
 
 struct MainTabView: View {
 
 	@EnvironmentObject var authService: AuthService
 	@State private var selectedTab = 0
-	@State private var showCreateCollection = false
 	@StateObject private var deepLinkManager = DeepLinkManager.shared
 	@State private var selectedProfileUserId: String?
 	@State private var totalUnreadCount = 0
@@ -12,6 +12,14 @@ struct MainTabView: View {
 	
 	private var badgeCount: Int? {
 		totalUnreadCount > 0 ? totalUnreadCount : nil
+	}
+	
+	init() {
+		// Ensure tab bar uses default iOS appearance
+		let appearance = UITabBarAppearance()
+		appearance.configureWithDefaultBackground()
+		UITabBar.appearance().standardAppearance = appearance
+		UITabBar.appearance().scrollEdgeAppearance = appearance
 	}
 
 	var body: some View {
@@ -37,13 +45,17 @@ struct MainTabView: View {
 				}
 				.tag(1)
 
-			// Create (plus)
-			Color.clear
-				.tabItem {
-					Image(systemName: "plus.circle.fill")
-					Text("Create")
-				}
-				.tag(2)
+			// Create (plus) - Full screen navigation view
+			NavigationStack {
+				CYBuildCollectionDesign()
+					.environmentObject(authService)
+			}
+			.phoneSizeContainer()
+			.tabItem {
+				Image(systemName: selectedTab == 2 ? "plus.circle.fill" : "plus.circle")
+				Text("Create")
+			}
+			.tag(2)
 
 			// Messages
 			MessagesView()
@@ -67,19 +79,7 @@ struct MainTabView: View {
 				.tag(4)
 		}
 		.accentColor(.blue)
-		.onChange(of: selectedTab) { oldValue, newValue in
-			// When plus button tab is selected, show create sheet and reset tab
-			if newValue == 2 {
-				showCreateCollection = true
-				DispatchQueue.main.async { selectedTab = oldValue }
-			}
-		}
-		.sheet(isPresented: $showCreateCollection) {
-			CYBuildCollectionDesign()
-				.onDisappear {
-					if selectedTab == 2 { selectedTab = 0 }
-				}
-		}
+		.toolbarBackground(.automatic, for: .tabBar)
 		.navigationDestination(isPresented: Binding(
 			get: { selectedProfileUserId != nil },
 			set: { if !$0 { selectedProfileUserId = nil; deepLinkManager.clearPendingNavigation() } }
@@ -91,17 +91,23 @@ struct MainTabView: View {
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToUserProfile"))) { notification in
 			if let userId = notification.object as? String {
+				#if DEBUG
 				print("🔗 MainTabView: Received NavigateToUserProfile notification for userId: \(userId)")
+				#endif
 				selectedProfileUserId = userId
 			} else if let userInfo = notification.userInfo,
 					  let userId = userInfo["userId"] as? String {
+				#if DEBUG
 				print("🔗 MainTabView: Received NavigateToUserProfile notification for userId: \(userId)")
+				#endif
 				selectedProfileUserId = userId
 			}
 		}
 		.onChange(of: deepLinkManager.shouldNavigateToProfile) { oldValue, newValue in
 			if newValue, let userId = deepLinkManager.pendingProfileUserId {
+				#if DEBUG
 				print("🔗 MainTabView: DeepLinkManager triggered navigation to userId: \(userId)")
+				#endif
 				selectedProfileUserId = userId
 			}
 		}
@@ -115,6 +121,13 @@ struct MainTabView: View {
 			if let userInfo = notification.userInfo,
 			   let count = userInfo["count"] as? Int {
 				friendRequestCount = count
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("SwitchToTab"))) { notification in
+			// Handle back button from Create tab - switch to Home tab
+			if let userInfo = notification.userInfo,
+			   let tabIndex = userInfo["tabIndex"] as? Int {
+				selectedTab = tabIndex
 			}
 		}
 	}

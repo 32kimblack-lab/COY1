@@ -104,26 +104,69 @@ class AuthViewModel: ObservableObject {
 					self.errorMessage = ""
 				}
 			} else {
-				// It's a username, find the associated email first using Firebase Function
+				// It's a username, find the associated email first using Firestore
 				// Usernames are case-insensitive, so use lowercase and trim
 				let normalizedUsername = trimmedInput.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
 				print("🔐 Attempting login with username: '\(normalizedUsername)'")
 				
-				// Use Firebase Function to look up user email by username
+				// Use Firestore to look up user email by username
 				do {
-					print("🔍 Looking up user by username via Firebase Function: '\(normalizedUsername)'")
+					print("🔍 Looking up user by username via Firestore: '\(normalizedUsername)'")
 					
-					let functions = Functions.functions()
-					let getUserEmailFunction = functions.httpsCallable("getUserEmailByUsername")
+					// Query Firestore for user with matching username
+					let snapshot = try await db.collection("users")
+						.whereField("username", isEqualTo: normalizedUsername)
+						.limit(to: 1)
+						.getDocuments()
 					
-					let result = try await getUserEmailFunction.call([
-						"username": normalizedUsername
-					] as [String: Any])
+					guard let userDoc = snapshot.documents.first else {
+						print("❌ Username not found in Firestore: '\(normalizedUsername)'")
+						
+						// Try case-insensitive fallback search
+						print("🔍 Trying case-insensitive fallback search...")
+						let allUsersSnapshot = try await db.collection("users")
+							.limit(to: 100)
+							.getDocuments()
+						
+						var foundEmail: String? = nil
+						for doc in allUsersSnapshot.documents {
+							let data = doc.data()
+							if let storedUsername = data["username"] as? String,
+							   storedUsername.lowercased() == normalizedUsername,
+							   let userEmail = data["email"] as? String,
+							   !userEmail.isEmpty {
+								foundEmail = userEmail
+								break
+							}
+						}
+						
+						guard let email = foundEmail else {
+							print("❌ Username not found (case-insensitive search also failed): '\(normalizedUsername)'")
+							let errorMsg = "Incorrect username/email or password"
+							await MainActor.run {
+								self.errorMessage = errorMsg
+							}
+							throw AuthError.invalidCredentials(errorMsg)
+						}
+						
+						print("✅ Found user with username '\(normalizedUsername)' (case-insensitive): email = '\(email)'")
+						
+						// Sign in with the email associated with this username
+						print("🔐 Signing in with email: '\(email)'")
+						try await Auth.auth().signIn(withEmail: email, password: password)
+						print("✅ Login successful with username")
+						// Clear error message on success
+						await MainActor.run {
+							self.errorMessage = ""
+						}
+						return
+					}
 					
-					guard let data = result.data as? [String: Any],
-						  let email = data["email"] as? String,
+					// Get user data and email
+					let userData = userDoc.data()
+					guard let email = userData["email"] as? String,
 						  !email.isEmpty else {
-						print("❌ Username not found: '\(normalizedUsername)'")
+						print("❌ User found but email is missing: '\(normalizedUsername)'")
 						let errorMsg = "Incorrect username/email or password"
 						await MainActor.run {
 							self.errorMessage = errorMsg
@@ -142,44 +185,21 @@ class AuthViewModel: ObservableObject {
 						self.errorMessage = ""
 					}
 				} catch let lookupError {
-					// Handle Firebase Function errors
+					// Check if it's a Firebase Auth error (wrong password, etc.)
 					if let nsError = lookupError as NSError? {
-						// Check if it's a function error
-						if nsError.domain == "FIRFunctionsErrorDomain" {
-							print("❌ Firebase Function error: \(nsError.localizedDescription)")
-							let errorMsg = "Incorrect username/email or password"
-							await MainActor.run {
-								self.errorMessage = errorMsg
-							}
-							throw AuthError.invalidCredentials(errorMsg)
-						}
-						
-						// Check if it's a Firebase Auth error (wrong password, etc.)
 						if nsError.domain == "FIRAuthErrorDomain" {
 							// Let the outer catch handle Firebase Auth errors
 							throw lookupError
 						}
-						
-						// Network or other errors
-						print("❌ Error during username lookup: \(lookupError.localizedDescription)")
-						let errorMsg = "Incorrect username/email or password"
-						await MainActor.run {
-							self.errorMessage = errorMsg
-						}
-						throw AuthError.invalidCredentials(errorMsg)
-					} else if let authError = lookupError as? AuthError {
-						// Re-throw AuthError as-is (errorMessage already set)
-						print("❌ AuthError during username lookup: \(authError.localizedDescription)")
-						throw authError
-					} else {
-						// Re-throw other errors
-						print("❌ Error during username lookup: \(lookupError.localizedDescription)")
-						let errorMsg = "Incorrect username/email or password"
-						await MainActor.run {
-							self.errorMessage = errorMsg
-						}
-						throw AuthError.invalidCredentials(errorMsg)
 					}
+						
+					// Network or other errors during lookup
+						print("❌ Error during username lookup: \(lookupError.localizedDescription)")
+						let errorMsg = "Incorrect username/email or password"
+						await MainActor.run {
+							self.errorMessage = errorMsg
+						}
+						throw AuthError.invalidCredentials(errorMsg)
 				}
 			}
 		} catch let authError {

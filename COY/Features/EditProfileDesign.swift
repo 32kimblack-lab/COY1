@@ -550,12 +550,20 @@ struct EditProfileDesign: View {
 				immediateUpdateData["backgroundImageURL"] = backgroundImageURL
 			}
 			
+			// Update all posts by this user with new username/name
+			// This ensures posts show the updated username/name everywhere
+			await updateAllUserPosts(
+				userId: user.uid,
+				newUsername: verifiedUser.username,
+				newName: verifiedUser.name
+			)
+			
 			// Post notification with verified data
 			await MainActor.run {
 				NotificationCenter.default.post(
 					name: NSNotification.Name("ProfileUpdated"),
-					object: nil,
-					userInfo: ["updatedData": immediateUpdateData]
+					object: user.uid, // Pass user ID so listeners know which user was updated
+					userInfo: ["updatedData": immediateUpdateData, "userId": user.uid]
 				)
 				print("📢 Posted profile update notification with verified URLs from Firebase")
 				print("   - Name: \(immediateUpdateData["name"] as? String ?? "nil")")
@@ -584,6 +592,68 @@ struct EditProfileDesign: View {
 			}
 			return
 		}
+	}
+	
+	// MARK: - Update All User Posts
+	private func updateAllUserPosts(userId: String, newUsername: String, newName: String) async {
+		print("🔄 EditProfileDesign: Updating all posts by user \(userId) with new username: \(newUsername), name: \(newName)")
+		
+		let db = Firestore.firestore()
+		var batchCount = 0
+		var lastDocument: DocumentSnapshot?
+		var hasMore = true
+		
+		while hasMore {
+			var query = db.collection("posts")
+				.whereField("authorId", isEqualTo: userId)
+				.limit(to: 500)
+			
+			if let lastDoc = lastDocument {
+				query = query.start(afterDocument: lastDoc)
+			}
+			
+			do {
+				let snapshot = try await query.getDocuments()
+				
+				if snapshot.documents.isEmpty {
+					hasMore = false
+					break
+				}
+				
+				var batch = db.batch()
+				var updateCount = 0
+				
+				for doc in snapshot.documents {
+					batch.updateData([
+						"authorName": newUsername.isEmpty ? newName : newUsername
+					], forDocument: doc.reference)
+					updateCount += 1
+					batchCount += 1
+					
+					// Firestore batch limit is 500
+					if updateCount >= 500 {
+						try await batch.commit()
+						batch = db.batch() // Create new batch for next batch
+						updateCount = 0
+					}
+				}
+				
+				// Commit remaining updates
+				if updateCount > 0 {
+					try await batch.commit()
+				}
+				
+				// Check if there are more posts
+				hasMore = snapshot.documents.count >= 500
+				lastDocument = snapshot.documents.last
+				
+			} catch {
+				print("❌ EditProfileDesign: Error updating posts: \(error.localizedDescription)")
+				hasMore = false
+			}
+		}
+		
+		print("✅ EditProfileDesign: Updated \(batchCount) posts with new username/name")
 	}
 	
 	// MARK: - Format Birthday

@@ -10,7 +10,7 @@ final class NotificationService {
 	// MARK: - Notification Model
 	struct AppNotification: Identifiable {
 		var id: String
-		var type: String // "collection_request", "follow", "collection_join", etc.
+		var type: String // "collection_request", "follow", "collection_join", "collection_star", "collection_post", "comment", "comment_reply", etc.
 		var userId: String // User who triggered the notification
 		var username: String
 		var userProfileImageURL: String?
@@ -22,6 +22,9 @@ final class NotificationService {
 		var status: String? // "pending", "accepted", "denied" for requests
 		var joinedUsers: [[String: Any]]? // For batch join notifications
 		var joinCount: Int? // Number of users who joined
+		var postId: String? // For update notifications (star, comment, reply)
+		var postThumbnailURL: String? // For update notifications
+		var commentText: String? // For comment/reply notifications
 	}
 	
 	// MARK: - Send Collection Request Notification
@@ -47,27 +50,45 @@ final class NotificationService {
 		let admins = collection.owners
 		
 		// Create or update notification for each admin (ONE notification per admin, not multiple)
+		// Use retry logic for all Firestore operations
 		for adminId in admins {
 			// Skip if requester is the admin
 			if adminId == currentUserId {
 				continue
 			}
 			
-			// Check if notification already exists
 			let notificationsRef = db.collection("users")
 				.document(adminId)
 				.collection("notifications")
 			
-			// Query for existing pending request notification from this user for this collection
-			let existingQuery = notificationsRef
+			// First, delete ALL existing pending request notifications from this user for this collection
+			// This ensures we never have duplicates, even if there are multiple for some reason
+			let deleteQuery = notificationsRef
 				.whereField("type", isEqualTo: "collection_request")
 				.whereField("userId", isEqualTo: currentUserId)
 				.whereField("collectionId", isEqualTo: collectionId)
 				.whereField("status", isEqualTo: "pending")
-				.limit(to: 1)
 			
-			let existingSnapshot = try? await existingQuery.getDocuments()
+			// Use retry logic for delete query
+			let deleteSnapshot = try? await FirebaseRetryManager.shared.executeWithRetry(
+				operation: {
+					try await deleteQuery.getDocuments()
+				},
+				operationName: "Get notifications to delete"
+			)
 			
+			// Delete all existing pending notifications (with retry)
+			for doc in deleteSnapshot?.documents ?? [] {
+				try await FirebaseRetryManager.shared.executeWithRetry(
+					operation: {
+				try await doc.reference.delete()
+					},
+					operationName: "Delete notification"
+				)
+				print("🗑️ NotificationService: Deleted existing collection request notification for admin: \(adminId)")
+			}
+			
+			// Now create a fresh notification (with retry)
 			let notificationData: [String: Any] = [
 				"type": "collection_request",
 				"userId": currentUserId,
@@ -81,16 +102,14 @@ final class NotificationService {
 				"createdAt": Timestamp()
 			]
 			
-			if let existingDoc = existingSnapshot?.documents.first {
-				// Update existing notification instead of creating a new one
-				try await existingDoc.reference.updateData(notificationData)
-				print("✅ NotificationService: Updated existing collection request notification for admin: \(adminId)")
-			} else {
-				// Create new notification
-				let notificationRef = notificationsRef.document()
+			let notificationRef = notificationsRef.document()
+			try await FirebaseRetryManager.shared.executeWithRetry(
+				operation: {
 			try await notificationRef.setData(notificationData)
+				},
+				operationName: "Create notification"
+			)
 			print("✅ NotificationService: Sent collection request notification to admin: \(adminId)")
-			}
 		}
 		
 		// Post notification to trigger UI update
@@ -133,12 +152,12 @@ final class NotificationService {
 				.document(adminId)
 				.collection("notifications")
 			
-			// Find and delete pending request notification from this user for this collection
+			// Find and delete ALL request notifications from this user for this collection
+			// (not just pending ones, to handle any edge cases)
 			let query = notificationsRef
 				.whereField("type", isEqualTo: "collection_request")
 				.whereField("userId", isEqualTo: currentUserId)
 				.whereField("collectionId", isEqualTo: collectionId)
-				.whereField("status", isEqualTo: "pending")
 			
 			let snapshot = try? await query.getDocuments()
 			
@@ -195,14 +214,13 @@ final class NotificationService {
 				continue
 			}
 			
-			// Parse joinedUsers array if present
+			// Parse joinedUsers array if present (only for collection_join notifications)
 			var joinedUsers: [[String: Any]]? = nil
-			if let joinedUsersData = data["joinedUsers"] as? [[String: Any]] {
+			if type == "collection_join", let joinedUsersData = data["joinedUsers"] as? [[String: Any]] {
 				joinedUsers = joinedUsersData
 				print("✅ NotificationService: Parsed \(joinedUsersData.count) joined users for notification \(doc.documentID)")
-			} else {
-				print("⚠️ NotificationService: No joinedUsers data found for notification \(doc.documentID)")
 			}
+			// Note: Most notification types don't have joinedUsers, so we don't log warnings for them
 			
 			notifications.append(AppNotification(
 				id: doc.documentID,
@@ -217,7 +235,10 @@ final class NotificationService {
 				createdAt: createdAtDate,
 				status: data["status"] as? String,
 				joinedUsers: joinedUsers,
-				joinCount: data["joinCount"] as? Int
+				joinCount: data["joinCount"] as? Int,
+				postId: data["postId"] as? String,
+				postThumbnailURL: data["postThumbnailURL"] as? String,
+				commentText: data["commentText"] as? String
 			))
 		}
 		
@@ -290,9 +311,11 @@ final class NotificationService {
 		let message: String
 		if count == 1 {
 			message = "\(usernames.first ?? "Someone") joined \(collectionName)"
-		} else if count <= 3 {
+		} else if count <= 7 {
+			// Show all usernames when 7 or fewer people join
 			message = "\(usernames.joined(separator: ", ")) joined \(collectionName)"
 		} else {
+			// If more than 7, show first few and remaining count
 			let firstFew = usernames.prefix(3).joined(separator: ", ")
 			let remaining = count - 3
 			message = "\(firstFew) and \(remaining) other\(remaining == 1 ? "" : "s") joined \(collectionName)"
@@ -373,6 +396,209 @@ final class NotificationService {
 				name: NSNotification.Name("CollectionInviteSent"),
 				object: collectionId,
 				userInfo: ["invitedUserId": invitedUserId]
+			)
+		}
+	}
+	
+	// MARK: - Send Collection Star Update Notification
+	func sendCollectionStarNotification(
+		postId: String,
+		collectionId: String,
+		collectionName: String,
+		starUserId: String,
+		starUsername: String,
+		starProfileImageURL: String?,
+		postThumbnailURL: String?,
+		postOwnerId: String
+	) async throws {
+		// Don't notify if user starred their own post
+		guard starUserId != postOwnerId else { return }
+		
+		let db = Firestore.firestore()
+		
+		let notificationData: [String: Any] = [
+			"type": "collection_star",
+			"userId": starUserId,
+			"username": starUsername,
+			"userProfileImageURL": starProfileImageURL ?? "",
+			"collectionId": collectionId,
+			"collectionName": collectionName,
+			"message": "New star in collection \"\(collectionName)\"",
+			"isRead": false,
+			"postId": postId,
+			"postThumbnailURL": postThumbnailURL ?? "",
+			"createdAt": Timestamp()
+		]
+		
+		// Add notification to post owner's notifications subcollection
+		let notificationRef = db.collection("users")
+			.document(postOwnerId)
+			.collection("notifications")
+			.document()
+		
+		try await notificationRef.setData(notificationData)
+		print("✅ NotificationService: Sent collection star notification to user: \(postOwnerId)")
+		
+		// Post notification to trigger UI update
+		await MainActor.run {
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionStarNotification"),
+				object: postId,
+				userInfo: ["starUserId": starUserId]
+			)
+		}
+	}
+	
+	// MARK: - Send Collection Post Update Notification
+	func sendCollectionPostNotification(
+		collectionId: String,
+		collectionName: String,
+		postAuthorId: String,
+		postAuthorUsername: String,
+		postAuthorProfileImageURL: String?,
+		postId: String,
+		postThumbnailURL: String?,
+		collectionMemberIds: [String]
+	) async throws {
+		// Don't notify if user posted in their own collection
+		// Get collection to find owners
+		guard try await CollectionService.shared.getCollection(collectionId: collectionId) != nil else {
+			return
+		}
+		
+		let db = Firestore.firestore()
+		
+		// Notify all collection members except the post author
+		let membersToNotify = collectionMemberIds.filter { $0 != postAuthorId }
+		
+		for memberId in membersToNotify {
+			let notificationData: [String: Any] = [
+				"type": "collection_post",
+				"userId": postAuthorId,
+				"username": postAuthorUsername,
+				"userProfileImageURL": postAuthorProfileImageURL ?? "",
+				"collectionId": collectionId,
+				"collectionName": collectionName,
+				"message": "\(postAuthorUsername) has posted in the collection \"\(collectionName)\"",
+				"isRead": false,
+				"postId": postId,
+				"postThumbnailURL": postThumbnailURL ?? "",
+				"createdAt": Timestamp()
+			]
+			
+			// Add notification to member's notifications subcollection
+			let notificationRef = db.collection("users")
+				.document(memberId)
+				.collection("notifications")
+				.document()
+			
+			try await notificationRef.setData(notificationData)
+			print("✅ NotificationService: Sent collection post notification to user: \(memberId)")
+		}
+		
+		// Post notification to trigger UI update
+		await MainActor.run {
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionPostNotification"),
+				object: collectionId,
+				userInfo: ["postAuthorId": postAuthorId, "postId": postId]
+			)
+		}
+	}
+	
+	// MARK: - Send Comment Update Notification
+	func sendCommentNotification(
+		postId: String,
+		commentId: String,
+		commentUserId: String,
+		commentUsername: String,
+		commentProfileImageURL: String?,
+		commentText: String,
+		postThumbnailURL: String?,
+		postOwnerId: String
+	) async throws {
+		// Don't notify if user commented on their own post
+		guard commentUserId != postOwnerId else { return }
+		
+		let db = Firestore.firestore()
+		
+		let notificationData: [String: Any] = [
+			"type": "comment",
+			"userId": commentUserId,
+			"username": commentUsername,
+			"userProfileImageURL": commentProfileImageURL ?? "",
+			"message": "\(commentUsername)",
+			"isRead": false,
+			"postId": postId,
+			"postThumbnailURL": postThumbnailURL ?? "",
+			"commentText": commentText,
+			"createdAt": Timestamp()
+		]
+		
+		// Add notification to post owner's notifications subcollection
+		let notificationRef = db.collection("users")
+			.document(postOwnerId)
+			.collection("notifications")
+			.document()
+		
+		try await notificationRef.setData(notificationData)
+		print("✅ NotificationService: Sent comment notification to user: \(postOwnerId)")
+		
+		// Post notification to trigger UI update
+		await MainActor.run {
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CommentNotification"),
+				object: postId,
+				userInfo: ["commentUserId": commentUserId, "commentId": commentId]
+			)
+		}
+	}
+	
+	// MARK: - Send Comment Reply Update Notification
+	func sendCommentReplyNotification(
+		postId: String,
+		commentId: String,
+		replyId: String,
+		replyUserId: String,
+		replyUsername: String,
+		replyProfileImageURL: String?,
+		replyText: String,
+		postThumbnailURL: String?,
+		originalCommentUserId: String
+	) async throws {
+		// Don't notify if user replied to their own comment
+		guard replyUserId != originalCommentUserId else { return }
+		
+		let db = Firestore.firestore()
+		
+		let notificationData: [String: Any] = [
+			"type": "comment_reply",
+			"userId": replyUserId,
+			"username": replyUsername,
+			"userProfileImageURL": replyProfileImageURL ?? "",
+			"message": "\(replyUsername)",
+			"isRead": false,
+			"postId": postId,
+			"postThumbnailURL": postThumbnailURL ?? "",
+			"commentText": replyText,
+			"createdAt": Timestamp()
+		]
+		
+		// Add notification to original commenter's notifications subcollection
+		let notificationRef = db.collection("users")
+			.document(originalCommentUserId)
+			.collection("notifications")
+			.document()
+		
+		try await notificationRef.setData(notificationData)
+		print("✅ NotificationService: Sent comment reply notification to user: \(originalCommentUserId)")
+		
+		// Post notification to trigger UI update
+		await MainActor.run {
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CommentReplyNotification"),
+				object: postId,
+				userInfo: ["replyUserId": replyUserId, "replyId": replyId]
 			)
 		}
 	}
