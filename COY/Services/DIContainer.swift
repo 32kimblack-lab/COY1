@@ -52,6 +52,8 @@ final class DIContainer: ObservableObject {
 			instance = VideoPlayerManager.shared
 		case "VideoCacheManager":
 			instance = VideoCacheManager.shared
+		case "FeedService":
+			instance = FeedService.shared
 		default:
 			// Fallback: try to access as singleton if it has .shared
 			fatalError("Service \(String(describing: type)) not registered in DIContainer")

@@ -208,10 +208,16 @@ struct ViewerProfileView: View {
 			setupViewedUserListener() // Set up real-time listener for the viewed user's profile
 		}
 		.onDisappear {
+			// CRITICAL: Clean up Firestore listeners when view disappears
 			collectionsListener?.remove()
 			collectionsListener = nil
 			viewedUserListener?.remove()
 			viewedUserListener = nil
+			FirestoreListenerManager.shared.removeAllListeners(for: "ViewerProfileView")
+			#if DEBUG
+			let remainingCount = FirestoreListenerManager.shared.getActiveListenerCount()
+			print("✅ ViewerProfileView: Cleaned up listeners (remaining: \(remainingCount))")
+			#endif
 		}
 		.alert("Report User", isPresented: $showReportUserAlert) {
 			Button("Cancel", role: .cancel) { }

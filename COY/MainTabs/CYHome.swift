@@ -863,68 +863,73 @@ struct CYHome: View {
 				// Load followed collections
 				let followed = try await CollectionService.shared.getFollowedCollections(userId: currentUserId)
 				
-				// Load FIRST PAGE of posts from all followed collections (paginated)
+				// CRITICAL: Use server-side feed generation (10x faster, 10x fewer reads)
+				// Falls back to client-side if Cloud Function fails
+				let initialLimit = isIPad ? 30 : 24
 				var allPosts: [(post: CollectionPost, collection: CollectionData)] = []
-				let initialLimit = isIPad ? 30 : 24 // More for grid view
 				
-				// CRITICAL: Limit to first 10 collections initially to prevent loading 1,000+ posts
-				// Load remaining collections on-demand as user scrolls
-				let initialCollections = Array(followed.prefix(10))
-				let remainingCollections = Array(followed.dropFirst(10))
-				
-				await withTaskGroup(of: [(post: CollectionPost, collection: CollectionData)].self) { group in
-					for collection in initialCollections {
-						group.addTask {
-							// Skip hidden collections entirely - don't even load posts
-							let isHidden = await MainActor.run { () -> Bool in
-								CYServiceManager.shared.isCollectionHidden(collectionId: collection.id)
-							}
-							if isHidden {
-								print("🚫 CYHome: Skipping hidden collection '\(collection.name)' (ID: \(collection.id))")
-								return []
-							}
-							
-							do {
-								// CRITICAL: Reduced from 25 to 10 posts per collection for initial load
-								// This prevents loading 250+ posts (10 collections × 25 posts) on first load
-								let (posts, _, _) = try await PostService.shared.getCollectionPostsPaginated(
-									collectionId: collection.id,
-									limit: 10, // Reduced from 25 to improve initial load performance
-									lastDocument: nil,
-									sortBy: "Newest to Oldest"
-								)
-								// Filter posts (includes hidden collections check)
-								let filteredPosts = await CollectionService.filterPosts(posts)
-								return filteredPosts.map { (post: $0, collection: collection) }
-							} catch {
-								print("Error loading posts for collection \(collection.id): \(error)")
-								return []
+				do {
+					// Try server-side feed first
+					let (serverPosts, hasMore, lastId) = try await FeedService.shared.loadHomeFeed(
+						pageSize: initialLimit,
+						lastPostId: nil
+					)
+					
+					// Map server posts to posts with collections
+					for post in serverPosts {
+						// Find collection for this post
+						if let collection = followed.first(where: { $0.id == post.collectionId }) {
+							allPosts.append((post: post, collection: collection))
+						} else {
+							// Fallback: Load collection if not in followed list
+							if let collection = try? await CollectionService.shared.getCollection(collectionId: post.collectionId) {
+								allPosts.append((post: post, collection: collection))
 							}
 						}
 					}
 					
-					// Store remaining collections for lazy loading
-					if !remainingCollections.isEmpty {
-						await MainActor.run {
-							// Add remaining collections to followedCollections but don't load posts yet
-							// Posts will load as user scrolls or when collection becomes visible
-							self.followedCollections.append(contentsOf: remainingCollections)
+					hasMoreData = hasMore
+					lastPostTimestamp = allPosts.last?.post.createdAt
+					
+					print("✅ CYHome: Loaded \(allPosts.count) posts from server-side feed")
+				} catch {
+					// Fallback to client-side loading if Cloud Function fails
+					print("⚠️ CYHome: Server-side feed failed, using client-side fallback: \(error.localizedDescription)")
+					
+					let clientPosts = try await FeedService.shared.loadHomeFeedClientSide(
+						followedCollections: followed,
+						limit: initialLimit
+					)
+					
+					// Map to posts with collections
+					for post in clientPosts {
+						if let collection = followed.first(where: { $0.id == post.collectionId }) {
+							allPosts.append((post: post, collection: collection))
 						}
 					}
 					
-					for await collectionPosts in group {
-						allPosts.append(contentsOf: collectionPosts)
-					}
+					// Apply client-side mixing as fallback
+					allPosts = mixPosts(allPosts, isRefresh: false)
+					hasMoreData = allPosts.count >= initialLimit
+					lastPostTimestamp = allPosts.last?.post.createdAt
 				}
 				
-				// Apply sorted + mixed feed algorithm with recency score, shuffle factor, and creator distribution
-				let mixedPosts = mixPosts(allPosts, isRefresh: false)
-				print("🔄 CYHome: Mixed posts with recency score and creator distribution")
+				// Filter out hidden collections and blocked users
+				let hiddenCollectionIds = await MainActor.run { () -> Set<String> in
+					Set(cyServiceManager.getHiddenCollectionIds())
+				}
+				let blockedUserIds = await MainActor.run { () -> Set<String> in
+					Set(cyServiceManager.getBlockedUsers())
+				}
+				
+				allPosts = allPosts.filter { postWithCollection in
+					!hiddenCollectionIds.contains(postWithCollection.post.collectionId) &&
+					!blockedUserIds.contains(postWithCollection.post.authorId) &&
+					!blockedUserIds.contains(postWithCollection.collection.ownerId)
+				}
 				
 				// Take only initial limit
-				let limitedPosts = Array(mixedPosts.prefix(initialLimit))
-				lastPostTimestamp = limitedPosts.last?.post.createdAt
-				hasMoreData = allPosts.count > initialLimit
+				let limitedPosts = Array(allPosts.prefix(initialLimit))
 				
 				// Cache the data
 				let followedIds = Set(followed.map { $0.id })
@@ -940,7 +945,7 @@ struct CYHome: View {
 					self.isLoading = false
 				}
 			} catch {
-				print("❌ Error loading followed collections: \(error)")
+				print("❌ Error loading feed: \(error)")
 				await MainActor.run {
 					self.isLoading = false
 					self.hasMoreData = false

@@ -326,9 +326,14 @@ struct CYPostDetailView: View {
 			adManager.loadInterstitialAd()
 		}
 		.onDisappear {
-			// Clean up listener when view disappears
+			// CRITICAL: Clean up Firestore listeners when view disappears
 			commentsListener?.remove()
 			commentsListener = nil
+			FirestoreListenerManager.shared.removeAllListeners(for: "CYPostDetailView")
+			#if DEBUG
+			let remainingCount = FirestoreListenerManager.shared.getActiveListenerCount()
+			print("✅ CYPostDetailView: Cleaned up listeners (remaining: \(remainingCount))")
+			#endif
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostUpdated"))) { notification in
 			if let updatedPostId = notification.object as? String, updatedPostId == post.id {
