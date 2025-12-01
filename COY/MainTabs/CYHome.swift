@@ -1,47 +1,9 @@
 import SwiftUI
 import FirebaseFirestore
 import FirebaseAuth
-import SDWebImageSwiftUI
-import SDWebImage
-import AVKit
 
-// MARK: - Static Cache for CYHome
-class HomeViewCache {
-	static let shared = HomeViewCache()
-	private init() {}
-	
-	private var hasLoadedDataOnce = false
-	private var cachedFollowedCollections: [CollectionData] = []
-	private var cachedPostsWithCollections: [(post: CollectionPost, collection: CollectionData)] = []
-	private var cachedFollowedCollectionIds: Set<String> = []
-	
-	func hasDataLoaded() -> Bool {
-		return hasLoadedDataOnce
-	}
-	
-	func getCachedData() -> (collections: [CollectionData], postsWithCollections: [(post: CollectionPost, collection: CollectionData)], followedIds: Set<String>) {
-		return (cachedFollowedCollections, cachedPostsWithCollections, cachedFollowedCollectionIds)
-	}
-	
-	func setCachedData(collections: [CollectionData], postsWithCollections: [(post: CollectionPost, collection: CollectionData)], followedIds: Set<String>) {
-		self.cachedFollowedCollections = collections
-		self.cachedPostsWithCollections = postsWithCollections
-		self.cachedFollowedCollectionIds = followedIds
-		self.hasLoadedDataOnce = true
-	}
-	
-	func clearCache() {
-		hasLoadedDataOnce = false
-		cachedFollowedCollections.removeAll()
-		cachedPostsWithCollections.removeAll()
-		cachedFollowedCollectionIds.removeAll()
-	}
-	
-	func matchesCurrentFollowedIds(_ currentIds: Set<String>) -> Bool {
-		return cachedFollowedCollectionIds == currentIds
-	}
-}
-
+/// Main home feed view - displays posts from followed collections
+/// Optimized for production with server-side feed generation and proper caching
 struct CYHome: View {
 	@Environment(\.colorScheme) var colorScheme
 	@Environment(\.horizontalSizeClass) var horizontalSizeClass
@@ -58,7 +20,6 @@ struct CYHome: View {
 	@State private var lastPostTimestamp: Date?
 	@State private var showNotifications = false
 	@State private var unreadNotificationCount = 0
-	@State private var currentPostIndex = 0
 	@State private var friendRequestCount = 0
 	@State private var sideMenuSearchText = "" // Search text for side menu
 	
@@ -70,8 +31,6 @@ struct CYHome: View {
 	private var notificationBadgeCount: Int? {
 		unreadNotificationCount > 0 ? unreadNotificationCount : nil
 	}
-	
-	private let pageSize = 20
 	
 	var body: some View {
 		NavigationStack {
@@ -131,7 +90,7 @@ struct CYHome: View {
 				}
 			} else {
 				// No cache exists, load fresh (only on first app launch)
-				loadFollowedCollectionsAndPosts()
+				loadFollowedCollectionsAndPosts(forceRefresh: false)
 			}
 		}
 		.onDisappear {
@@ -143,38 +102,28 @@ struct CYHome: View {
 			print("✅ CYHome: Cleaned up listeners (remaining: \(remainingCount))")
 			#endif
 		}
+		// Consolidated notification handler for feed updates
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionFollowed"))) { notification in
-			// Reload when user follows a collection
-			if let userId = notification.userInfo?["userId"] as? String,
-			   userId == authService.user?.uid {
+			handleFeedUpdateNotification(notification, action: "CollectionFollowed")
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUnfollowed"))) { notification in
+			handleFeedUpdateNotification(notification, action: "CollectionUnfollowed")
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostCreated"))) { notification in
+			if let collectionId = notification.object as? String,
+			   followedCollections.contains(where: { $0.id == collectionId }) {
 				loadFollowedCollectionsAndPosts(forceRefresh: true)
 			}
 		}
-		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUnfollowed"))) { notification in
-			// Reload when user unfollows a collection
-			if let userId = notification.userInfo?["userId"] as? String,
-			   userId == authService.user?.uid {
-				loadFollowedCollectionsAndPosts(forceRefresh: true)
-			}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { _ in
+			print("🔄 CYHome: Profile updated, reloading to show new user info")
+			loadFollowedCollectionsAndPosts(forceRefresh: true)
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FriendRequestCountChanged"))) { notification in
 			if let userInfo = notification.userInfo,
 			   let count = userInfo["count"] as? Int {
 				friendRequestCount = count
 			}
-		}
-		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("PostCreated"))) { notification in
-			// Reload when a new post is created in a followed collection
-			if let collectionId = notification.object as? String,
-			   followedCollections.contains(where: { $0.id == collectionId }) {
-				loadFollowedCollectionsAndPosts(forceRefresh: true)
-			}
-		}
-		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { notification in
-			// Immediately reload posts and collections when profile is updated to show new username/name/images
-			// ServiceManager listener will update currentUser, which triggers UI updates
-			print("🔄 CYHome: Profile updated, reloading to show new user info")
-			loadFollowedCollectionsAndPosts(forceRefresh: true)
 		}
 		.onChange(of: cyServiceManager.currentUser) { oldValue, newValue in
 			// Real-time update when current user's profile changes via ServiceManager
@@ -256,6 +205,7 @@ struct CYHome: View {
 				loadFollowedCollectionsAndPosts(forceRefresh: true)
 			}
 		}
+		// Consolidated notification count updates
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("UnreadNotificationCountChanged"))) { notification in
 			if let userInfo = notification.userInfo,
 			   let count = userInfo["count"] as? Int {
@@ -271,56 +221,20 @@ struct CYHome: View {
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionMembersJoined"))) { _ in
 			loadUnreadNotificationCount()
 		}
+		// Consolidated blocking/hiding handlers
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionHidden"))) { notification in
-			// Immediately remove posts from hidden collection from home feed
-			if let hiddenCollectionId = notification.object as? String {
-				print("🚫 CYHome: Collection '\(hiddenCollectionId)' was hidden, removing posts from feed")
-				Task {
-					// Filter out posts from hidden collection
-					await MainActor.run {
-						let hiddenCollectionIds = Set([hiddenCollectionId])
-						postsWithCollections.removeAll { postWithCollection in
-							hiddenCollectionIds.contains(postWithCollection.post.collectionId)
-						}
-						// Also remove from followed collections list
-						followedCollections.removeAll { $0.id == hiddenCollectionId }
-						// Clear cache
-						HomeViewCache.shared.clearCache()
-					}
-				}
-			}
+			handleCollectionHidden(notification)
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionUnhidden"))) { notification in
-			// Reload feed when collection is unhidden
 			if let unhiddenCollectionId = notification.object as? String {
 				print("✅ CYHome: Collection '\(unhiddenCollectionId)' was unhidden, reloading feed")
 				loadFollowedCollectionsAndPosts(forceRefresh: true)
 			}
 		}
 		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { notification in
-			// Immediately remove posts from blocked user from home feed
-			if let blockedUserId = notification.userInfo?["blockedUserId"] as? String {
-				print("🚫 CYHome: User '\(blockedUserId)' was blocked, removing their posts from feed")
-				Task {
-					// Filter out posts from blocked user immediately
-					await MainActor.run {
-						let beforeCount = postsWithCollections.count
-						postsWithCollections.removeAll { postWithCollection in
-							postWithCollection.post.authorId == blockedUserId
-						}
-						// Also remove collections owned by blocked user
-						followedCollections.removeAll { $0.ownerId == blockedUserId }
-						// Clear cache
-						HomeViewCache.shared.clearCache()
-						if postsWithCollections.count < beforeCount {
-							print("🚫 CYHome: Removed \(beforeCount - postsWithCollections.count) posts from blocked user")
-						}
-					}
-				}
-			}
+			handleUserBlocked(notification)
 		}
 		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserUnblocked"))) { notification in
-			// Reload feed when user is unblocked
 			if let unblockedUserId = notification.userInfo?["unblockedUserId"] as? String {
 				print("✅ CYHome: User '\(unblockedUserId)' was unblocked, reloading feed")
 				loadFollowedCollectionsAndPosts(forceRefresh: true)
@@ -624,10 +538,135 @@ struct CYHome: View {
 		.background(colorScheme == .dark ? Color.black : Color.white)
 	}
 	
+	// MARK: - Feed Loading (Consolidated)
+	/// Unified feed loading method - handles both initial load and refresh
+	/// Uses server-side feed generation when available, falls back to client-side
+	private func loadFeed(forceRefresh: Bool = false, isRefresh: Bool = false) async {
+		guard let currentUserId = authService.user?.uid else { return }
+		
+		// Skip if we have cached data and not forcing refresh
+		if HomeViewCache.shared.hasDataLoaded() && !forceRefresh && !isRefresh {
+			return
+		}
+		
+		await MainActor.run {
+			isLoading = true
+			hasMoreData = true
+			lastPostTimestamp = nil
+		}
+		
+		// Clear caches if refreshing
+		if isRefresh {
+			await MainActor.run {
+				HomeViewCache.shared.clearCache()
+				CollectionPostsCache.shared.clearAllCache()
+				UserService.shared.clearUserCache(userId: currentUserId)
+			}
+			
+			// Reload current user data
+			do {
+				CYServiceManager.shared.stopListening()
+				try await CYServiceManager.shared.loadCurrentUser()
+			} catch {
+				print("⚠️ CYHome: Error reloading current user: \(error)")
+			}
+		}
+		
+		do {
+			// Load followed collections
+			let followed = try await CollectionService.shared.getFollowedCollections(userId: currentUserId)
+			
+			// Use server-side feed generation (10x faster, 10x fewer reads)
+			let initialLimit = isIPad ? 30 : 24
+			var allPosts: [(post: CollectionPost, collection: CollectionData)] = []
+			
+			do {
+				// Try server-side feed first
+				let (serverPosts, hasMore, _) = try await FeedService.shared.loadHomeFeed(
+					pageSize: initialLimit,
+					lastPostId: nil
+				)
+				
+				// Map server posts to posts with collections
+				for post in serverPosts {
+					if let collection = followed.first(where: { $0.id == post.collectionId }) {
+						allPosts.append((post: post, collection: collection))
+					} else if let collection = try? await CollectionService.shared.getCollection(collectionId: post.collectionId) {
+						allPosts.append((post: post, collection: collection))
+					}
+				}
+				
+				await MainActor.run {
+					hasMoreData = hasMore
+					lastPostTimestamp = allPosts.last?.post.createdAt
+				}
+				
+				print("✅ CYHome: Loaded \(allPosts.count) posts from server-side feed")
+			} catch {
+				// Fallback to client-side loading
+				print("⚠️ CYHome: Server-side feed failed, using client-side fallback: \(error.localizedDescription)")
+				
+				let clientPosts = try await FeedService.shared.loadHomeFeedClientSide(
+					followedCollections: followed,
+					limit: initialLimit
+				)
+				
+				for post in clientPosts {
+					if let collection = followed.first(where: { $0.id == post.collectionId }) {
+						allPosts.append((post: post, collection: collection))
+					}
+				}
+				
+				// Apply client-side mixing as fallback
+				allPosts = mixPosts(allPosts, isRefresh: isRefresh)
+				await MainActor.run {
+					hasMoreData = allPosts.count >= initialLimit
+					lastPostTimestamp = allPosts.last?.post.createdAt
+				}
+			}
+			
+			// Filter out hidden collections and blocked users (single pass)
+			let hiddenCollectionIds = await MainActor.run { () -> Set<String> in
+				Set(cyServiceManager.getHiddenCollectionIds())
+			}
+			let blockedUserIds = await MainActor.run { () -> Set<String> in
+				Set(cyServiceManager.getBlockedUsers())
+			}
+			
+			allPosts = allPosts.filter { postWithCollection in
+				!hiddenCollectionIds.contains(postWithCollection.post.collectionId) &&
+				!blockedUserIds.contains(postWithCollection.post.authorId) &&
+				!blockedUserIds.contains(postWithCollection.collection.ownerId)
+			}
+			
+			// Take only initial limit
+			let limitedPosts = Array(allPosts.prefix(initialLimit))
+			
+			// Cache the data
+			let followedIds = Set(followed.map { $0.id })
+			HomeViewCache.shared.setCachedData(
+				collections: followed,
+				postsWithCollections: limitedPosts,
+				followedIds: followedIds
+			)
+			
+			await MainActor.run {
+				self.followedCollections = followed
+				self.postsWithCollections = limitedPosts
+				self.isLoading = false
+			}
+		} catch {
+			print("❌ Error loading feed: \(error)")
+			await MainActor.run {
+				self.isLoading = false
+				self.hasMoreData = false
+			}
+		}
+	}
+	
 	// MARK: - Post Mixing Algorithm
 	/// Mixes posts with recency score, shuffle factor, and creator distribution
 	/// Ensures no single creator appears in long blocks
-	/// Optimized to run off main thread for better performance
 	@MainActor
 	private func mixPosts(_ posts: [(post: CollectionPost, collection: CollectionData)], isRefresh: Bool = false) -> [(post: CollectionPost, collection: CollectionData)] {
 		guard !posts.isEmpty else { return posts }
@@ -892,7 +931,7 @@ struct CYHome: View {
 					lastPostTimestamp = allPosts.last?.post.createdAt
 					
 					print("✅ CYHome: Loaded \(allPosts.count) posts from server-side feed")
-				} catch {
+							} catch {
 					// Fallback to client-side loading if Cloud Function fails
 					print("⚠️ CYHome: Server-side feed failed, using client-side fallback: \(error.localizedDescription)")
 					
@@ -905,9 +944,9 @@ struct CYHome: View {
 					for post in clientPosts {
 						if let collection = followed.first(where: { $0.id == post.collectionId }) {
 							allPosts.append((post: post, collection: collection))
-						}
 					}
-					
+				}
+				
 					// Apply client-side mixing as fallback
 					allPosts = mixPosts(allPosts, isRefresh: false)
 					hasMoreData = allPosts.count >= initialLimit
@@ -1117,224 +1156,49 @@ struct CYHome: View {
 			}
 		}
 	}
-}
-
-// MARK: - Video Player View
-struct VideoPlayerView: View {
-	let videoURL: String
-	let thumbnailURL: String?
-	@ObservedObject var videoPlayerManager: VideoPlayerManager
-	@State private var isPlaying = false
-	@State private var showControls = true
 	
-	var body: some View {
-		ZStack {
-			// Thumbnail
-			if let thumbnailURL = thumbnailURL, let url = URL(string: thumbnailURL) {
-				WebImage(url: url)
-					.resizable()
-					.aspectRatio(contentMode: .fill)
-					.frame(maxWidth: .infinity)
-					.opacity(isPlaying ? 0 : 1)
-			} else {
-				Color.black
-			}
-			
-			// Video player (when playing)
-			if isPlaying {
-				if URL(string: videoURL) != nil {
-					VideoPlayerViewController(player: videoPlayerManager.getOrCreatePlayer(for: videoURL, postId: ""))
-						.frame(maxWidth: .infinity)
-				}
-			}
-			
-			// Play button overlay
-			if !isPlaying {
-				Button(action: {
-					let playerId = "\(videoURL)"
-					videoPlayerManager.playVideo(playerId: playerId)
-					isPlaying = true
-				}) {
-					Image(systemName: "play.circle.fill")
-						.font(.system(size: 60))
-						.foregroundColor(.white.opacity(0.9))
-				}
-			}
-		}
-		.onAppear {
-			_ = videoPlayerManager.getOrCreatePlayer(for: videoURL, postId: "")
-		}
-		.onDisappear {
-			let playerId = "\(videoURL)"
-			videoPlayerManager.pauseVideo(playerId: playerId)
+	// MARK: - Notification Handlers (Consolidated)
+	/// Handle feed update notifications (follow/unfollow)
+	private func handleFeedUpdateNotification(_ notification: Notification, action: String) {
+		if let userId = notification.userInfo?["userId"] as? String,
+		   userId == authService.user?.uid {
+			loadFollowedCollectionsAndPosts(forceRefresh: true)
 		}
 	}
-}
-
-// MARK: - Video Player View Controller Wrapper
-struct VideoPlayerViewController: UIViewControllerRepresentable {
-	let player: AVPlayer
 	
-	func makeUIViewController(context: Context) -> AVPlayerViewController {
-		let controller = AVPlayerViewController()
-		controller.player = player
-		controller.showsPlaybackControls = false
-		return controller
-	}
-	
-	func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {
-		uiViewController.player = player
-	}
-}
-
-// MARK: - Followed Collection Row (Side Menu) - Matching NotificationRow Design
-struct FollowedCollectionRow: View {
-	let collection: CollectionData
-	let onUnfollow: () -> Void
-	@State private var ownerProfileImageURL: String?
-	@State private var ownerUsername: String?
-	@State private var ownerProfileListener: ListenerRegistration?
-	
-	// Computed property for username and type text
-	private var usernameAndTypeText: String {
-		var text = ""
-		if let username = ownerUsername {
-			text = "@\(username) • "
-		}
-		text += collection.type == "Individual" ? "Individual" : "\(collection.memberCount) members"
-		return text
-	}
-	
-	var body: some View {
-		HStack(spacing: 12) {
-			// Collection profile image (matching NotificationRow size: 50)
-			if let imageURL = collection.imageURL, !imageURL.isEmpty {
-				CachedProfileImageView(url: imageURL, size: 50)
-					.clipShape(Circle())
-			} else {
-				if let ownerImageURL = ownerProfileImageURL, !ownerImageURL.isEmpty {
-					CachedProfileImageView(url: ownerImageURL, size: 50)
-						.clipShape(Circle())
-				} else {
-					DefaultProfileImageView(size: 50)
-				}
-			}
-			
-			// Collection info (matching NotificationRow text styling)
-			VStack(alignment: .leading, spacing: 4) {
-				// Collection name (matching NotificationRow message font: .subheadline)
-				Text(collection.name)
-					.font(.subheadline)
-					.foregroundColor(.primary)
-					.lineLimit(2)
-					.multilineTextAlignment(.leading)
-					.fixedSize(horizontal: false, vertical: true)
-				
-				// Username • Type (matching NotificationRow time font: .caption)
-				// Combine into single Text view to prevent cutoff and maintain proper alignment
-				Text(usernameAndTypeText)
-							.font(.caption)
-							.foregroundColor(.secondary)
-					.lineLimit(2)
-					.multilineTextAlignment(.leading)
-					.fixedSize(horizontal: false, vertical: true)
+	/// Handle collection hidden notification
+	private func handleCollectionHidden(_ notification: Notification) {
+		if let hiddenCollectionId = notification.object as? String {
+			print("🚫 CYHome: Collection '\(hiddenCollectionId)' was hidden, removing posts from feed")
+			Task {
+				await MainActor.run {
+					let hiddenCollectionIds = Set([hiddenCollectionId])
+					let beforeCount = postsWithCollections.count
+					postsWithCollections.removeAll { hiddenCollectionIds.contains($0.post.collectionId) }
+					followedCollections.removeAll { $0.id == hiddenCollectionId }
+					HomeViewCache.shared.clearCache()
+					if postsWithCollections.count < beforeCount {
+						print("🚫 CYHome: Removed \(beforeCount - postsWithCollections.count) posts from hidden collection")
 					}
-			.frame(maxWidth: .infinity, alignment: .leading)
-			
-			Spacer()
-			
-			// Unfollow button (matching Accept/Deny button sizing)
-			Button(action: onUnfollow) {
-				Text("Unfollow")
-					.font(.system(size: 12, weight: .semibold))
-					.foregroundColor(.white)
-					.frame(minWidth: 60, maxWidth: 60)
-					.padding(.vertical, 6)
-					.background(Color.red)
-					.cornerRadius(8)
-			}
-			.buttonStyle(.plain)
-		}
-		.padding(.horizontal, 16)
-		.padding(.vertical, 12)
-		.background(Color(.systemBackground))
-		.cornerRadius(12)
-		.shadow(color: Color.black.opacity(0.05), radius: 2, x: 0, y: 1)
-		.task {
-			await loadOwnerInfo()
-			setupOwnerProfileListener() // Set up real-time listener for owner's profile
-		}
-		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { notification in
-			// Reload owner info when profile is updated
-			if let userId = notification.userInfo?["userId"] as? String,
-			   userId == collection.ownerId {
-				Task {
-					await loadOwnerInfo()
 				}
-			}
-		}
-		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("OwnerProfileImageUpdated"))) { notification in
-			// Update owner info when real-time listener detects changes
-			if let collectionId = notification.object as? String,
-			   collectionId == collection.id,
-			   let ownerId = notification.userInfo?["ownerId"] as? String,
-			   ownerId == collection.ownerId {
-				if let newProfileImageURL = notification.userInfo?["profileImageURL"] as? String {
-					ownerProfileImageURL = newProfileImageURL
-				}
-				if let newUsername = notification.userInfo?["username"] as? String {
-					ownerUsername = newUsername
-				}
-			}
-		}
-		.onDisappear {
-			// Clean up listener when view disappears
-			ownerProfileListener?.remove()
-			ownerProfileListener = nil
-		}
-	}
-	
-	// MARK: - Helper Functions
-	private func loadOwnerInfo() async {
-		if let owner = try? await UserService.shared.getUser(userId: collection.ownerId) {
-			await MainActor.run {
-				ownerProfileImageURL = owner.profileImageURL
-				ownerUsername = owner.username
 			}
 		}
 	}
 	
-	// MARK: - Real-time Listener for Owner's Profile
-	private func setupOwnerProfileListener() {
-		// Remove existing listener if any
-		ownerProfileListener?.remove()
-		
-		// Set up real-time Firestore listener for the owner's profile
-		// This allows other users to see real-time updates when the owner edits their profile
-		let db = Firestore.firestore()
-		let collectionId = collection.id
-		let ownerId = collection.ownerId
-		ownerProfileListener = db.collection("users").document(ownerId).addSnapshotListener { snapshot, error in
-			Task { @MainActor in
-				if let error = error {
-					print("❌ FollowedCollectionRow: Error listening to owner profile updates: \(error.localizedDescription)")
-					return
+	/// Handle user blocked notification
+	private func handleUserBlocked(_ notification: Notification) {
+		if let blockedUserId = notification.userInfo?["blockedUserId"] as? String {
+			print("🚫 CYHome: User '\(blockedUserId)' was blocked, removing their posts from feed")
+			Task {
+				await MainActor.run {
+					let beforeCount = postsWithCollections.count
+					postsWithCollections.removeAll { $0.post.authorId == blockedUserId }
+					followedCollections.removeAll { $0.ownerId == blockedUserId }
+					HomeViewCache.shared.clearCache()
+					if postsWithCollections.count < beforeCount {
+						print("🚫 CYHome: Removed \(beforeCount - postsWithCollections.count) posts from blocked user")
+					}
 				}
-				
-				guard let snapshot = snapshot, let data = snapshot.data() else {
-					return
-				}
-				
-				// Immediately update owner info from Firestore (real-time)
-				// Use NotificationCenter to update the view since we can't capture self in struct
-				let newProfileImageURL = data["profileImageURL"] as? String
-				let newUsername = data["username"] as? String ?? ""
-				NotificationCenter.default.post(
-					name: Notification.Name("OwnerProfileImageUpdated"),
-					object: collectionId,
-					userInfo: ["ownerId": ownerId, "profileImageURL": newProfileImageURL as Any, "username": newUsername]
-				)
-				print("🔄 FollowedCollectionRow: Owner profile updated in real-time from Firestore")
 			}
 		}
 	}

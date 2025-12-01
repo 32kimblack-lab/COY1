@@ -165,12 +165,12 @@ class AdManager: NSObject, ObservableObject {
 	func preloadNativeAds(count: Int = 3, location: AdLocation = .home) {
 		// Throttle ad loading to prevent overwhelming the system
 		Task { @MainActor in
-			for i in 0..<count {
+		for i in 0..<count {
 				// Add delay between ad loads to prevent simultaneous requests
 				if i > 0 {
 					try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 second delay
 				}
-				loadNativeAd(adKey: "preload_\(i)", location: location) { _ in }
+			loadNativeAd(adKey: "preload_\(i)", location: location) { _ in }
 			}
 		}
 	}

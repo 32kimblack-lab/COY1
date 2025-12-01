@@ -839,13 +839,13 @@ struct PinterestPostCard: View {
 						.onSuccess { image, data, cacheType in
 							// Image loaded successfully
 							Task { @MainActor in
-								imageLoadingStates[imageURL] = false
+							imageLoadingStates[imageURL] = false
 							}
 						}
 						.onFailure { error in
 							// Image failed to load - keep placeholder visible
 							Task { @MainActor in
-								imageLoadingStates[imageURL] = false
+							imageLoadingStates[imageURL] = false
 							}
 						}
 						.resizable()

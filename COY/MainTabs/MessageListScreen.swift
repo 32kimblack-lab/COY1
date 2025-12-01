@@ -292,7 +292,7 @@ struct MessageListScreen: View {
 				// Complete refresh: Clear all caches and force fresh reload
 				await completeRefresh()
 			}
-		.onDisappear {
+			.onDisappear {
 			// CRITICAL: Clean up all Firestore listeners when view disappears
 			// This prevents memory leaks and battery drain
 			outgoingRequestListener?.remove()
@@ -308,7 +308,7 @@ struct MessageListScreen: View {
 			let remainingCount = FirestoreListenerManager.shared.getActiveListenerCount()
 			print("✅ MessageListScreen: Cleaned up listeners (remaining: \(remainingCount))")
 			#endif
-		}
+			}
 			.onChange(of: totalUnreadCount) { oldValue, newValue in
 				// Notify MainTabView of unread count change
 				NotificationCenter.default.post(
