@@ -467,7 +467,8 @@ struct CYPostDetailView: View {
 					.buttonStyle(.plain)
 					.allowsHitTesting(true)
 					.contentShape(Rectangle())
-				} else if !currentPostForHeader.authorName.isEmpty {
+				} else {
+					// Use real-time user data (fallback to stored authorName)
 					Button(action: {
 						Task {
 							// Check if users are mutually blocked before navigating
@@ -477,7 +478,7 @@ struct CYPostDetailView: View {
 							}
 						}
 					}) {
-						Text("@\(currentPostForHeader.authorName)")
+						PostAuthorNameView(authorId: currentPostForHeader.authorId, fallbackName: currentPostForHeader.authorName)
 							.font(.system(size: 14))
 							.foregroundColor(.blue)
 					}

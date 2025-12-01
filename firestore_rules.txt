@@ -181,9 +181,30 @@ service cloud.firestore {
 
     match /collections/{collectionId} {
 
-      // Anyone authenticated can read collections
+      // Helper function to check if user has access to collection
+      function hasCollectionAccess() {
+        return isAuthenticated() && (
+          // Public collections are accessible to all authenticated users
+          resource.data.isPublic == true ||
+          // User is owner or admin
+          request.auth.uid == resource.data.ownerId ||
+          request.auth.uid in resource.data.get('owners', []) ||
+          // User is a member
+          request.auth.uid in resource.data.get('members', []) ||
+          // User is in allowedUsers (has been granted access to private collection)
+          request.auth.uid in resource.data.get('allowedUsers', [])
+        ) && (
+          // User is NOT in deniedUsers
+          !(request.auth.uid in resource.data.get('deniedUsers', []))
+        );
+      }
 
-      allow read: if isAuthenticated();
+      // Users can read collections they have access to
+      // This allows queries for private collections where user is in allowedUsers
+      allow read: if hasCollectionAccess();
+      
+      // Also allow list queries for discovery (Firestore will filter based on read rules)
+      allow list: if isAuthenticated();
 
       
 

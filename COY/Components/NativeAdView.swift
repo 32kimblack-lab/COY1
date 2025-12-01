@@ -77,6 +77,30 @@ struct NativeAdView: UIViewRepresentable {
 		let widthConstraint = adView.widthAnchor.constraint(equalToConstant: width)
 		widthConstraint.isActive = true
 		
+		// Calculate expected content height and constrain adView to that height
+		// This prevents the ad from extending unnecessarily
+		var expectedHeight: CGFloat = 16 // Top and bottom padding (8 + 8)
+		expectedHeight += mediaHeight // Media view height
+		expectedHeight += 8 // Spacing after media
+		expectedHeight += 12 // Ad label height (approximately)
+		expectedHeight += 8 // Spacing after ad label
+		if nativeAd.headline != nil {
+			expectedHeight += 36 // Headline (2 lines max, ~18pt per line)
+			expectedHeight += 8 // Spacing
+		}
+		if nativeAd.body != nil {
+			expectedHeight += 32 // Body (2 lines max, ~16pt per line)
+			expectedHeight += 8 // Spacing
+		}
+		if nativeAd.advertiser != nil {
+			expectedHeight += 16 // Advertiser (single line)
+		}
+		
+		// Constrain adView height to calculated content height
+		let heightConstraint = adView.heightAnchor.constraint(equalToConstant: expectedHeight)
+		heightConstraint.priority = UILayoutPriority(999) // High but not required (allows slight adjustment)
+		heightConstraint.isActive = true
+		
 		return adView
 	}
 	
@@ -91,9 +115,31 @@ struct GridNativeAdCard: View {
 	let width: CGFloat
 	@Environment(\.colorScheme) var colorScheme
 	
+	// Calculate expected height based on ad content
+	private var expectedHeight: CGFloat {
+		var height: CGFloat = 16 // Top and bottom padding (8 + 8)
+		let mediaHeight = max(width * 1.2, 120)
+		height += mediaHeight // Media view height
+		height += 8 // Spacing after media
+		height += 12 // Ad label height
+		height += 8 // Spacing after ad label
+		if nativeAd.headline != nil {
+			height += 36 // Headline (2 lines max)
+			height += 8 // Spacing
+		}
+		if nativeAd.body != nil {
+			height += 32 // Body (2 lines max)
+			height += 8 // Spacing
+		}
+		if nativeAd.advertiser != nil {
+			height += 16 // Advertiser (single line)
+		}
+		return height
+	}
+	
 	var body: some View {
 		NativeAdView(nativeAd: nativeAd, width: width)
-			.frame(width: width)
+			.frame(width: width, height: expectedHeight)
 			.background(colorScheme == .dark ? Color(.systemGray6) : Color.white)
 			.cornerRadius(12)
 			.shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)

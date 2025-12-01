@@ -73,9 +73,16 @@ struct MessageListScreen: View {
 	
 	var body: some View {
 		NavigationStack {
-			VStack(spacing: 0) {
-				// Header
-				HStack {
+			ScrollViewReader { proxy in
+				Group {
+					VStack(spacing: 0) {
+						// Top anchor for scroll-to-top
+						Color.clear
+							.frame(height: 0)
+							.id("topAnchor")
+						
+						// Header
+						HStack {
 					Text("Messages")
 						.font(.system(size: 22, weight: .bold))
 				Spacer()
@@ -237,7 +244,14 @@ struct MessageListScreen: View {
 						.listStyle(PlainListStyle())
 						.scrollContentBackground(.hidden)
 					}
+					}
 				}
+				.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ScrollToTopMessages"))) { _ in
+					withAnimation {
+						proxy.scrollTo("topAnchor", anchor: .top)
+					}
+				}
+			}
 		}
 		.navigationBarHidden(true)
 		.navigationDestination(item: $selectedChat) { chatInfo in
@@ -275,13 +289,8 @@ struct MessageListScreen: View {
 				}
 			}
 			.refreshable {
-				// Force refresh when user pulls to refresh (like Instagram)
-				Task {
-					await loadFriendsListAsync()
-					await MainActor.run {
-						loadChatRooms()
-					}
-				}
+				// Complete refresh: Clear all caches and force fresh reload
+				await completeRefresh()
 			}
 			.onDisappear {
 				// Don't clean up listeners - keep them alive to preserve state and get real-time updates
@@ -404,6 +413,40 @@ struct MessageListScreen: View {
 	private func loadFriendsList() {
 		Task {
 			await loadFriendsListAsync()
+		}
+	}
+	
+	// MARK: - Complete Refresh (Pull-to-Refresh)
+	/// Complete refresh: Clear all caches, reload user data, reload everything from scratch
+	/// Equivalent to exiting and re-entering the app
+	private func completeRefresh() async {
+		guard let currentUid = Auth.auth().currentUser?.uid else { return }
+		
+		print("🔄 MessageListScreen: Starting COMPLETE refresh (equivalent to app restart)")
+		
+		// Step 1: Clear ALL caches first (including user profile caches)
+		await MainActor.run {
+			HomeViewCache.shared.clearCache()
+			CollectionPostsCache.shared.clearAllCache()
+			// Clear user profile caches to force fresh profile image/name loads
+			UserService.shared.clearUserCache(userId: currentUid)
+			print("✅ MessageListScreen: Cleared all caches (including user profile caches)")
+		}
+		
+		// Step 2: Reload current user data - FORCE FRESH
+		do {
+			// Stop existing listener and reload fresh
+			CYServiceManager.shared.stopListening()
+			try await CYServiceManager.shared.loadCurrentUser()
+			print("✅ MessageListScreen: Reloaded current user data (fresh from Firestore)")
+		} catch {
+			print("⚠️ MessageListScreen: Error reloading current user: \(error)")
+		}
+		
+		// Step 3: Reload friends list and chat rooms - FORCE FRESH
+		await loadFriendsListAsync()
+		await MainActor.run {
+			loadChatRooms()
 		}
 	}
 	

@@ -6,6 +6,62 @@ import AVKit
 import GoogleMobileAds
 import Combine
 
+// MARK: - Real-time User Profile Display Components
+
+/// Displays post author name with real-time updates when user edits their profile
+struct PostAuthorNameView: View {
+	let authorId: String
+	let fallbackName: String
+	
+	@State private var displayName: String = ""
+	
+	var body: some View {
+		Text("@\(displayName.isEmpty ? fallbackName : displayName)")
+			.onAppear {
+				displayName = fallbackName
+				// Subscribe to real-time updates for this user
+				if !authorId.isEmpty {
+					UserService.shared.subscribeToUserProfile(userId: authorId)
+				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserProfileUpdated"))) { notification in
+				// Update display when user profile changes
+				if let updatedUserId = notification.object as? String,
+				   updatedUserId == authorId,
+				   let userInfo = notification.userInfo,
+				   let newUsername = userInfo["username"] as? String {
+					displayName = newUsername
+				}
+			}
+	}
+}
+
+/// Displays collection owner name with real-time updates when user edits their profile
+struct CollectionOwnerNameView: View {
+	let ownerId: String
+	let fallbackName: String
+	
+	@State private var displayName: String = ""
+	
+	var body: some View {
+		Text(displayName.isEmpty ? fallbackName : displayName)
+			.onAppear {
+				displayName = fallbackName
+				// Subscribe to real-time updates for this user
+				UserService.shared.subscribeToUserProfile(userId: ownerId)
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserProfileUpdated"))) { notification in
+				// Update display when user profile changes
+				if let updatedUserId = notification.object as? String,
+				   updatedUserId == ownerId,
+				   let userInfo = notification.userInfo,
+				   let newName = userInfo["name"] as? String {
+					displayName = newName
+				}
+			}
+	}
+}
+
 // MARK: - Pinterest Style Post Grid
 struct PinterestPostGrid: View {
 	let posts: [CollectionPost]
@@ -67,7 +123,9 @@ struct PinterestPostGrid: View {
 		}
 	}
 	
-
+	// Masonry layout: distribute posts into columns based on shortest column
+	// Includes ads every 4 posts
+	// Optimized: Calculate once and cache to avoid expensive recalculation
 	private var columnArrays: [[GridItem]] {
 		var columnsArray = Array(repeating: [GridItem](), count: columns)
 		var columnHeights = Array(repeating: CGFloat.zero, count: columns)
@@ -81,8 +139,15 @@ struct PinterestPostGrid: View {
 					let adKey = "ad_\(postIndex)"
 					columnsArray[shortestColumnIndex].append(.ad(key: adKey, index: itemIndex))
 				
-					// Estimate ad height (similar to post)
-					let estimatedAdHeight = columnWidth * 1.5 // Ads are typically taller
+					// Estimate ad height based on actual content (matches GridNativeAdCard calculation)
+					// Media height + padding + labels + spacing
+					let mediaHeight = max(columnWidth * 1.2, 120)
+					var estimatedAdHeight: CGFloat = 16 // Top and bottom padding
+					estimatedAdHeight += mediaHeight // Media view
+					estimatedAdHeight += 8 + 12 + 8 // Spacing + ad label + spacing
+					estimatedAdHeight += 36 + 8 // Headline (2 lines) + spacing
+					estimatedAdHeight += 32 + 8 // Body (2 lines) + spacing
+					estimatedAdHeight += 16 // Advertiser
 					columnHeights[shortestColumnIndex] += estimatedAdHeight + verticalSpacing
 					itemIndex += 1
 				}
@@ -125,7 +190,7 @@ struct PinterestPostGrid: View {
 		return mediaHeight + infoHeight
 	}
 	
-		var body: some View {
+	var body: some View {
 		ScrollView {
 			HStack(alignment: .top, spacing: horizontalGutter) {
 				ForEach(columnArrays.indices, id: \.self) { columnIndex in
@@ -159,24 +224,9 @@ struct PinterestPostGrid: View {
 			// evaluatePlayback is now called automatically in updateVideoVisibility
 		}
 		.onAppear {
-			// Preload ads for this location
-			adManager.preloadNativeAds(count: 10, location: adLocation)
-			
-			// Load ads for positions that need them
-			for (postIndex, _) in posts.enumerated() {
-				if showAds && postIndex > 0 && postIndex % 4 == 0 {
-					let adKey = "ad_\(postIndex)"
-					if nativeAds[adKey] == nil {
-						adManager.loadNativeAd(adKey: adKey, location: adLocation) { ad in
-							if let ad = ad {
-								Task { @MainActor in
-									nativeAds[adKey] = ad
-								}
-							}
-						}
-					}
-				}
-			}
+			// Preload only a few ads to reduce initial load
+			adManager.preloadNativeAds(count: 3, location: adLocation)
+			// Ads will load lazily when placeholders appear (no upfront loading)
 		}
 		.onDisappear {
 			// Clear all video tracking when grid disappears
@@ -259,6 +309,8 @@ struct PinterestPostCard: View {
 	@State private var ownerProfileImageURL: String? // Store owner's profile image URL for fallback
 	@State private var imageLoadingStates: [String: Bool] = [:] // Track loading state for each image
 	@State private var videoLoadingStates: [String: Bool] = [:] // Track loading state for each video
+	@State private var videoReadyStates: [String: Bool] = [:] // Track if video is ready to play
+	@State private var videoErrorStates: [String: Bool] = [:] // Track if video has error
 	@State private var elapsedTime: Double = 0.0 // Track elapsed time for current video
 	@State private var elapsedTimeCancellable: AnyCancellable? // Cancellable for elapsed time subscription
 	@Environment(\.colorScheme) var colorScheme
@@ -414,6 +466,25 @@ struct PinterestPostCard: View {
 					.frame(width: width)
 					.frame(height: contentHeight)
 					.clipped()
+				
+				// Pin icon badge overlay (top left corner) - only show in CYInsideCollectionView (when roundedCorners is true)
+				if post.isPinned && roundedCorners {
+					VStack {
+						HStack {
+							Image(systemName: "pin.fill")
+								.font(.caption2)
+								.fontWeight(.semibold)
+								.foregroundColor(.white)
+								.padding(.horizontal, 6)
+								.padding(.vertical, 3)
+								.background(Color.blue.opacity(0.8))
+								.cornerRadius(4)
+								.padding(8)
+							Spacer()
+						}
+						Spacer()
+					}
+				}
 			}
 			.cornerRadius(roundedCorners ? 16 : 0) // Rounded corners for inside collection, sharp for home/search
 			.onTapGesture {
@@ -454,7 +525,17 @@ struct PinterestPostCard: View {
 				// Collection profile image, collection name, username, and star
 				HStack(alignment: .center, spacing: 8) {
 					// Left side: Profile image with collection name and username on the same row
-					if !isIndividualCollection {
+					// For inside collection view with members: Show ONLY username (no collection profile/name)
+					// For home/search feeds: Show collection profile + name + username
+					// Detect if we're inside a collection view (not home feed) by checking if collection is provided
+					// Inside collection view: collection is set, roundedCorners is true
+					// Home/search feeds: collection is nil or from postsCollectionMap, roundedCorners is false
+					let isInsideCollectionView = collection != nil && roundedCorners
+					let isInsideCollectionWithMembers = isInsideCollectionView && 
+						collection?.type != "Individual" && 
+						(collection?.memberCount ?? 0) > 0
+					
+					if !isIndividualCollection && !isInsideCollectionWithMembers {
 						// Collection profile image - use same logic as CollectionRowDesign
 						Group {
 							if let collection = collection {
@@ -489,15 +570,20 @@ struct PinterestPostCard: View {
 									.lineLimit(1)
 							}
 							
-							// Username - below collection name
-							if !post.authorName.isEmpty {
-								Text("@\(post.authorName)")
+							// Username - below collection name (real-time from UserService)
+							PostAuthorNameView(authorId: post.authorId, fallbackName: post.authorName)
 									.font(.caption2)
 									.fontWeight(.medium)
 									.foregroundColor(.secondary)
 									.lineLimit(1)
-							}
 						}
+					} else if isInsideCollectionWithMembers {
+						// Inside collection with members: Show ONLY username (no collection profile/name)
+						PostAuthorNameView(authorId: post.authorId, fallbackName: post.authorName)
+							.font(.caption2)
+							.fontWeight(.medium)
+							.foregroundColor(.secondary)
+							.lineLimit(1)
 					}
 					
 					Spacer()
@@ -521,7 +607,7 @@ struct PinterestPostCard: View {
 				let captionText = post.caption ?? post.title
 				if !captionText.isEmpty {
 					Text(captionText)
-						.font(.caption)
+						.font(.caption2)
 						.foregroundColor(.secondary)
 						.lineLimit(2)
 						.multilineTextAlignment(.leading)
@@ -749,17 +835,17 @@ struct PinterestPostCard: View {
 							.frame(width: width, height: imageNaturalHeight)
 					}
 					
-					WebImage(url: url, options: [.lowPriority, .retryFailed, .scaleDownLargeImages])
+					WebImage(url: url, options: [.lowPriority, .retryFailed, .scaleDownLargeImages, .progressiveLoad])
 						.onSuccess { image, data, cacheType in
 							// Image loaded successfully
 							Task { @MainActor in
-							imageLoadingStates[imageURL] = false
+								imageLoadingStates[imageURL] = false
 							}
 						}
 						.onFailure { error in
-							// Image failed to load
+							// Image failed to load - keep placeholder visible
 							Task { @MainActor in
-							imageLoadingStates[imageURL] = false
+								imageLoadingStates[imageURL] = false
 							}
 						}
 						.resizable()
@@ -816,29 +902,78 @@ struct PinterestPostCard: View {
 			if let videoURL = mediaItem.videoURL, !videoURL.isEmpty {
 				let playerId = "\(post.id)_\(videoURL)"
 				let player = videoPlayerManager.player(for: videoURL, id: playerId)
+				let isVideoReady = videoReadyStates[playerId] ?? false
+				let hasVideoError = videoErrorStates[playerId] ?? false
 				
 				ZStack {
-					// Thumbnail placeholder while video loads
+					// Thumbnail placeholder while video loads or if video fails
 					if let thumbnailURL = mediaItem.thumbnailURL, !thumbnailURL.isEmpty, let url = URL(string: thumbnailURL) {
-						WebImage(url: url)
+						WebImage(url: url, options: [.lowPriority, .retryFailed, .scaleDownLargeImages, .progressiveLoad])
 							.resizable()
 							.indicator(.activity)
 							.aspectRatio(contentMode: .fill)
 							.frame(width: width, height: videoNaturalHeight)
 							.clipped()
+							.opacity(isVideoReady && !hasVideoError ? 0 : 1) // Hide when video is playing
 					} else {
 						// Fallback placeholder
 						Rectangle()
 							.fill(colorScheme == .dark ? Color.white.opacity(0.3) : Color.black.opacity(0.15))
 							.frame(width: width, height: videoNaturalHeight)
+							.opacity(isVideoReady && !hasVideoError ? 0 : 1) // Hide when video is playing
 					}
 					
-					VideoPlayer(player: player)
-						.allowsHitTesting(false)
-						.aspectRatio(contentMode: .fill)
-						.frame(width: width, height: videoNaturalHeight)
-						.clipped()
-						.onAppear {
+					// Show VideoPlayer when ready and no error, OR if player is actually playing
+					// This ensures the video shows even if state tracking is slightly off
+					let shouldShowVideo = (isVideoReady && !hasVideoError) || (player.rate > 0 && player.currentItem?.status == .readyToPlay)
+					if shouldShowVideo, let playerItem = player.currentItem, playerItem.status == .readyToPlay {
+						VideoPlayer(player: player)
+							.allowsHitTesting(false)
+							.aspectRatio(contentMode: .fill)
+							.frame(width: width, height: videoNaturalHeight)
+							.clipped()
+							.onAppear {
+								// Ensure video is playing when view appears
+								if player.rate == 0 && gridVideoManager.activeVideoIDs.contains(playerId) {
+									player.isMuted = true
+									player.play()
+								}
+							}
+					}
+				}
+				.onAppear {
+					// Check player item status
+					if let playerItem = player.currentItem {
+						// Update state based on current status
+						switch playerItem.status {
+						case .readyToPlay:
+							videoReadyStates[playerId] = true
+							videoErrorStates[playerId] = false
+						case .failed:
+							videoErrorStates[playerId] = true
+							videoReadyStates[playerId] = false
+						case .unknown:
+							// Observe status changes
+							let observer = playerItem.observe(\.status, options: [.new]) { item, _ in
+								Task { @MainActor in
+									switch item.status {
+									case .readyToPlay:
+										videoReadyStates[playerId] = true
+										videoErrorStates[playerId] = false
+									case .failed:
+										videoErrorStates[playerId] = true
+										videoReadyStates[playerId] = false
+									default:
+										break
+									}
+								}
+							}
+							// Store observer (will be cleaned up on disappear)
+							_ = observer
+						@unknown default:
+							break
+						}
+					}
 							// For single-video posts, ensure player is ready
 							if post.mediaItems.count == 1 && mediaItem.isVideo {
 								// Get the player from manager to ensure it's the same instance
@@ -893,7 +1028,6 @@ struct PinterestPostCard: View {
 							elapsedTime = 0.0
 						}
 				}
-			}
 			
 			// Duration Badge - at the top right (shows remaining time countdown)
 			// Only show for the currently visible video in carousel, or for single videos
@@ -1038,7 +1172,12 @@ struct PinterestPostCard: View {
 		// Only calculate for visible items to avoid unnecessary work
 		// Use background priority to not interfere with UI rendering
 		Task.detached(priority: .utility) {
-		for mediaItem in post.mediaItems {
+			// Capture post.mediaItems for use in detached task
+			let mediaItems = await MainActor.run {
+				post.mediaItems
+			}
+			
+			for mediaItem in mediaItems {
 				// Skip if already calculated (check on main actor)
 				let imageURL = mediaItem.isVideo ? mediaItem.thumbnailURL : mediaItem.imageURL
 				if let urlString = imageURL, !urlString.isEmpty {

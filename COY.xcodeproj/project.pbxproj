@@ -21,6 +21,7 @@
 		B245C9582EC9D0310051EF90 /* FirebaseStorage in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9572EC9D0310051EF90 /* FirebaseStorage */; };
 		B245C9642EC9D1000051EF90 /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9622EC9D1000051EF90 /* FirebaseMessaging */; };
 		B245C9652EC9D1000051EF90 /* FirebaseFunctions in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9632EC9D1000051EF90 /* FirebaseFunctions */; };
+		B25E46182EDD962D00A356EF /* FirebasePerformance in Frameworks */ = {isa = PBXBuildFile; productRef = B25E46172EDD962D00A356EF /* FirebasePerformance */; };
 		B28260D72ED4C9B400B94103 /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; productRef = B245C9612EC9D1000051EF90 /* GoogleMobileAds */; };
 		B2ABA0B12EDA84CC00AFDF61 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2ABA0B02EDA84CC00AFDF61 /* Network.framework */; };
 /* End PBXBuildFile section */
@@ -52,6 +53,7 @@
 				B245C7C72EC9C2900051EF90 /* FirebaseAnalytics in Frameworks */,
 				B245C9582EC9D0310051EF90 /* FirebaseStorage in Frameworks */,
 				B245C6062EC9B2260051EF90 /* SDWebImageSwiftUI in Frameworks */,
+				B25E46182EDD962D00A356EF /* FirebasePerformance in Frameworks */,
 				B245C6032EC9B1F30051EF90 /* SDWebImageMapKit in Frameworks */,
 				B245C7C92EC9C2900051EF90 /* FirebaseAnalyticsCore in Frameworks */,
 				B245C9522EC9CF320051EF90 /* FirebaseCore in Frameworks */,
@@ -125,6 +127,7 @@
 				B245C9612EC9D1000051EF90 /* GoogleMobileAds */,
 				B245C9622EC9D1000051EF90 /* FirebaseMessaging */,
 				B245C9632EC9D1000051EF90 /* FirebaseFunctions */,
+				B25E46172EDD962D00A356EF /* FirebasePerformance */,
 			);
 			productName = COY;
 			productReference = B245C4A62EC9A6530051EF90 /* COY.app */;
@@ -522,6 +525,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = B245C7C12EC9C2900051EF90 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseFunctions;
+		};
+		B25E46172EDD962D00A356EF /* FirebasePerformance */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B245C7C12EC9C2900051EF90 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebasePerformance;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

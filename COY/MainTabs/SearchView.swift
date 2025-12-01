@@ -70,8 +70,14 @@ struct SearchView: View {
 	var body: some View {
 		NavigationStack {
 			PhoneSizeContainer {
-				VStack(spacing: 0) {
-				header
+				ScrollViewReader { proxy in
+					VStack(spacing: 0) {
+						// Top anchor for scroll-to-top
+						Color.clear
+							.frame(height: 0)
+							.id("topAnchor")
+						
+						header
 				
 					searchBar
 						.padding(.horizontal)
@@ -84,6 +90,12 @@ struct SearchView: View {
 				content
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
 				}
+				.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ScrollToTopSearch"))) { _ in
+					withAnimation {
+						proxy.scrollTo("topAnchor", anchor: .top)
+					}
+				}
+			}
 			}
 			.navigationBarHidden(true)
 			.navigationDestination(isPresented: $showingInsideCollection) {
@@ -519,8 +531,9 @@ struct SearchView: View {
 		}
 	}
 	
-	// MARK: - Pull-to-Refresh with Reordering
-	/// Refresh discover feed: Check for new content, reorder if none found
+	// MARK: - Pull-to-Refresh with Complete Fresh Reload
+	/// Complete refresh: Clear all caches, reload current user, reload everything from scratch
+	/// Uses Discover algorithm when no search query (discover mode)
 	@MainActor
 	private func refreshDiscoverFeed() async {
 		let query = searchText.isEmpty ? nil : searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -531,12 +544,26 @@ struct SearchView: View {
 			return
 		}
 		
-		// Load hidden collection IDs
+		print("🔄 SearchView: Starting COMPLETE refresh (equivalent to app restart)")
+		
+		// Step 1: Clear ALL caches first (including user profile caches)
+		DiscoverCache.shared.clearCache()
+		CollectionPostsCache.shared.clearAllCache()
+		HomeViewCache.shared.clearCache()
+		// Clear user profile caches to force fresh profile image/name loads
+		UserService.shared.clearUserCache(userId: currentUserId)
+		print("✅ SearchView: Cleared all caches (including user profile caches)")
+		
+		// Step 2: Reload current user data (blocked users, hidden collections, etc.) - FORCE FRESH
 		do {
+			// Stop existing listener and reload fresh
+			CYServiceManager.shared.stopListening()
 			try await CYServiceManager.shared.loadCurrentUser()
+			print("✅ SearchView: Reloaded current user data (fresh from Firestore)")
 		} catch {
-			print("Error loading current user: \(error.localizedDescription)")
+			print("⚠️ SearchView: Error reloading current user: \(error.localizedDescription)")
 		}
+		
 		let hiddenCollectionIds = Set(CYServiceManager.shared.getHiddenCollectionIds())
 		
 		switch selectedTab {
@@ -545,9 +572,18 @@ struct SearchView: View {
 		case 1:
 			await refreshPosts(query: query, currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
 		case 2:
-			await refreshUsers(query: query)
+			await searchUsernames(query: query)
 		default:
 			break
+		}
+	}
+	
+	private func refreshPosts(query: String?, currentUserId: String, hiddenCollectionIds: Set<String>) async {
+		// Fetch fresh data (cache already cleared in refreshDiscoverFeed)
+		if query == nil || query?.isEmpty == true {
+			await loadDiscoverPosts(currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
+		} else {
+			await searchPosts(query: query, currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
 		}
 	}
 	
@@ -587,7 +623,12 @@ struct SearchView: View {
 		
 		switch selectedTab {
 		case 0:
-			await searchCollections(query: query, currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
+			// Use Discover algorithm when no search query (discover mode)
+			if query == nil || query?.isEmpty == true {
+				await loadDiscoverCollections(currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
+			} else {
+				await searchCollections(query: query, currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
+			}
 			// Cache the results
 			let cached = DiscoverCache.shared.getCachedData()
 			DiscoverCache.shared.setCachedData(
@@ -597,7 +638,12 @@ struct SearchView: View {
 				users: cached.users
 			)
 		case 1:
-			await searchPosts(query: query, currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
+			// Use Discover algorithm when no search query (discover mode)
+			if query == nil || query?.isEmpty == true {
+				await loadDiscoverPosts(currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
+			} else {
+				await searchPosts(query: query, currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
+			}
 			// Cache the results
 			let cached = DiscoverCache.shared.getCachedData()
 			DiscoverCache.shared.setCachedData(
@@ -628,40 +674,43 @@ struct SearchView: View {
 		
 		do {
 			let db = Firestore.firestore()
-			let queryRef: Query = db.collection("collections")
 			
-			// Always load public collections, then filter in memory so search is
-			// case-insensitive and works with emojis and partial matches.
-			// Try query with index first, fallback to query without ordering if index is missing.
+			// Query ALL collections (same approach as ViewerProfileView - get all, then filter by access)
+			// This ensures private collections with allowedUsers access appear in Discover
+			print("🔍 SearchView: Querying ALL collections for Discover (will filter by access)...")
+			var allCollections: [CollectionData] = []
+			
+			// Query with a reasonable limit - we'll filter client-side using canUserViewCollection
 			var snapshot: QuerySnapshot
 			var needsSorting = false
 			do {
-				snapshot = try await queryRef
-					.whereField("isPublic", isEqualTo: true)
+				snapshot = try await db.collection("collections")
 					.order(by: "createdAt", descending: true)
-					.limit(to: 50)
+					.limit(to: 500)
 					.getDocuments()
 			} catch {
 				if error.localizedDescription.contains("index") {
 					print("⚠️ SearchView: Index missing, using fallback query (unsorted)")
 					needsSorting = true
-					snapshot = try await queryRef
-						.whereField("isPublic", isEqualTo: true)
-						.limit(to: 50)
+					snapshot = try await db.collection("collections")
+						.limit(to: 500)
 						.getDocuments()
 				} else {
 					throw error
 				}
 			}
 			
-			var allCollections = snapshot.documents.compactMap { doc -> CollectionData? in
+			print("✅ SearchView: Found \(snapshot.documents.count) total collections from Firestore")
+			
+			// Convert all documents and filter by access using canUserViewCollection (same as ViewerProfileView)
+			allCollections = snapshot.documents.compactMap { doc -> CollectionData? in
 				let data = doc.data()
 				let ownerId = data["ownerId"] as? String ?? ""
 				let ownersArray = data["owners"] as? [String]
 				let owners = ownersArray ?? [ownerId]
 				let createdAt = (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
 				
-				return CollectionData(
+				let collection = CollectionData(
 					id: doc.documentID,
 					name: data["name"] as? String ?? "",
 					description: data["description"] as? String ?? "",
@@ -680,13 +729,29 @@ struct SearchView: View {
 					deniedUsers: data["deniedUsers"] as? [String] ?? [],
 					createdAt: createdAt
 				)
+				
+				// Filter using canUserViewCollection (same logic as ViewerProfileView)
+				// This ensures private collections with allowedUsers access are included
+				if CollectionService.canUserViewCollection(collection, userId: currentUserId) {
+					if collection.allowedUsers.contains(currentUserId) {
+						print("✅ SearchView: Added allowedUsers collection: \(collection.name) (ID: \(doc.documentID))")
+					}
+					return collection
+				} else {
+					if collection.allowedUsers.contains(currentUserId) {
+						print("❌ SearchView: Collection '\(collection.name)' has user in allowedUsers but canUserViewCollection returned false")
+					}
+					return nil
+				}
 			}
+			
+			print("📊 SearchView: After canUserViewCollection filter: \(allCollections.count) accessible collections")
 			
 			if needsSorting {
 				allCollections.sort { $0.createdAt > $1.createdAt }
 			}
 			
-			// Filter out owned/member/hidden/followed
+			// Filter out owned/member/hidden/followed (for Discover - don't show collections user already owns/is member of/follows)
 			var filteredCollections = allCollections.filter { collection in
 				if collection.ownerId == currentUserId { return false }
 				if collection.members.contains(currentUserId) { return false }
@@ -694,6 +759,8 @@ struct SearchView: View {
 				if collection.followers.contains(currentUserId) { return false }
 				return true
 			}
+			
+			print("📊 SearchView: After filtering owned/member/hidden/followed: \(filteredCollections.count) collections")
 			
 			// If user typed something, filter by collection name (case-insensitive, emojis ok)
 			if let query = query, !query.isEmpty {
@@ -716,38 +783,7 @@ struct SearchView: View {
 			}
 			filteredCollections = finalFiltered
 			
-			// Check if we have new collections compared to cached data
-			if DiscoverCache.shared.hasDataLoaded() && query == nil {
-				let cached = DiscoverCache.shared.getCachedData()
-				let cachedCollectionIds = Set(cached.collections.map { $0.id })
-				let newCollectionIds = Set(filteredCollections.map { $0.id })
-				let hasNewCollections = !newCollectionIds.subtracting(cachedCollectionIds).isEmpty
-				
-				if hasNewCollections {
-					// New collections found - use them
-					collections = filteredCollections
-					// Update cache
-					DiscoverCache.shared.setCachedData(
-						collections: filteredCollections,
-						posts: cached.posts,
-						postsMap: cached.postsMap,
-						users: cached.users
-					)
-				} else {
-					// No new collections - reorder/shuffle existing feed
-					var reorderedCollections = cached.collections
-					reorderedCollections.shuffle()
-					collections = reorderedCollections
-					// Update cache with reordered collections
-					DiscoverCache.shared.setCachedData(
-						collections: reorderedCollections,
-						posts: cached.posts,
-						postsMap: cached.postsMap,
-						users: cached.users
-					)
-				}
-			} else {
-				// No cached data or search query exists - use new results
+			// Always use fresh filtered collections (shuffling/reordering happens in refreshCollections)
 				collections = filteredCollections
 				// Update cache
 				let cached = DiscoverCache.shared.getCachedData()
@@ -757,7 +793,6 @@ struct SearchView: View {
 					postsMap: cached.postsMap,
 					users: cached.users
 				)
-			}
 			
 			// Initialize follow & membership status
 			for collection in collections {
@@ -774,21 +809,102 @@ struct SearchView: View {
 	
 	@MainActor
 	private func refreshCollections(query: String?, currentUserId: String, hiddenCollectionIds: Set<String>) async {
-		// Store current collection IDs to check for new content
-		let currentCollectionIds = Set(collections.map { $0.id })
+		// Fetch fresh data (cache already cleared in refreshDiscoverFeed)
+		if query == nil || query?.isEmpty == true {
+			await loadDiscoverCollections(currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
+		} else {
+			await searchCollections(query: query, currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
+		}
+	}
+	
+	// MARK: - Discover Feed Loading (Rule-Based Algorithm)
+	@MainActor
+	private func loadDiscoverCollections(currentUserId: String, hiddenCollectionIds: Set<String>) async {
+		isLoadingCollections = true
+		defer { isLoadingCollections = false }
 		
-		// Fetch fresh data
-		await searchCollections(query: query, currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
+		do {
+			// Use DiscoverFeedService to load and rank collections
+			let excludeCollectionIds = Set(hiddenCollectionIds)
+			let result = try await DiscoverFeedService.shared.loadDiscoverFeed(
+				currentUserId: currentUserId,
+				limit: 100,
+				excludeCollectionIds: excludeCollectionIds
+			)
+			
+			// Filter out hidden collections
+			let filteredCollections = result.collections.filter { collection in
+				!hiddenCollectionIds.contains(collection.id)
+			}
+			
+			// Additional filtering for blocked users
+			var finalFiltered: [CollectionData] = []
+			for collection in filteredCollections {
+				let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: collection.ownerId)
+				if !areMutuallyBlocked {
+					finalFiltered.append(collection)
+				}
+			}
+			
+			collections = finalFiltered
+			
+			// Initialize follow & membership status
+			for collection in collections {
+				followStatus[collection.id] = collection.followers.contains(currentUserId)
+				membershipStatus[collection.id] = collection.members.contains(currentUserId) || collection.owners.contains(currentUserId)
+			}
+			
+			await CollectionRequestStateManager.shared.initializeState()
+			
+			print("✅ DiscoverFeedService: Loaded \(collections.count) ranked collections for Discover feed")
+		} catch {
+			print("❌ DiscoverFeedService: Error loading discover collections: \(error)")
+			collections = []
+		}
+	}
+	
+	@MainActor
+	private func loadDiscoverPosts(currentUserId: String, hiddenCollectionIds: Set<String>) async {
+		isLoadingPosts = true
+		defer { isLoadingPosts = false }
 		
-		// Check if we have new collections
-		let newCollectionIds = Set(collections.map { $0.id })
-		let hasNewCollections = !newCollectionIds.subtracting(currentCollectionIds).isEmpty
-		
-		// If active search and no new collections, reorder existing results
-		if query != nil && !hasNewCollections && !collections.isEmpty {
-			var reorderedCollections = collections
-			reorderedCollections.shuffle()
-			collections = reorderedCollections
+		do {
+			// Use DiscoverFeedService to load and rank posts
+			let excludeCollectionIds = Set(hiddenCollectionIds)
+			let result = try await DiscoverFeedService.shared.loadDiscoverFeed(
+				currentUserId: currentUserId,
+				limit: 100,
+				excludeCollectionIds: excludeCollectionIds
+			)
+			
+			// Filter out posts from hidden collections and blocked users
+			var filteredPosts: [(post: CollectionPost, collection: CollectionData)] = []
+			var newPostsCollectionMap: [String: CollectionData] = [:]
+			
+			for item in result.posts {
+				// Skip if collection is hidden
+				if hiddenCollectionIds.contains(item.collection.id) { continue }
+				
+				// Check if collection owner is blocked
+				let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: item.collection.ownerId)
+				if areMutuallyBlocked { continue }
+				
+				// Check if post author is blocked
+				let isAuthorBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: item.post.authorId)
+				if isAuthorBlocked { continue }
+				
+				filteredPosts.append(item)
+				newPostsCollectionMap[item.post.id] = item.collection
+			}
+			
+			posts = filteredPosts.map { $0.post }
+			postsCollectionMap = newPostsCollectionMap
+			
+			print("✅ DiscoverFeedService: Loaded \(posts.count) ranked posts for Discover feed")
+		} catch {
+			print("❌ DiscoverFeedService: Error loading discover posts: \(error)")
+			posts = []
+			postsCollectionMap = [:]
 		}
 	}
 			
@@ -920,43 +1036,11 @@ struct SearchView: View {
 				filteredPosts.contains(where: { $0.id == key })
 			}
 			
-			// Check if we have new posts compared to cached data
-			if DiscoverCache.shared.hasDataLoaded() && query == nil {
-				let cached = DiscoverCache.shared.getCachedData()
-				let cachedPostIds = Set(cached.posts.map { $0.id })
-				let newPostIds = Set(filteredPosts.map { $0.id })
-				let hasNewPosts = !newPostIds.subtracting(cachedPostIds).isEmpty
-				
-				if hasNewPosts {
-					// New posts found - use them
+			// Always use fresh data from Firestore (cache was cleared in refreshDiscoverFeed)
+			// This ensures deleted posts are removed and new posts appear
 					posts = filteredPosts
 					postsCollectionMap = finalPostsMap
-					// Update cache
-					DiscoverCache.shared.setCachedData(
-						collections: cached.collections,
-						posts: filteredPosts,
-						postsMap: finalPostsMap,
-						users: cached.users
-					)
-				} else {
-					// No new posts - reorder/shuffle existing feed
-					var reorderedPosts = cached.posts
-					reorderedPosts.shuffle()
-					posts = reorderedPosts
-					postsCollectionMap = cached.postsMap
-					// Update cache with reordered posts
-					DiscoverCache.shared.setCachedData(
-						collections: cached.collections,
-						posts: reorderedPosts,
-						postsMap: cached.postsMap,
-						users: cached.users
-					)
-				}
-			} else {
-				// No cached data or search query exists - use new results
-				posts = filteredPosts
-				postsCollectionMap = finalPostsMap
-				// Update cache
+			// Update cache with fresh data
 				let cached = DiscoverCache.shared.getCachedData()
 				DiscoverCache.shared.setCachedData(
 					collections: cached.collections,
@@ -964,38 +1048,9 @@ struct SearchView: View {
 					postsMap: finalPostsMap,
 					users: cached.users
 				)
-			}
 		} catch {
 			print("Error searching posts: \(error.localizedDescription)")
 			posts = []
-		}
-	}
-	
-	@MainActor
-	private func refreshPosts(query: String?, currentUserId: String, hiddenCollectionIds: Set<String>) async {
-		// Store current post IDs to check for new content
-		let currentPostIds = Set(posts.map { $0.id })
-		
-		// Fetch fresh data
-		await searchPosts(query: query, currentUserId: currentUserId, hiddenCollectionIds: hiddenCollectionIds)
-		
-		// Check if we have new posts
-		let newPostIds = Set(posts.map { $0.id })
-		let hasNewPosts = !newPostIds.subtracting(currentPostIds).isEmpty
-		
-		// If active search and no new posts, reorder existing results
-		if query != nil && !hasNewPosts && !posts.isEmpty {
-			var reorderedPosts = posts
-			reorderedPosts.shuffle()
-			posts = reorderedPosts
-			// Also shuffle the postsCollectionMap to match
-			var shuffledMap: [String: CollectionData] = [:]
-			for post in reorderedPosts {
-				if let collection = postsCollectionMap[post.id] {
-					shuffledMap[post.id] = collection
-				}
-			}
-			postsCollectionMap = shuffledMap
 		}
 	}
 	
@@ -1010,7 +1065,6 @@ struct SearchView: View {
 		
 		do {
 			let db = Firestore.firestore()
-			let friendService = FriendService.shared
 			var foundUsers: [UserSearchResult] = []
 			
 			if let query = query, !query.isEmpty {
@@ -1029,8 +1083,12 @@ struct SearchView: View {
 						let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: doc.documentID)
 						
 						if !areMutuallyBlocked && doc.documentID != currentUserId {
+							let userId = doc.documentID
+							// Subscribe to real-time updates for this user
+							UserService.shared.subscribeToUserProfile(userId: userId)
+							
 							foundUsers.append(UserSearchResult(
-								id: doc.documentID,
+								id: userId,
 								name: data["name"] as? String ?? "",
 								username: data["username"] as? String ?? "",
 								profileImageURL: data["profileImageURL"] as? String
@@ -1049,8 +1107,12 @@ struct SearchView: View {
 					// Check mutual blocking
 					let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: doc.documentID)
 					if !areMutuallyBlocked {
+						let userId = doc.documentID
+						// Subscribe to real-time updates for this user
+						UserService.shared.subscribeToUserProfile(userId: userId)
+						
 						foundUsers.append(UserSearchResult(
-							id: doc.documentID,
+							id: userId,
 							name: data["name"] as? String ?? "",
 							username: data["username"] as? String ?? "",
 							profileImageURL: data["profileImageURL"] as? String
@@ -1059,40 +1121,10 @@ struct SearchView: View {
 				}
 			}
 			
-			// Check if we have new users compared to cached data
-			if DiscoverCache.shared.hasDataLoaded() && query == nil {
-				let cached = DiscoverCache.shared.getCachedData()
-				let cachedUserIds = Set(cached.users.map { $0.id })
-				let newUserIds = Set(foundUsers.map { $0.id })
-				let hasNewUsers = !newUserIds.subtracting(cachedUserIds).isEmpty
-				
-				if hasNewUsers {
-					// New users found - use them
+			// Always use fresh data from Firestore (cache was cleared in refreshDiscoverFeed)
+			// This ensures updated user profiles appear
 					users = foundUsers
-					// Update cache
-					DiscoverCache.shared.setCachedData(
-						collections: cached.collections,
-						posts: cached.posts,
-						postsMap: cached.postsMap,
-						users: foundUsers
-					)
-				} else {
-					// No new users - reorder/shuffle existing feed
-					var reorderedUsers = cached.users
-					reorderedUsers.shuffle()
-					users = reorderedUsers
-					// Update cache with reordered users
-					DiscoverCache.shared.setCachedData(
-						collections: cached.collections,
-						posts: cached.posts,
-						postsMap: cached.postsMap,
-						users: reorderedUsers
-					)
-				}
-			} else {
-				// No cached data or search query exists - use new results
-				users = foundUsers
-				// Update cache
+			// Update cache with fresh data
 				let cached = DiscoverCache.shared.getCachedData()
 				DiscoverCache.shared.setCachedData(
 					collections: cached.collections,
@@ -1100,7 +1132,6 @@ struct SearchView: View {
 					postsMap: cached.postsMap,
 					users: foundUsers
 				)
-			}
 		} catch {
 			print("Error searching usernames: \(error)")
 			users = []
@@ -1111,21 +1142,25 @@ struct SearchView: View {
 	
 	@MainActor
 	private func refreshUsers(query: String?) async {
-		// Store current user IDs to check for new content
-		let currentUserIds = Set(users.map { $0.id })
-		
-		// Fetch fresh data
+		// Fetch fresh data (cache already cleared in refreshDiscoverFeed)
 		await searchUsernames(query: query)
 		
-		// Check if we have new users
-		let newUserIds = Set(users.map { $0.id })
-		let hasNewUsers = !newUserIds.subtracting(currentUserIds).isEmpty
-		
-		// If active search and no new users, reorder existing results
-		if query != nil && !hasNewUsers && !users.isEmpty {
-			var reorderedUsers = users
-			reorderedUsers.shuffle()
-			users = reorderedUsers
+		// Always shuffle/reorder users on refresh to show different content
+		if !users.isEmpty {
+			// Apply varied sorting strategy (random, alphabetical)
+			let strategy = Int.random(in: 0..<2)
+			switch strategy {
+			case 0:
+				// Random shuffle
+				users.shuffle()
+				print("🔄 SearchView: Shuffled users randomly")
+			case 1:
+				// Alphabetical by name
+				users.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+				print("🔄 SearchView: Sorted users alphabetically")
+			default:
+				users.shuffle()
+			}
 		}
 	}
 	
@@ -1348,23 +1383,28 @@ struct UserSearchResult: Identifiable {
 // MARK: - User Search Card
 struct UserSearchCard: View {
 	let user: UserSearchResult
+	@State private var displayName: String = ""
+	@State private var displayUsername: String = ""
+	@State private var displayProfileImageURL: String? = nil
 	
 	var body: some View {
 		HStack(spacing: 12) {
-			if let imageURL = user.profileImageURL, !imageURL.isEmpty {
+			// Profile Image - real-time updates
+			if let imageURL = displayProfileImageURL, !imageURL.isEmpty {
 				CachedProfileImageView(url: imageURL, size: 50)
 					.clipShape(Circle())
 			} else {
 				DefaultProfileImageView(size: 50)
 			}
 			
+			// Name and Username - real-time updates
 			VStack(alignment: .leading, spacing: 4) {
-				Text(user.name)
+				Text(displayName.isEmpty ? user.name : displayName)
 					.font(.system(size: 16, weight: .semibold))
 					.foregroundColor(.primary)
 					.lineLimit(1)
 				
-				Text("@\(user.username)")
+				Text("@\(displayUsername.isEmpty ? user.username : displayUsername)")
 					.font(.system(size: 14))
 					.foregroundColor(.secondary)
 					.lineLimit(1)
@@ -1373,5 +1413,30 @@ struct UserSearchCard: View {
 			Spacer()
 		}
 		.padding(.vertical, 8)
+		.onAppear {
+			// Initialize with user data
+			displayName = user.name
+			displayUsername = user.username
+			displayProfileImageURL = user.profileImageURL
+			
+			// Subscribe to real-time updates for this user
+			UserService.shared.subscribeToUserProfile(userId: user.id)
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserProfileUpdated"))) { notification in
+			// Update display when user profile changes
+			if let updatedUserId = notification.object as? String,
+			   updatedUserId == user.id,
+			   let userInfo = notification.userInfo {
+				if let newName = userInfo["name"] as? String {
+					displayName = newName
+				}
+				if let newUsername = userInfo["username"] as? String {
+					displayUsername = newUsername
+				}
+				if let newProfileImageURL = userInfo["profileImageURL"] as? String {
+					displayProfileImageURL = newProfileImageURL.isEmpty ? nil : newProfileImageURL
+				}
+			}
+		}
 	}
 }

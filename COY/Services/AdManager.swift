@@ -157,16 +157,21 @@ class AdManager: NSObject, ObservableObject {
 		
 		// Load ad request (test mode is automatic for simulators, and we use test ad unit IDs in DEBUG)
 		let request = GADRequest()
-		#if DEBUG
-		print("🔍 AdManager: Loading native ad with test unit ID: \(adUnitID) for key: \(adKey)")
-		#endif
+		// Reduced logging to improve performance
 		adLoader.load(request)
 	}
 	
-	/// Preload multiple native ads for a specific location
-	func preloadNativeAds(count: Int = 5, location: AdLocation = .home) {
-		for i in 0..<count {
-			loadNativeAd(adKey: "preload_\(i)", location: location) { _ in }
+	/// Preload multiple native ads for a specific location (throttled to prevent overload)
+	func preloadNativeAds(count: Int = 3, location: AdLocation = .home) {
+		// Throttle ad loading to prevent overwhelming the system
+		Task { @MainActor in
+			for i in 0..<count {
+				// Add delay between ad loads to prevent simultaneous requests
+				if i > 0 {
+					try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 second delay
+				}
+				loadNativeAd(adKey: "preload_\(i)", location: location) { _ in }
+			}
 		}
 	}
 	
@@ -220,9 +225,6 @@ class AdManager: NSObject, ObservableObject {
 		carouselLoadedAds[adKey] = []
 		
 		let request = GADRequest()
-		#if DEBUG
-		print("🔍 AdManager: Loading carousel ads (4 ads) with test unit ID: \(adUnitID) for key: \(adKey)")
-		#endif
 		
 		adLoader.load(request)
 	}
@@ -249,9 +251,6 @@ class AdManager: NSObject, ObservableObject {
 	func loadInterstitialAd() {
 		let request = GADRequest()
 		let adUnitID = getInterstitialAdUnitID() // Use proper interstitial ad unit ID
-		#if DEBUG
-		print("🔍 AdManager: Loading interstitial ad with unit ID: \(adUnitID)")
-		#endif
 		GADInterstitialAd.load(withAdUnitID: adUnitID, request: request) { [weak self] ad, error in
 			guard let self = self else { return }
 			if let error = error {
@@ -364,7 +363,6 @@ extension AdManager: GADAdLoaderDelegate {
 // MARK: - GADNativeAdLoaderDelegate
 extension AdManager: GADNativeAdLoaderDelegate {
 	func adLoader(_ adLoader: GADAdLoader, didReceive nativeAd: GADNativeAd) {
-		print("✅ AdManager: Native ad received successfully")
 		
 		// Check if this is a carousel ad loader (multiple ads)
 		if let carouselKey = carouselAdLoaders.first(where: { $0.value == adLoader })?.key {
@@ -373,13 +371,11 @@ extension AdManager: GADNativeAdLoaderDelegate {
 				carouselLoadedAds[carouselKey] = []
 			}
 			carouselLoadedAds[carouselKey]?.append(nativeAd)
-			print("✅ Carousel ad \(carouselLoadedAds[carouselKey]?.count ?? 0) loaded for key: \(carouselKey)")
 			
 			// Don't call completion yet - wait for adLoaderDidFinishLoading
 		} else if let key = nativeAdLoaders.first(where: { $0.value == adLoader })?.key {
 			// Single native ad
 			nativeAdCache[key] = nativeAd
-			print("✅ Native ad loaded for key: \(key)")
 			
 			// Call all completion handlers
 			if let handlers = adCompletionHandlers[key] {

@@ -473,40 +473,46 @@ struct CYBuildCollectionDesign: View {
 			}
 		}
 		
-		// Dismiss immediately and create in background for better UX
-		await MainActor.run {
-			self.dismiss()
-		}
-		
-		// Create collection in background
-		Task.detached(priority: .userInitiated) {
-			do {
-				let collectionId = try await CollectionService.shared.createCollection(
-					name: self.collectionName,
-					description: self.description,
-					type: collectionType,
-					isPublic: self.isPublic,
-					ownerId: user.uid,
-					ownerName: user.displayName ?? "Unknown",
-					image: self.selectedImage,
-					invitedUsers: Array(self.invitedUsers)
+		// Create collection first, then dismiss and navigate
+		do {
+			let collectionId = try await CollectionService.shared.createCollection(
+				name: self.collectionName,
+				description: self.description,
+				type: collectionType,
+				isPublic: self.isPublic,
+				ownerId: user.uid,
+				ownerName: user.displayName ?? "Unknown",
+				image: self.selectedImage,
+				invitedUsers: Array(self.invitedUsers)
+			)
+			
+			print("✅ Successfully created collection with ID: \(collectionId)")
+			
+			// Post notification with the new collection ID to add it without reloading
+			await MainActor.run {
+				print("📢 Posting CollectionCreated notification with ID: \(collectionId)")
+				NotificationCenter.default.post(
+					name: NSNotification.Name("CollectionCreated"),
+					object: collectionId
 				)
 				
-				print("✅ Successfully created collection with ID: \(collectionId)")
+				// Switch to Profile tab (tab 4) to show the new collection
+				NotificationCenter.default.post(
+					name: NSNotification.Name("SwitchToTab"),
+					object: nil,
+					userInfo: ["tabIndex": 4]
+				)
 				
-				// Post notification with the new collection ID to add it without reloading
-				await MainActor.run {
-					print("📢 Posting CollectionCreated notification with ID: \(collectionId)")
-					NotificationCenter.default.post(
-						name: NSNotification.Name("CollectionCreated"),
-						object: collectionId
-					)
-				}
-				
-			} catch {
-				await MainActor.run {
-					print("❌ Failed to create collection: \(error.localizedDescription)")
-				}
+				// Dismiss the view
+				self.dismiss()
+			}
+			
+		} catch {
+			await MainActor.run {
+				print("❌ Failed to create collection: \(error.localizedDescription)")
+				self.isCreating = false
+				self.errorMessage = error.localizedDescription
+				self.showErrorAlert = true
 			}
 		}
 	}

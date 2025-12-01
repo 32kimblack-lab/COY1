@@ -497,6 +497,41 @@ struct ChatScreen: View {
 		}
 	}
 	
+	// MARK: - Complete Refresh (Pull-to-Refresh)
+	/// Complete refresh: Clear all caches, reload user data, reload everything from scratch
+	/// Equivalent to exiting and re-entering the app
+	private func completeRefresh() async {
+		guard let currentUid = Auth.auth().currentUser?.uid else { return }
+		
+		print("🔄 ChatScreen: Starting COMPLETE refresh (equivalent to app restart)")
+		
+		// Step 1: Clear ALL caches first (including user profile caches)
+		await MainActor.run {
+			HomeViewCache.shared.clearCache()
+			CollectionPostsCache.shared.clearAllCache()
+			// Clear user profile caches to force fresh profile image/name loads
+			UserService.shared.clearUserCache(userId: otherUserId)
+			UserService.shared.clearUserCache(userId: currentUid)
+			print("✅ ChatScreen: Cleared all caches (including user profile caches)")
+		}
+		
+		// Step 2: Reload current user data - FORCE FRESH
+		do {
+			// Stop existing listener and reload fresh
+			CYServiceManager.shared.stopListening()
+			try await CYServiceManager.shared.loadCurrentUser()
+			print("✅ ChatScreen: Reloaded current user data (fresh from Firestore)")
+		} catch {
+			print("⚠️ ChatScreen: Error reloading current user: \(error)")
+		}
+		
+		// Step 3: Reload other user data, chat room, and messages - FORCE FRESH
+		loadOtherUser()
+		loadCurrentUser()
+		loadChatRoom()
+		loadMessages()
+	}
+	
 	private func loadMessages() {
 		Task {
 			// Check if user is blocked before loading messages
@@ -1367,6 +1402,10 @@ struct ChatScreen: View {
 					.padding()
 			}
 			.scrollDismissesKeyboard(.interactively)
+			.refreshable {
+				// Complete refresh: Clear all caches and force fresh reload
+				await completeRefresh()
+			}
 			.onAppear {
 				scrollToBottomOnAppear(proxy: proxy)
 			}

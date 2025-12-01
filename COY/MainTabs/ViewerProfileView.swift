@@ -107,11 +107,25 @@ struct ViewerProfileView: View {
 				.frame(maxWidth: .infinity, maxHeight: .infinity)
 				.background(colorScheme == .dark ? Color.black : Color.white)
 			} else {
+			GeometryReader { geometry in
 			ZStack(alignment: .top) {
 				// Background
 				(colorScheme == .dark ? Color.black : Color.white)
 					.ignoresSafeArea()
 				
+					// Background Image - Full width, outside PhoneSizeContainer constraints
+					if !isUserBlocked, let backgroundImageURL = user?.backgroundImageURL, !backgroundImageURL.isEmpty {
+						CachedBackgroundImageView(
+							url: backgroundImageURL,
+							height: 105
+						)
+						.aspectRatio(contentMode: .fill)
+						.frame(width: geometry.size.width, height: 105)
+						.clipped()
+						.ignoresSafeArea(edges: .top)
+						.id("\(profileRefreshTrigger)-\(backgroundImageURL)")
+					}
+					
 				// Main content
 				VStack(spacing: 0) {
 					// Profile Header Section
@@ -121,6 +135,7 @@ struct ViewerProfileView: View {
 					if !isUserBlocked {
 						userCollectionsSection
 							.padding(.top, -20)
+							}
 						}
 					}
 				}
@@ -254,8 +269,8 @@ struct ViewerProfileView: View {
 			}
 		}
 		.refreshable {
-			// Simple refresh - just reload collections, real-time listener handles profile updates
-			await loadUserCollections(forceFresh: true)
+			// Complete refresh: Clear all caches and force fresh reload
+			await completeRefresh()
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionDeleted"))) { notification in
 			if let deletedId = notification.object as? String {
@@ -387,22 +402,12 @@ struct ViewerProfileView: View {
 	// MARK: - Profile Header Section
 	private var profileHeaderSection: some View {
 		ZStack(alignment: .topLeading) {
-			// Background Image - Fixed height of 105
-			if !isUserBlocked {
-				if let backgroundImageURL = user?.backgroundImageURL, !backgroundImageURL.isEmpty {
-					CachedBackgroundImageView(
-						url: backgroundImageURL,
-						height: 105
-					)
-					.aspectRatio(contentMode: .fill)
+			// Background Image Area - Always reserve 105 points height, whether image exists or not
+			// Note: Background image is now rendered in body to extend full width
+			Color.clear
 					.frame(height: 105)
 					.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-					.clipped()
-					.cornerRadius(0)
 					.ignoresSafeArea(edges: .top)
-					.id("\(profileRefreshTrigger)-\(backgroundImageURL)")
-				}
-			}
 			
 			// Top Buttons Row
 			VStack {
@@ -582,9 +587,9 @@ struct ViewerProfileView: View {
 					Spacer()
 				}
 				.frame(height: 80)
-			} else if userCollections.isEmpty {
-				VStack {
-					Spacer()
+			} else {
+				List {
+					if userCollections.isEmpty {
 					VStack(spacing: 12) {
 						Text("No Collections")
 							.font(.headline)
@@ -596,12 +601,11 @@ struct ViewerProfileView: View {
 							.multilineTextAlignment(.center)
 							.padding(.horizontal, 20)
 					}
-					Spacer()
-				}
-				.frame(height: 600)
 				.frame(maxWidth: .infinity)
+						.listRowInsets(EdgeInsets())
+						.listRowSeparator(.hidden)
+						.listRowBackground(Color.clear)
 			} else {
-				List {
 					ForEach(sortedCollections, id: \.id) { collection in
 						SimpleCollectionRow(
 							collection: collection,
@@ -619,12 +623,16 @@ struct ViewerProfileView: View {
 						.listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
 						.listRowSeparator(.hidden)
 						.listRowBackground(Color.clear)
+						}
 					}
 				}
 				.listStyle(PlainListStyle())
 				.scrollContentBackground(.hidden)
 				.background(Color.clear)
 				.environment(\.defaultMinListRowHeight, 80)
+				.refreshable {
+					await loadUserCollections(forceFresh: true)
+				}
 			}
 		}
 	}
@@ -677,6 +685,39 @@ struct ViewerProfileView: View {
 				}
 			}
 		}
+	}
+	
+	// MARK: - Complete Refresh (Pull-to-Refresh)
+	/// Complete refresh: Clear all caches, reload user data, reload everything from scratch
+	/// Equivalent to exiting and re-entering the app
+	private func completeRefresh() async {
+		guard let currentUserId = authService.user?.uid else { return }
+		
+		print("🔄 ViewerProfileView: Starting COMPLETE refresh (equivalent to app restart)")
+		
+		// Step 1: Clear ALL caches first (including user profile caches)
+		await MainActor.run {
+			CollectionPostsCache.shared.clearAllCache()
+			HomeViewCache.shared.clearCache()
+			// Clear user profile caches to force fresh profile image/name loads
+			UserService.shared.clearUserCache(userId: userId)
+			UserService.shared.clearUserCache(userId: currentUserId)
+			print("✅ ViewerProfileView: Cleared all caches (including user profile caches)")
+		}
+		
+		// Step 2: Reload current user data - FORCE FRESH
+		do {
+			// Stop existing listener and reload fresh
+			CYServiceManager.shared.stopListening()
+			try await CYServiceManager.shared.loadCurrentUser()
+			print("✅ ViewerProfileView: Reloaded current user data (fresh from Firestore)")
+		} catch {
+			print("⚠️ ViewerProfileView: Error reloading current user: \(error)")
+		}
+		
+		// Step 3: Reload viewed user data and collections - FORCE FRESH
+		await loadUserData()
+		await loadUserCollections(forceFresh: true)
 	}
 	
 	private func loadUserCollections(forceFresh: Bool = false) async {

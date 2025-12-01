@@ -173,8 +173,11 @@ struct AddFriendsScreen: View {
 				loadOutgoingRequests()
 				loadAllUsers()
 				setupFriendRequestListeners()
-				// Mark all friend requests as seen when screen appears
-				markFriendRequestsAsSeen()
+				// Update friend request count on appear
+				updateFriendRequestCount()
+				// Note: We don't mark requests as seen here anymore
+				// The badge count should show ALL pending requests until they're accepted/denied
+				// markFriendRequestsAsSeen() // REMOVED - count should persist
 			}
 			.onDisappear {
 				incomingRequestsListener?.remove()
@@ -193,6 +196,8 @@ struct AddFriendsScreen: View {
 				if let deniedUid = notification.object as? String {
 					incomingRequests.removeAll { $0.fromUid == deniedUid }
 					loadAllUsers() // Refresh to show user in search list again
+					// Update friend request count
+					updateFriendRequestCount()
 				}
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FriendRequestAccepted"))) { notification in
@@ -200,6 +205,8 @@ struct AddFriendsScreen: View {
 				if let acceptedUid = notification.object as? String {
 					incomingRequests.removeAll { $0.fromUid == acceptedUid }
 					loadAllUsers() // Refresh to filter out accepted friend
+					// Update friend request count
+					updateFriendRequestCount()
 				}
 			}
 			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserBlocked"))) { notification in
@@ -259,6 +266,8 @@ struct AddFriendsScreen: View {
 							self.incomingRequests.removeAll { $0.id == deletedRequestId }
 							// Reload users to show them in search list again
 							self.loadAllUsers()
+							// Update friend request count
+							self.updateFriendRequestCount()
 							print("🗑️ AddFriendsScreen: Removed deleted incoming request \(deletedRequestId)")
 						}
 					} else if change.type == .added {
@@ -289,6 +298,8 @@ struct AddFriendsScreen: View {
 								self.incomingRequests.append(request)
 								// Reload users to filter out user who sent request
 								self.loadAllUsers()
+								// Update friend request count
+								self.updateFriendRequestCount()
 								print("✅ AddFriendsScreen: Added new incoming request from \(request.fromUid)")
 									}
 								}
@@ -304,10 +315,17 @@ struct AddFriendsScreen: View {
 								self.incomingRequests.removeAll { $0.id == modifiedRequestId }
 								// Reload users
 								self.loadAllUsers()
+								// Update friend request count
+								self.updateFriendRequestCount()
 								print("🔄 AddFriendsScreen: Request \(modifiedRequestId) status changed to \(status)")
 							}
 						}
 					}
+				}
+				
+				// Update count whenever the snapshot changes (new requests added or removed)
+				Task { @MainActor in
+					self.updateFriendRequestCount()
 				}
 			}
 		
@@ -356,7 +374,7 @@ struct AddFriendsScreen: View {
 	private func loadIncomingRequests() {
 		Task {
 			do {
-				var requests = try await friendService.getIncomingFriendRequests()
+				let requests = try await friendService.getIncomingFriendRequests()
 				// Filter out requests from blocked users (mutual blocking)
 				var filteredRequests: [FriendRequestModel] = []
 				for request in requests {
@@ -380,6 +398,25 @@ struct AddFriendsScreen: View {
 				try await friendService.markFriendRequestsAsSeen()
 			} catch {
 				print("Error marking friend requests as seen: \(error)")
+			}
+		}
+	}
+	
+	// MARK: - Update Friend Request Count
+	/// Update the friend request count badge based on total pending requests
+	private func updateFriendRequestCount() {
+		Task {
+			do {
+				let count = try await friendService.getTotalPendingFriendRequestCount()
+				await MainActor.run {
+					NotificationCenter.default.post(
+						name: NSNotification.Name("FriendRequestCountChanged"),
+						object: nil,
+						userInfo: ["count": count]
+					)
+				}
+			} catch {
+				print("Error updating friend request count: \(error)")
 			}
 		}
 	}

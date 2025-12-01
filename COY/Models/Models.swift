@@ -40,6 +40,12 @@ struct CollectionPost: Identifiable {
 	var allowReplies: Bool = true // Default to true
 	var allowDownload: Bool = false // Whether post author allows downloads
 	var taggedUsers: [String] = [] // Array of user IDs who are tagged in this post
+	
+	// Engagement metrics
+	var likeCount: Int = 0
+	var commentCount: Int = 0
+	var viewCount: Int = 0
+	var engagementScore: Double = 0.0 // Calculated engagement score for ranking
 }
 
 struct MediaItem {

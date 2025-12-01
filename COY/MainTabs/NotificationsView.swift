@@ -655,13 +655,21 @@ struct NotificationUpdateRow: View {
 				// Text Content
 				VStack(alignment: .leading, spacing: 4) {
 					Text(topLineText)
-						.font(.system(size: 15, weight: .semibold))
+						.font(.system(size: 15, weight: .bold))
 						.foregroundColor(.primary)
 					
+					if notification.type == "collection_post" {
+						// For collection_post, show message with collection name on new line
+						Text(bottomLineText)
+							.font(.system(size: 14))
+							.foregroundColor(.primary)
+							.lineLimit(nil)
+					} else {
 					Text(bottomLineText)
 						.font(.system(size: 14))
 						.foregroundColor(.primary)
 						.lineLimit(2)
+					}
 				}
 				
 				Spacer()
@@ -669,8 +677,8 @@ struct NotificationUpdateRow: View {
 				// Right side content (thumbnail or arrow)
 				if notification.type == "collection_post" {
 					Image(systemName: "chevron.right")
-						.font(.system(size: 14, weight: .semibold))
-						.foregroundColor(.secondary)
+						.font(.system(size: 18, weight: .bold))
+						.foregroundColor(.primary)
 				} else if let thumbnailURL = notification.postThumbnailURL, !thumbnailURL.isEmpty {
 					AsyncImage(url: URL(string: thumbnailURL)) { image in
 						image
@@ -713,7 +721,7 @@ struct NotificationUpdateRow: View {
 			return notification.username
 		case "collection_post":
 			if let collectionName = notification.collectionName {
-				return "\(notification.username) has posted in the collection \"\(collectionName)\""
+				return "\(notification.username) has posted in the collection\n\"\(collectionName)\""
 			}
 			return "\(notification.username) has posted in a collection"
 		case "comment":
@@ -913,6 +921,9 @@ struct NotificationRow: View {
 	let onTap: (() -> Void)?
 	let onProfileTapped: (() -> Void)?
 	
+	@State private var displayProfileImageURL: String? = nil
+	@State private var displayMessage: String = ""
+	
 	init(notification: NotificationService.AppNotification, isProcessing: Bool = false, onAccept: @escaping () -> Void, onDeny: @escaping () -> Void, onTap: (() -> Void)? = nil, onProfileTapped: (() -> Void)? = nil) {
 		self.notification = notification
 		self.isProcessing = isProcessing
@@ -928,7 +939,7 @@ struct NotificationRow: View {
 			Button(action: {
 				onProfileTapped?()
 			}) {
-				if let profileImageURL = notification.userProfileImageURL, !profileImageURL.isEmpty {
+				if let profileImageURL = displayProfileImageURL, !profileImageURL.isEmpty {
 					CachedProfileImageView(url: profileImageURL, size: 50)
 						.clipShape(Circle())
 				} else {
@@ -939,7 +950,7 @@ struct NotificationRow: View {
 			
 			// Message
 			VStack(alignment: .leading, spacing: 4) {
-				highlightedMessage(notification.message)
+				highlightedMessage(displayMessage.isEmpty ? notification.message : displayMessage)
 					.font(.subheadline)
 				
 				Text(timeAgoString(from: notification.createdAt))
@@ -1018,10 +1029,61 @@ struct NotificationRow: View {
 		.background(Color(.systemBackground))
 		.cornerRadius(12)
 		.shadow(color: Color.black.opacity(0.05), radius: 2, x: 0, y: 1)
+		.onAppear {
+			// Initialize with notification data
+			displayProfileImageURL = notification.userProfileImageURL
+			displayMessage = notification.message
+			
+			// Subscribe to real-time updates for this user
+			UserService.shared.subscribeToUserProfile(userId: notification.userId)
+			
+			// Update message if username changes
+			Task {
+				if let user = try? await UserService.shared.getUser(userId: notification.userId) {
+					await MainActor.run {
+						// Rebuild message with updated username
+						updateMessageWithUser(user: user)
+					}
+				}
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserProfileUpdated"))) { notificationUpdate in
+			// Update display when user profile changes
+			if let updatedUserId = notificationUpdate.object as? String,
+			   updatedUserId == notification.userId,
+			   let userInfo = notificationUpdate.userInfo {
+				if let newProfileImageURL = userInfo["profileImageURL"] as? String {
+					displayProfileImageURL = newProfileImageURL.isEmpty ? nil : newProfileImageURL
+				}
+				if userInfo["username"] != nil {
+					// Rebuild message with new username
+					Task {
+						if let user = try? await UserService.shared.getUser(userId: notification.userId) {
+							await MainActor.run {
+								updateMessageWithUser(user: user)
+							}
+						}
+					}
+				}
+			}
+		}
 		.onTapGesture {
 			if notification.type == "collection_join" {
 				onTap?()
 			}
+		}
+	}
+	
+	private func updateMessageWithUser(user: UserService.AppUser) {
+		// Rebuild notification message with updated username
+		// This handles cases where the message contains the username
+		let originalMessage = notification.message
+		// Replace old username with new username in message
+		let oldUsername = notification.username
+		if !oldUsername.isEmpty {
+			displayMessage = originalMessage.replacingOccurrences(of: oldUsername, with: user.username)
+		} else {
+			displayMessage = originalMessage
 		}
 	}
 	

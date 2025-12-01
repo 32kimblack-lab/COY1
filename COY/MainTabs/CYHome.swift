@@ -100,6 +100,9 @@ struct CYHome: View {
 			// Load unread notification count
 			loadUnreadNotificationCount()
 			
+			// Load friend request count
+			loadFriendRequestCount()
+			
 			// ALWAYS use cache first - no auto-refresh on tab switch or view appearance
 			// This ensures fast loading and no unnecessary network calls
 			// NO background checks - only refresh on pull-to-refresh or explicit notifications
@@ -317,9 +320,15 @@ struct CYHome: View {
 	}
 	
 	private var mainContentView: some View {
-				ZStack {
+		ScrollViewReader { proxy in
+			ZStack {
 				// Main Content
 				VStack(spacing: 0) {
+					// Top anchor for scroll-to-top
+					Color.clear
+						.frame(height: 0)
+						.id("topAnchor")
+					
 					// Custom Header
 					HStack {
 						HStack {
@@ -434,10 +443,17 @@ struct CYHome: View {
 					Spacer()
 		}
 		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ScrollToTopHome"))) { _ in
+			withAnimation {
+				proxy.scrollTo("topAnchor", anchor: .top)
+			}
+		}
+		}
 	}
 	
 	// MARK: - View Components
 	private var emptyStateView: some View {
+		ScrollView {
 		VStack(spacing: 12) {
 			Image(systemName: "tray")
 				.font(.system(size: 42))
@@ -449,15 +465,30 @@ struct CYHome: View {
 				.font(.subheadline)
 				.foregroundColor(.secondary)
 		}
-		.frame(maxWidth: .infinity, maxHeight: .infinity)
+			.frame(maxWidth: .infinity, minHeight: UIScreen.main.bounds.height * 0.7)
+			.padding(.top, 100)
+		}
+		.refreshable {
+			await refreshFeed()
+		}
 	}
 	
 	private var postsView: some View {
 		// Extract posts from postsWithCollections for Pinterest grid
-		let posts = postsWithCollections.map { $0.post }
+		// Remove duplicates by post ID (keep first occurrence)
+		var seenPostIds = Set<String>()
+		let uniquePostsWithCollections = postsWithCollections.filter { item in
+			if seenPostIds.contains(item.post.id) {
+				return false
+			}
+			seenPostIds.insert(item.post.id)
+			return true
+		}
 		
-		// Create a map of post IDs to collections
-		let postsCollectionMap = Dictionary(uniqueKeysWithValues: postsWithCollections.map { ($0.post.id, $0.collection) })
+		let posts = uniquePostsWithCollections.map { $0.post }
+		
+		// Create a map of post IDs to collections (now guaranteed to have unique keys)
+		let postsCollectionMap = Dictionary(uniqueKeysWithValues: uniquePostsWithCollections.map { ($0.post.id, $0.collection) })
 		
 		return VStack(spacing: 0) {
 			PinterestPostGrid(
@@ -584,6 +615,109 @@ struct CYHome: View {
 		.background(colorScheme == .dark ? Color.black : Color.white)
 	}
 	
+	// MARK: - Post Mixing Algorithm
+	/// Mixes posts with recency score, shuffle factor, and creator distribution
+	/// Ensures no single creator appears in long blocks
+	/// Optimized to run off main thread for better performance
+	@MainActor
+	private func mixPosts(_ posts: [(post: CollectionPost, collection: CollectionData)], isRefresh: Bool = false) -> [(post: CollectionPost, collection: CollectionData)] {
+		guard !posts.isEmpty else { return posts }
+		
+		let now = Date()
+		let maxBlockSize = 2 // Maximum consecutive posts from same creator
+		
+		// Step 1: Calculate combined recency + engagement scores
+		var scoredPosts = posts.map { postWithCollection -> (item: (post: CollectionPost, collection: CollectionData), score: Double, creatorId: String) in
+			let post = postWithCollection.post
+			let timeSinceCreation = now.timeIntervalSince(post.createdAt)
+			let hoursSinceCreation = timeSinceCreation / 3600.0
+			
+			// Recency score: exponentially decays with time
+			// Posts from last hour get score ~100, posts from 24h ago get ~50, posts from 7 days get ~10
+			let recencyScore = 100.0 * exp(-hoursSinceCreation / 48.0) // Half-life of ~48 hours
+			
+			// Engagement score: use the pre-calculated engagement score from the post
+			// Scale it to match recency score range (multiply by 2 to give it significant weight)
+			let engagementScore = post.engagementScore * 2.0
+			
+			// Combine recency (60%) and engagement (40%) for balanced ranking
+			// This ensures recent posts are prioritized, but highly engaging posts also rise
+			let combinedScore = (recencyScore * 0.6) + (engagementScore * 0.4)
+			
+			// Add random shuffle factor (0-20 points) - lighter on refresh
+			let shuffleFactor = isRefresh ? Double.random(in: 0...10) : Double.random(in: 0...20)
+			
+			let finalScore = combinedScore + shuffleFactor
+			let creatorId = post.authorId
+			
+			return (item: postWithCollection, score: finalScore, creatorId: creatorId)
+		}
+		
+		// Step 2: Sort by score (highest first)
+		scoredPosts.sort { $0.score > $1.score }
+		
+		// Step 3: Distribute posts to avoid long blocks from same creator
+		var mixedPosts: [(post: CollectionPost, collection: CollectionData)] = []
+		var remainingPosts = scoredPosts
+		var recentCreators: [String] = [] // Track recent creators in order (last maxBlockSize creators)
+		
+		while !remainingPosts.isEmpty {
+			var found = false
+			
+			// Try to find a post from a creator that hasn't appeared in recent block
+			for i in 0..<remainingPosts.count {
+				let post = remainingPosts[i]
+				let creatorId = post.creatorId
+				
+				// Count how many times this creator appears in recent block
+				let recentCount = recentCreators.filter { $0 == creatorId }.count
+				
+				// If this creator hasn't exceeded max block size, use this post
+				if recentCount < maxBlockSize {
+					mixedPosts.append(post.item)
+					remainingPosts.remove(at: i)
+					
+					// Update recent creators list (keep only last maxBlockSize)
+					recentCreators.append(creatorId)
+					if recentCreators.count > maxBlockSize {
+						recentCreators.removeFirst()
+					}
+					
+					found = true
+					break
+				}
+			}
+			
+			// If all remaining creators have reached max block size, reset and take highest scored
+			if !found {
+				// Reset recent creators and take the highest scored remaining post
+				recentCreators.removeAll()
+				if let nextPost = remainingPosts.first {
+					mixedPosts.append(nextPost.item)
+					recentCreators.append(nextPost.creatorId)
+					remainingPosts.removeFirst()
+				}
+			}
+		}
+		
+		// Step 4: Light reshuffle on refresh (swap adjacent pairs randomly)
+		if isRefresh {
+			var reshuffled = mixedPosts
+			let swapCount = min(reshuffled.count / 4, 10) // Swap up to 25% of posts, max 10 swaps
+			
+			for _ in 0..<swapCount {
+				let index1 = Int.random(in: 0..<(reshuffled.count - 1))
+				let index2 = index1 + 1
+				if index2 < reshuffled.count {
+					reshuffled.swapAt(index1, index2)
+				}
+			}
+			return reshuffled
+		}
+		
+		return mixedPosts
+	}
+	
 	// MARK: - Pull-to-Refresh with Complete Fresh Reload
 	/// Complete refresh: Clear all caches, reload current user, reload everything from scratch
 	/// Equivalent to exiting and re-entering the app
@@ -592,17 +726,21 @@ struct CYHome: View {
 		
 		print("🔄 CYHome: Starting COMPLETE refresh (equivalent to app restart)")
 		
-		// Step 1: Clear ALL caches first
+		// Step 1: Clear ALL caches first (including user profile caches)
 		await MainActor.run {
 			HomeViewCache.shared.clearCache()
 			CollectionPostsCache.shared.clearAllCache()
-			print("✅ CYHome: Cleared all caches")
+			// Clear user profile caches to force fresh profile image/name loads
+			UserService.shared.clearUserCache(userId: currentUserId)
+			print("✅ CYHome: Cleared all caches (including user profile caches)")
 		}
 		
-		// Step 2: Reload current user data (blocked users, hidden collections, etc.)
+		// Step 2: Reload current user data (blocked users, hidden collections, etc.) - FORCE FRESH
 		do {
+			// Stop existing listener and reload fresh
+			CYServiceManager.shared.stopListening()
 			try await CYServiceManager.shared.loadCurrentUser()
-			print("✅ CYHome: Reloaded current user data")
+			print("✅ CYHome: Reloaded current user data (fresh from Firestore)")
 		} catch {
 			print("⚠️ CYHome: Error reloading current user: \(error)")
 		}
@@ -637,10 +775,10 @@ struct CYHome: View {
 						}
 						
 						do {
-							// Load first page only - always fresh, no cache
+							// Load limited posts per collection to reduce initial load time
 							let (posts, _, _) = try await PostService.shared.getCollectionPostsPaginated(
 								collectionId: collection.id,
-								limit: 5, // Only 5 posts per collection initially
+								limit: 25, // Reduced from 100 to improve performance
 								lastDocument: nil,
 								sortBy: "Newest to Oldest"
 							)
@@ -670,11 +808,12 @@ struct CYHome: View {
 				}
 			}
 			
-			// Sort by creation date (newest first)
-			allPosts.sort { $0.post.createdAt > $1.post.createdAt }
+			// Apply sorted + mixed feed algorithm with recency score, shuffle factor, and creator distribution
+			let mixedPosts = mixPosts(allPosts, isRefresh: true)
+			print("🔄 CYHome: Mixed posts with recency score and creator distribution on refresh")
 			
 			// Take only initial limit
-			let limitedPosts = Array(allPosts.prefix(initialLimit))
+			let limitedPosts = Array(mixedPosts.prefix(initialLimit))
 			
 			await MainActor.run {
 				// Always use fresh data - no cache comparison
@@ -732,10 +871,10 @@ struct CYHome: View {
 							}
 							
 							do {
-								// Load first page only
+								// Load limited posts per collection to reduce initial load time
 								let (posts, _, _) = try await PostService.shared.getCollectionPostsPaginated(
 									collectionId: collection.id,
-									limit: 5, // Only 5 posts per collection initially
+									limit: 25, // Reduced from 100 to improve performance
 									lastDocument: nil,
 									sortBy: "Newest to Oldest"
 								)
@@ -754,11 +893,12 @@ struct CYHome: View {
 					}
 				}
 				
-				// Sort by creation date (newest first)
-				allPosts.sort { $0.post.createdAt > $1.post.createdAt }
+				// Apply sorted + mixed feed algorithm with recency score, shuffle factor, and creator distribution
+				let mixedPosts = mixPosts(allPosts, isRefresh: false)
+				print("🔄 CYHome: Mixed posts with recency score and creator distribution")
 				
 				// Take only initial limit
-				let limitedPosts = Array(allPosts.prefix(initialLimit))
+				let limitedPosts = Array(mixedPosts.prefix(initialLimit))
 				lastPostTimestamp = limitedPosts.last?.post.createdAt
 				hasMoreData = allPosts.count > initialLimit
 				
@@ -931,6 +1071,20 @@ struct CYHome: View {
 				}
 			} catch {
 				print("❌ Error loading unread notification count: \(error)")
+			}
+		}
+	}
+	
+	private func loadFriendRequestCount() {
+		Task {
+			do {
+				// Use total pending count (not just unseen) - count should persist until accepted/denied
+				let count = try await FriendService.shared.getTotalPendingFriendRequestCount()
+				await MainActor.run {
+					self.friendRequestCount = count
+				}
+			} catch {
+				print("❌ Error loading friend request count: \(error)")
 			}
 		}
 	}

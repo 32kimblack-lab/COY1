@@ -4,7 +4,7 @@
  */
 
 const admin = require("firebase-admin");
-const {onDocumentCreated} = require("firebase-functions/v2/firestore");
+const {onDocumentCreated, onDocumentUpdated, onDocumentWritten} = require("firebase-functions/v2/firestore");
 const {onCall} = require("firebase-functions/v2/https");
 const {onRequest} = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
@@ -573,4 +573,120 @@ exports.profileServer = onRequest(
     cors: true,
   },
   profileServerApp
+);
+
+/**
+ * Firestore trigger to update engagement score when post metrics change
+ * Triggers on: post document updates (likeCount, commentCount, viewCount changes)
+ */
+exports.onPostEngagementUpdated = onDocumentUpdated(
+  {
+    document: "posts/{postId}",
+    maxInstances: 10,
+  },
+  async (event) => {
+    const postId = event.params.postId;
+    const beforeData = event.data.before.data();
+    const afterData = event.data.after.data();
+    
+    // Check if engagement metrics changed
+    const likeCountChanged = (beforeData.likeCount || 0) !== (afterData.likeCount || 0);
+    const commentCountChanged = (beforeData.commentCount || 0) !== (afterData.commentCount || 0);
+    const viewCountChanged = (beforeData.viewCount || 0) !== (afterData.viewCount || 0);
+    
+    if (!likeCountChanged && !commentCountChanged && !viewCountChanged) {
+      // No engagement metrics changed, skip recalculation
+      return null;
+    }
+    
+    logger.info("Post engagement metrics changed", {
+      postId,
+      likeCount: afterData.likeCount || 0,
+      commentCount: afterData.commentCount || 0,
+      viewCount: afterData.viewCount || 0,
+    });
+    
+    try {
+      // Calculate engagement score
+      const likeCount = afterData.likeCount || 0;
+      const commentCount = afterData.commentCount || 0;
+      const viewCount = afterData.viewCount || 0;
+      const createdAt = afterData.createdAt?.toDate() || new Date();
+      
+      // Calculate recency factor (exponential decay)
+      const now = new Date();
+      const timeSinceCreation = (now - createdAt) / 1000 / 3600; // hours
+      const recencyFactor = Math.exp(-timeSinceCreation / 48.0); // Half-life of ~48 hours
+      
+      // Engagement score formula:
+      // - Likes: 3 points each
+      // - Comments: 5 points each
+      // - Views: 0.1 points each
+      const rawScore = (likeCount * 3 + commentCount * 5) + (viewCount * 0.1);
+      const engagementScore = rawScore * recencyFactor;
+      
+      // Update post with new engagement score
+      await event.data.after.ref.update({
+        engagementScore: engagementScore,
+      });
+      
+      logger.info("Updated engagement score", {
+        postId,
+        engagementScore: engagementScore.toFixed(2),
+        recencyFactor: recencyFactor.toFixed(2),
+      });
+      
+      return null;
+    } catch (error) {
+      logger.error("Error calculating engagement score", { error, postId });
+      return null;
+    }
+  }
+);
+
+/**
+ * Firestore trigger to update likeCount when a star is added/removed
+ * This maintains the likeCount field on the post document for efficient queries
+ */
+exports.onStarChanged = onDocumentWritten(
+  {
+    document: "posts/{postId}/stars/{userId}",
+    maxInstances: 10,
+  },
+  async (event) => {
+    const postId = event.params.postId;
+    const beforeData = event.data.before?.data();
+    const afterData = event.data.after?.data();
+    
+    const wasStarred = beforeData !== undefined;
+    const isStarred = afterData !== undefined;
+    
+    // Only update if star status actually changed
+    if (wasStarred === isStarred) {
+      return null;
+    }
+    
+    try {
+      const postRef = admin.firestore().collection("posts").doc(postId);
+      
+      if (isStarred && !wasStarred) {
+        // Star was added - increment likeCount
+        await postRef.update({
+          likeCount: admin.firestore.FieldValue.increment(1),
+        });
+        logger.info("Incremented likeCount", { postId });
+      } else if (!isStarred && wasStarred) {
+        // Star was removed - decrement likeCount
+        await postRef.update({
+          likeCount: admin.firestore.FieldValue.increment(-1),
+        });
+        logger.info("Decremented likeCount", { postId });
+      }
+      
+      return null;
+    } catch (error) {
+      logger.error("Error updating likeCount", { error, postId });
+      return null;
+    }
+  }
 );

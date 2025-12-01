@@ -558,18 +558,33 @@ struct EditProfileDesign: View {
 				newName: verifiedUser.name
 			)
 			
-			// Post notification with verified data
+			// Post notifications with verified data
 			await MainActor.run {
+				// Post ProfileUpdated notification (for existing listeners)
 				NotificationCenter.default.post(
 					name: NSNotification.Name("ProfileUpdated"),
-					object: user.uid, // Pass user ID so listeners know which user was updated
+					object: user.uid,
 					userInfo: ["updatedData": immediateUpdateData, "userId": user.uid]
 				)
-				print("📢 Posted profile update notification with verified URLs from Firebase")
-				print("   - Name: \(immediateUpdateData["name"] as? String ?? "nil")")
-				print("   - Username: \(immediateUpdateData["username"] as? String ?? "nil")")
-				print("   - Profile URL: \(immediateUpdateData["profileImageURL"] as? String ?? "nil")")
-				print("   - Background URL: \(immediateUpdateData["backgroundImageURL"] as? String ?? "nil")")
+				
+				// Also post UserProfileUpdated for real-time UserService listeners
+				NotificationCenter.default.post(
+					name: Notification.Name("UserProfileUpdated"),
+					object: user.uid,
+					userInfo: [
+						"userId": user.uid,
+						"name": verifiedUser.name,
+						"username": verifiedUser.username,
+						"profileImageURL": verifiedUser.profileImageURL as Any,
+						"backgroundImageURL": verifiedUser.backgroundImageURL as Any
+					]
+				)
+				
+				print("📢 Posted profile update notifications with verified URLs from Firebase")
+				print("   - Name: \(verifiedUser.name)")
+				print("   - Username: \(verifiedUser.username)")
+				print("   - Profile URL: \(verifiedUser.profileImageURL ?? "nil")")
+				print("   - Background URL: \(verifiedUser.backgroundImageURL ?? "nil")")
 			}
 			
 			// Wait a moment for notification to propagate

@@ -64,9 +64,95 @@ final class UserService: ObservableObject {
 	}
 
 	private var cache: [String: AppUser] = [:]
+	// Real-time listeners for user profiles - automatically updates when users edit their profile
+	private var userListeners: [String: ListenerRegistration] = [:]
 
 	func clearUserCache(userId: String) {
 		cache[userId] = nil
+		// Remove listener when cache is cleared
+		userListeners[userId]?.remove()
+		userListeners[userId] = nil
+	}
+	
+	/// Subscribe to real-time updates for a user's profile
+	/// This ensures profile images, usernames, and names update everywhere when edited
+	func subscribeToUserProfile(userId: String) {
+		// Don't create duplicate listeners
+		guard userListeners[userId] == nil else { return }
+		
+		let db = Firestore.firestore()
+		userListeners[userId] = db.collection("users").document(userId).addSnapshotListener { [weak self] snapshot, error in
+			Task { @MainActor in
+				guard let self = self else { return }
+				
+				if let error = error {
+					print("❌ UserService: Error listening to user \(userId) updates: \(error.localizedDescription)")
+					return
+				}
+				
+				guard let snapshot = snapshot, let data = snapshot.data() else {
+					return
+				}
+				
+				// Check if profile-relevant fields changed
+				let newName = data["name"] as? String ?? ""
+				let newUsername = data["username"] as? String ?? ""
+				let newProfileImageURL = data["profileImageURL"] as? String
+				let newBackgroundImageURL = data["backgroundImageURL"] as? String
+				
+				// Get old cached user to compare
+				let oldUser = self.cache[userId]
+				let profileChanged = oldUser?.name != newName ||
+					oldUser?.username != newUsername ||
+					oldUser?.profileImageURL != newProfileImageURL ||
+					oldUser?.backgroundImageURL != newBackgroundImageURL
+				
+				// Update cache with new data
+				let updatedUser = AppUser(
+					userId: userId,
+					name: newName,
+					username: newUsername,
+					profileImageURL: newProfileImageURL,
+					backgroundImageURL: newBackgroundImageURL,
+					birthMonth: data["birthMonth"] as? String ?? "",
+					birthDay: data["birthDay"] as? String ?? "",
+					birthYear: data["birthYear"] as? String ?? "",
+					email: data["email"] as? String ?? ""
+				)
+				self.cache[userId] = updatedUser
+				
+				// Post notification if profile changed (so all views update)
+				if profileChanged {
+					print("🔄 UserService: User \(userId) profile updated in real-time - name: '\(newName)', username: '\(newUsername)'")
+					NotificationCenter.default.post(
+						name: Notification.Name("UserProfileUpdated"),
+						object: userId,
+						userInfo: [
+							"userId": userId,
+							"name": newName,
+							"username": newUsername,
+							"profileImageURL": newProfileImageURL as Any,
+							"backgroundImageURL": newBackgroundImageURL as Any
+						]
+					)
+				}
+			}
+		}
+	}
+	
+	/// Unsubscribe from real-time updates for a user (cleanup)
+	func unsubscribeFromUserProfile(userId: String) {
+		userListeners[userId]?.remove()
+		userListeners[userId] = nil
+	}
+	
+	/// Cleanup all listeners (call on logout or app termination)
+	func cleanupAllListeners() {
+		for (_, listener) in userListeners {
+			listener.remove()
+		}
+		userListeners.removeAll()
+		cache.removeAll()
 	}
 
 	func isUsernameAvailable(_ username: String) async throws -> Bool {
@@ -216,6 +302,10 @@ final class UserService: ObservableObject {
 		)
 		
 		cache[userId] = user
+		
+		// Automatically subscribe to real-time updates for this user
+		// This ensures profile changes update everywhere in the app
+		subscribeToUserProfile(userId: userId)
 		
 		return user
 	}

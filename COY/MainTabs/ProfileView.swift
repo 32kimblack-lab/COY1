@@ -89,7 +89,8 @@ struct ProfileView: View {
 				collectionsListener?.remove()
 			}
 			.refreshable {
-				refreshUserData(forceRefresh: true)
+			// Complete refresh: Clear all caches and force fresh reload
+			await completeRefresh()
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ProfileUpdated"))) { notification in
 			handleProfileUpdate(notification)
@@ -204,13 +205,33 @@ struct ProfileView: View {
 	}
 	
 	private var mainContentView: some View {
-		ZStack {
-			(colorScheme == .dark ? Color.black : Color.white)
-				.ignoresSafeArea()
-			
-			VStack(spacing: 0) {
-				// Fixed Profile Header (doesn't scroll) - Always show
-				profileHeaderSection(safeAreaTop: 0)
+		GeometryReader { geometry in
+			ScrollViewReader { proxy in
+				ZStack(alignment: .topLeading) {
+				(colorScheme == .dark ? Color.black : Color.white)
+					.ignoresSafeArea()
+				
+					// Background Image - Full width, outside PhoneSizeContainer constraints
+					if let backgroundImageURL = userData?["backgroundImageURL"] as? String, !backgroundImageURL.isEmpty {
+						CachedBackgroundImageView(
+							url: backgroundImageURL,
+							height: 105
+						)
+						.aspectRatio(contentMode: .fill)
+						.frame(width: geometry.size.width, height: 105)
+						.clipped()
+						.ignoresSafeArea(edges: .top)
+						.id(backgroundImageURL)
+					}
+					
+				VStack(spacing: 0) {
+					// Top anchor for scroll-to-top
+					Color.clear
+						.frame(height: 0)
+						.id("topAnchor")
+					
+					// Fixed Profile Header (doesn't scroll) - Always show
+					profileHeaderSection(safeAreaTop: 0)
 					.id("\(profileRefreshTrigger)-\(userData?["profileImageURL"] as? String ?? "")-\(userData?["backgroundImageURL"] as? String ?? "")")
 				
 				// Collections Section (List handles its own scrolling)
@@ -224,7 +245,14 @@ struct ProfileView: View {
 				} else {
 					UserCollectionsView(sortOption: sortOption)
 						.padding(.top, -20)
+					}
 				}
+				.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ScrollToTopProfile"))) { _ in
+					withAnimation {
+						proxy.scrollTo("topAnchor", anchor: .top)
+					}
+				}
+			}
 			}
 		}
 	}
@@ -352,28 +380,11 @@ struct ProfileView: View {
 		ZStack(alignment: .topLeading) {
 			// Background Image Area - Always reserve 105 points height, whether image exists or not
 			// This ensures layout stays consistent with or without background image
-			ZStack {
-				// Always reserve the space
+			// Note: Background image is now rendered in mainContentView to extend full width
 				Color.clear
 					.frame(height: 105)
 					.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 					.ignoresSafeArea(edges: .top)
-				
-				// Only show background image if it exists
-				if let backgroundImageURL = userData?["backgroundImageURL"] as? String, !backgroundImageURL.isEmpty {
-					CachedBackgroundImageView(
-						url: backgroundImageURL,
-						height: 105
-					)
-					.aspectRatio(contentMode: .fill)
-					.frame(height: 105)
-					.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-					.clipped()
-					.cornerRadius(0)
-					.ignoresSafeArea(edges: .top)
-					.id(backgroundImageURL)
-				}
-			}
 			
 			// Top Buttons Row - Vertically centered on background (at 52.5 points from top of background)
 			VStack {
@@ -570,6 +581,39 @@ struct ProfileView: View {
 	}
 	
 	// MARK: - Load User Data from Firebase
+	
+	// MARK: - Complete Refresh (Pull-to-Refresh)
+	/// Complete refresh: Clear all caches, reload current user, reload everything from scratch
+	/// Equivalent to exiting and re-entering the app
+	private func completeRefresh() async {
+		guard let currentUserId = authService.user?.uid else { return }
+		
+		print("🔄 ProfileView: Starting COMPLETE refresh (equivalent to app restart)")
+		
+		// Step 1: Clear ALL caches first (including user profile caches)
+		await MainActor.run {
+			CollectionPostsCache.shared.clearAllCache()
+			HomeViewCache.shared.clearCache()
+			// Clear user profile caches to force fresh profile image/name loads
+			UserService.shared.clearUserCache(userId: currentUserId)
+			print("✅ ProfileView: Cleared all caches (including user profile caches)")
+		}
+		
+		// Step 2: Reload current user data - FORCE FRESH
+		do {
+			// Stop existing listener and reload fresh
+			CYServiceManager.shared.stopListening()
+			try await CYServiceManager.shared.loadCurrentUser()
+			print("✅ ProfileView: Reloaded current user data (fresh from Firestore)")
+		} catch {
+			print("⚠️ ProfileView: Error reloading current user: \(error)")
+		}
+		
+		// Step 3: Reload user profile data and collections - FORCE FRESH
+		refreshUserData(forceRefresh: true)
+		// Post notification to reload collections in UserCollectionsView
+		NotificationCenter.default.post(name: NSNotification.Name("UserCollectionsUpdated"), object: nil)
+	}
 	
 	private func refreshUserData(forceRefresh: Bool = false) {
 		guard let userId = authService.user?.uid else {
@@ -913,6 +957,7 @@ struct UserCollectionsView: View {
 	@State private var hasLoadedCollectionsOnce = false // Track if collections have been loaded
 	@State private var requestStatus: [String: Bool] = [:] // Track request status per collection
 	@State private var pendingRequests: Set<String> = [] // Track collections with pending requests
+	@State private var showingBuildCollection = false
 	@Environment(\.colorScheme) var colorScheme
 	
 	var sortedCollections: [CollectionData] {
@@ -947,7 +992,7 @@ struct UserCollectionsView: View {
 					.frame(maxWidth: .infinity)
 					.padding()
 			} else if sortedCollections.isEmpty {
-				VStack {
+				VStack(spacing: 16) {
 					Spacer()
 					Text("No Collections")
 						.font(.headline)
@@ -955,6 +1000,26 @@ struct UserCollectionsView: View {
 					Text("Create your first collection")
 						.font(.subheadline)
 						.foregroundColor(.gray)
+					
+					HStack {
+						Spacer()
+						Button(action: {
+							showingBuildCollection = true
+						}) {
+							Text("Build a Collection")
+								.font(.headline)
+								.foregroundColor(.white)
+								.padding(.horizontal, 24)
+								.padding(.vertical, 12)
+								.background(Color.blue)
+								.cornerRadius(10)
+						}
+						.buttonStyle(.plain)
+						.contentShape(Rectangle())
+						Spacer()
+					}
+					.padding(.top, 8)
+					
 					Spacer()
 				}
 				.frame(maxWidth: .infinity)
@@ -997,8 +1062,8 @@ struct UserCollectionsView: View {
 		.scrollContentBackground(.hidden)
 		.background(colorScheme == .dark ? Color.black : Color.white)
 		.refreshable {
-			// Force refresh collections on pull-to-refresh
-			loadCollections(forceRefresh: true)
+			// Complete refresh: Clear all caches and force fresh reload
+			await completeRefreshForUserCollections()
 		}
 		.onAppear {
 			// Only load collections if we haven't loaded them before
@@ -1109,6 +1174,41 @@ struct UserCollectionsView: View {
 					.environmentObject(authService)
 			}
 		}
+		.navigationDestination(isPresented: $showingBuildCollection) {
+			CYBuildCollectionDesign()
+				.environmentObject(authService)
+		}
+	}
+	
+	// MARK: - Complete Refresh (Pull-to-Refresh)
+	/// Complete refresh: Clear all caches, reload user data, reload everything from scratch
+	/// Equivalent to exiting and re-entering the app
+	private func completeRefreshForUserCollections() async {
+		guard let currentUserId = authService.user?.uid else { return }
+		
+		print("🔄 UserCollectionsView: Starting COMPLETE refresh (equivalent to app restart)")
+		
+		// Step 1: Clear ALL caches first (including user profile caches)
+		await MainActor.run {
+			CollectionPostsCache.shared.clearAllCache()
+			HomeViewCache.shared.clearCache()
+			// Clear user profile caches to force fresh profile image/name loads
+			UserService.shared.clearUserCache(userId: currentUserId)
+			print("✅ UserCollectionsView: Cleared all caches (including user profile caches)")
+		}
+		
+		// Step 2: Reload current user data - FORCE FRESH
+		do {
+			// Stop existing listener and reload fresh
+			CYServiceManager.shared.stopListening()
+			try await CYServiceManager.shared.loadCurrentUser()
+			print("✅ UserCollectionsView: Reloaded current user data (fresh from Firestore)")
+		} catch {
+			print("⚠️ UserCollectionsView: Error reloading current user: \(error)")
+		}
+		
+		// Step 3: Reload collections - FORCE FRESH
+		loadCollections(forceRefresh: true)
 	}
 	
 	private func loadCollections(forceRefresh: Bool = false) {

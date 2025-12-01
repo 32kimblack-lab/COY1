@@ -70,6 +70,18 @@ struct StarredView: View {
 			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CurrentUserDidChange"))) { _ in
 				Task { await viewModel.loadStarredPosts() }
 			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionAccessGranted"))) { _ in
+				// Reload when access is granted to a collection
+				Task { await viewModel.loadStarredPosts() }
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionAccessDenied"))) { _ in
+				// Reload when access is denied to a collection
+				Task { await viewModel.loadStarredPosts() }
+			}
+			.onReceive(NotificationCenter.default.publisher(for: Notification.Name("CollectionUpdated"))) { _ in
+				// Reload when a collection is updated (access might have changed)
+				Task { await viewModel.loadStarredPosts() }
+			}
 	}
 	
 	private var backgroundColor: Color {
@@ -237,12 +249,12 @@ class StarredViewModel: ObservableObject {
 		}
 		
 		let db = Firestore.firestore()
-		let postsWithStarredDates = await withTaskGroup(of: (CollectionPost?, Date?).self) { group in
+		let postsWithStarredDates = await withTaskGroup(of: (CollectionPost?, Date?, Bool).self) { group in
 			var results: [(post: CollectionPost, starredAt: Date)] = []
 			
 			for postId in starredPostIds {
 				group.addTask {
-					// Load post and starredAt timestamp in parallel
+					// Load post, starredAt timestamp, and collection in parallel
 					async let postTask = self.withTimeout(seconds: 10) {
 						try? await CollectionService.shared.getPostById(postId: postId)
 					}
@@ -268,16 +280,23 @@ class StarredViewModel: ObservableObject {
 					let post = await postTask
 					let starredAt = await starredAtTask
 					
-					return (post, starredAt)
+					// Load collection to check access (only if post was loaded successfully)
+					var hasAccess = false
+					if let post = post {
+						if let collection = try? await CollectionService.shared.getCollection(collectionId: post.collectionId) {
+							hasAccess = CollectionService.canUserViewCollection(collection, userId: userId)
+						}
+					}
+					
+					return (post, starredAt, hasAccess)
 				}
 			}
 			
-			for await (post, starredAt) in group {
+			for await (post, starredAt, hasAccess) in group {
 				if let post = post {
-					// Include all starred posts (including own posts and blocked users)
-					// Blocked users' posts will show with "User is blocked" overlay
-					// Filter out hidden posts only
-					if !hiddenPostIds.contains(post.id) {
+					// Filter out posts from collections the user doesn't have access to
+					// Also filter out hidden posts
+					if hasAccess && !hiddenPostIds.contains(post.id) {
 						// Use starredAt if available, otherwise fall back to post creation date
 						let sortDate = starredAt ?? post.createdAt
 						results.append((post: post, starredAt: sortDate))

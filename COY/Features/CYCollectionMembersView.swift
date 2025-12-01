@@ -22,6 +22,7 @@ struct CYCollectionMembersView: View {
 	@State private var errorMessage = ""
 	@State private var selectedUserId: String?
 	@State private var showingProfile = false
+	@State private var showingOwnProfile = false
 	
 	var body: some View {
 		VStack(spacing: 0) {
@@ -154,6 +155,10 @@ struct CYCollectionMembersView: View {
 					.environmentObject(authService)
 			}
 		}
+		.navigationDestination(isPresented: $showingOwnProfile) {
+			ProfileView()
+				.environmentObject(authService)
+		}
 		.onAppear {
 			loadMembers()
 		}
@@ -218,25 +223,16 @@ struct CYCollectionMembersView: View {
 	// MARK: - Member Row
 	private func memberRow(user: User, role: CollectionMemberRole) -> some View {
 		HStack(spacing: 12) {
-			// Profile Image and Info - Clickable to navigate to user profile (but not if it's current user)
+			// Profile Image and Info - Clickable to navigate to user profile for ALL users
+			// Both profile image and username/name are clickable - entire area navigates to profile
 			let isCurrentUser = user.id == authService.user?.uid
+			
+			Button(action: {
 			if isCurrentUser {
-				// Non-clickable view for current user
-				HStack(spacing: 12) {
-					CachedProfileImageView(url: user.profileImageURL ?? "", size: 50)
-					
-					VStack(alignment: .leading, spacing: 2) {
-						Text(user.name)
-							.font(.system(size: 16, weight: .bold))
-							.foregroundColor(colorScheme == .dark ? .white : .black)
-						Text("@\(user.username)")
-							.font(.system(size: 14))
-							.foregroundColor(colorScheme == .dark ? .white.opacity(0.7) : .black.opacity(0.7))
-					}
-				}
+					// Navigate to own profile
+					showingOwnProfile = true
 			} else {
-				// Clickable button for other users - checks mutual blocking before navigating
-				Button(action: {
+					// Navigate to other user's profile - checks mutual blocking before navigating
 					Task {
 						// Check if users are mutually blocked before navigating
 						let areMutuallyBlocked = await CYServiceManager.shared.areUsersMutuallyBlocked(userId: user.id)
@@ -244,11 +240,15 @@ struct CYCollectionMembersView: View {
 							selectedUserId = user.id
 							showingProfile = true
 						}
+						}
 					}
 				}) {
 					HStack(spacing: 12) {
+					// Profile Image - clickable as part of the button
 						CachedProfileImageView(url: user.profileImageURL ?? "", size: 50)
+						.contentShape(Circle())
 						
+					// Username and Name - clickable as part of the button
 						VStack(alignment: .leading, spacing: 2) {
 							Text(user.name)
 								.font(.system(size: 16, weight: .bold))
@@ -257,11 +257,11 @@ struct CYCollectionMembersView: View {
 								.font(.system(size: 14))
 								.foregroundColor(colorScheme == .dark ? .white.opacity(0.7) : .black.opacity(0.7))
 						}
+					.contentShape(Rectangle())
 					}
 				}
 				.buttonStyle(.plain)
 				.contentShape(Rectangle())
-			}
 			
 			Spacer()
 			

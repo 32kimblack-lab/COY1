@@ -1,6 +1,7 @@
 import UIKit
 import FirebaseCore
 import FirebaseMessaging
+import FirebasePerformance
 import GoogleMobileAds
 import UserNotifications
 import SDWebImage
@@ -32,6 +33,12 @@ import SDWebImage
 		// Configure SDWebImage for optimal performance
 		configureSDWebImage()
 		
+		// Initialize Firebase Performance Monitoring for tracking performance at scale
+		#if !DEBUG
+		Performance.sharedInstance().isDataCollectionEnabled = true
+		Performance.sharedInstance().isInstrumentationEnabled = true
+		#endif
+		
 		// Initialize Google Mobile Ads SDK
 		// The SDK will automatically read GADApplicationIdentifier from Info.plist
 		GADMobileAds.sharedInstance().start(completionHandler: { status in
@@ -56,20 +63,22 @@ import SDWebImage
 		// This reduces memory usage and improves loading performance
 		let cache = SDImageCache.shared
 		
-		// Set memory cache limit (50MB) - prevents memory pressure
-		cache.config.maxMemoryCost = 50 * 1024 * 1024
+		// Optimized cache settings for million+ users
+		// Increased memory cache for better performance (100MB)
+		cache.config.maxMemoryCost = 100 * 1024 * 1024
 		
-		// Set disk cache limit (200MB, 7 days retention)
-		cache.config.maxDiskAge = 60 * 60 * 24 * 7 // 7 days
-		cache.config.maxDiskSize = 200 * 1024 * 1024 // 200MB
+		// Increased disk cache (500MB, 14 days retention) for better offline experience
+		cache.config.maxDiskAge = 60 * 60 * 24 * 14 // 14 days
+		cache.config.maxDiskSize = 500 * 1024 * 1024 // 500MB
 		
-		// Configure downloader for better performance
+		// Configure downloader for better performance at scale
 		let downloader = SDWebImageDownloader.shared
-		downloader.config.maxConcurrentDownloads = 6 // Limit concurrent downloads to prevent overload
-		downloader.config.downloadTimeout = 15.0 // 15 second timeout
+		downloader.config.maxConcurrentDownloads = 8 // Increased for better throughput
+		downloader.config.downloadTimeout = 20.0 // 20 second timeout for slower connections
+		// Note: executionOrder not available in this SDWebImage version, default FIFO behavior is fine
 		
 		#if DEBUG
-		print("✅ SDWebImage configured: Memory=50MB, Disk=200MB, MaxConcurrent=6")
+		print("✅ SDWebImage configured: Memory=100MB, Disk=500MB, MaxConcurrent=8")
 		#endif
 	}
 	

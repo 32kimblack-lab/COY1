@@ -222,6 +222,37 @@ struct UpdatesView: View {
 		}
 	}
 	
+	// MARK: - Complete Refresh (Pull-to-Refresh)
+	/// Complete refresh: Clear all caches, reload user data, reload everything from scratch
+	/// Equivalent to exiting and re-entering the app
+	private func completeRefresh() async {
+		guard let currentUserId = authService.user?.uid else { return }
+		
+		print("🔄 UpdatesView: Starting COMPLETE refresh (equivalent to app restart)")
+		
+		// Step 1: Clear ALL caches first (including user profile caches)
+		await MainActor.run {
+			HomeViewCache.shared.clearCache()
+			CollectionPostsCache.shared.clearAllCache()
+			// Clear user profile caches to force fresh profile image/name loads
+			UserService.shared.clearUserCache(userId: currentUserId)
+			print("✅ UpdatesView: Cleared all caches (including user profile caches)")
+		}
+		
+		// Step 2: Reload current user data - FORCE FRESH
+		do {
+			// Stop existing listener and reload fresh
+			CYServiceManager.shared.stopListening()
+			try await CYServiceManager.shared.loadCurrentUser()
+			print("✅ UpdatesView: Reloaded current user data (fresh from Firestore)")
+		} catch {
+			print("⚠️ UpdatesView: Error reloading current user: \(error)")
+		}
+		
+		// Step 3: Reload all updates - FORCE FRESH
+		await loadAllUpdates()
+	}
+	
 	private func loadAllUpdates() async {
 		print("🔔 UpdatesView: Loading all updates...")
 		isLoading = true
@@ -360,11 +391,17 @@ struct UpdatesView: View {
 					)
 				}
 				
+				let authorId = postData["authorId"] as? String ?? ""
+				// Subscribe to real-time updates for post author
+				if !authorId.isEmpty {
+					UserService.shared.subscribeToUserProfile(userId: authorId)
+				}
+				
 				let post = CollectionPost(
 					id: postDoc.documentID,
 					title: postData["title"] as? String ?? "",
 					collectionId: postData["collectionId"] as? String ?? "",
-					authorId: postData["authorId"] as? String ?? "",
+					authorId: authorId,
 					authorName: postData["authorName"] as? String ?? "",
 					createdAt: (postData["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
 					firstMediaItem: mediaItems.first,
@@ -379,13 +416,19 @@ struct UpdatesView: View {
 				if let collectionId = update.collectionId, !collectionId.isEmpty {
 					let collectionDoc = try await db.collection("collections").document(collectionId).getDocument()
 					if let collectionData = collectionDoc.data() {
+						let ownerId = collectionData["ownerId"] as? String ?? ""
+						// Subscribe to real-time updates for collection owner
+						if !ownerId.isEmpty {
+							UserService.shared.subscribeToUserProfile(userId: ownerId)
+						}
+						
 						collection = CollectionData(
 							id: collectionId,
 							name: collectionData["name"] as? String ?? "",
 							description: collectionData["description"] as? String ?? "",
 							type: collectionData["type"] as? String ?? "Individual",
 							isPublic: collectionData["isPublic"] as? Bool ?? false,
-							ownerId: collectionData["ownerId"] as? String ?? "",
+							ownerId: ownerId,
 							ownerName: collectionData["ownerName"] as? String ?? "",
 							owners: collectionData["owners"] as? [String] ?? [],
 							imageURL: collectionData["imageURL"] as? String,
@@ -473,14 +516,18 @@ struct UpdateRow: View {
 	let update: UpdateItem
 	let onTap: (UpdateItem) -> Void
 	@Environment(\.colorScheme) var colorScheme
+	@State private var displayProfileImageURL: String? = nil
+	@State private var displayUsername: String = ""
+	@State private var displayText: String = ""
+	@State private var displaySubText: String? = nil
 	
 	var body: some View {
 		Button(action: {
 			onTap(update)
 		}) {
 			HStack(spacing: 12) {
-				// Profile Picture (40-50dp, circular)
-				if let profileImageURL = update.profileImageURL, let url = URL(string: profileImageURL) {
+				// Profile Picture (40-50dp, circular) - real-time updates
+				if let profileImageURL = displayProfileImageURL, !profileImageURL.isEmpty, let url = URL(string: profileImageURL) {
 					WebImage(url: url) { image in
 						image
 							.resizable()
@@ -496,45 +543,41 @@ struct UpdateRow: View {
 					DefaultProfileImageView(size: 50)
 				}
 				
-				// Text Content (matches screenshot design)
+				// Text Content (matches screenshot design) - real-time updates
 				VStack(alignment: .leading, spacing: 3) {
 					// Main text (username or notification text)
 					if update.type == .star {
 						// For stars: "New star in collection "Collection Name""
-						Text(update.text)
+						Text(displayText.isEmpty ? update.text : displayText)
 							.font(.system(size: 14, weight: .regular))
 							.foregroundColor(.primary)
 							.lineLimit(2)
 						
-						// Sub text: username
-						if let subText = update.subText {
-							Text(subText)
+						// Sub text: username (real-time)
+						Text(displaySubText ?? update.subText ?? "")
 								.font(.system(size: 13, weight: .medium))
 								.foregroundColor(.primary)
 								.lineLimit(1)
-						}
 					} else if update.type == .comment || update.type == .reply {
-						// For comments: username on first line
-						Text(update.text)
+						// For comments: username on first line (real-time)
+						Text(displayText.isEmpty ? update.text : displayText)
 							.font(.system(size: 14, weight: .medium))
 							.foregroundColor(.primary)
 							.lineLimit(1)
 						
 						// Comment text on second line
-						if let subText = update.subText {
-							Text(subText)
+						Text(displaySubText ?? update.subText ?? "")
 								.font(.system(size: 13, weight: .regular))
 								.foregroundColor(.secondary)
 								.lineLimit(2)
-						}
 					} else {
 						// For new posts: full text
-						Text(update.text)
+						Text(displayText.isEmpty ? update.text : displayText)
 							.font(.system(size: 14, weight: .regular))
 							.foregroundColor(.primary)
 							.lineLimit(2)
 						
-						if let subText = update.subText {
+						if let subText = displaySubText ?? update.subText {
 							Text(subText)
 								.font(.system(size: 13, weight: .regular))
 								.foregroundColor(.secondary)
@@ -569,6 +612,60 @@ struct UpdateRow: View {
 			}
 		}
 		.buttonStyle(PlainButtonStyle())
+		.onAppear {
+			// Initialize with update data
+			displayProfileImageURL = update.profileImageURL
+			displayUsername = update.username
+			displayText = update.text
+			displaySubText = update.subText
+			
+			// Subscribe to real-time updates for this user
+			UserService.shared.subscribeToUserProfile(userId: update.userId)
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserProfileUpdated"))) { notificationUpdate in
+			// Update display when user profile changes
+			if let updatedUserId = notificationUpdate.object as? String,
+			   updatedUserId == update.userId,
+			   let userInfo = notificationUpdate.userInfo {
+				if let newProfileImageURL = userInfo["profileImageURL"] as? String {
+					displayProfileImageURL = newProfileImageURL.isEmpty ? nil : newProfileImageURL
+				}
+				if let newUsername = userInfo["username"] as? String {
+					displayUsername = newUsername
+					// Update text if it contains the username
+					if update.text.contains(update.username) {
+						displayText = update.text.replacingOccurrences(of: update.username, with: newUsername)
+					}
+					// Update subText if it contains the username
+					if let subText = update.subText, subText.contains(update.username) {
+						displaySubText = subText.replacingOccurrences(of: update.username, with: newUsername)
+					} else if update.subText == update.username {
+						displaySubText = newUsername
+					}
+				}
+			}
+		}
+		.onAppear {
+			// Initialize with update data
+			displayProfileImageURL = update.profileImageURL
+			displayUsername = update.username
+			
+			// Subscribe to real-time updates for this user
+			UserService.shared.subscribeToUserProfile(userId: update.userId)
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserProfileUpdated"))) { notificationUpdate in
+			// Update display when user profile changes
+			if let updatedUserId = notificationUpdate.object as? String,
+			   updatedUserId == update.userId,
+			   let userInfo = notificationUpdate.userInfo {
+				if let newProfileImageURL = userInfo["profileImageURL"] as? String {
+					displayProfileImageURL = newProfileImageURL.isEmpty ? nil : newProfileImageURL
+				}
+				if let newUsername = userInfo["username"] as? String {
+					displayUsername = newUsername
+				}
+			}
+		}
 	}
 }
 
@@ -584,11 +681,13 @@ struct ActionRequiredUpdateRow: View {
 	let update: ActionRequiredUpdate
 	let onAction: (ActionButtonType, ActionRequiredUpdate) -> Void
 	@Environment(\.colorScheme) var colorScheme
+	@State private var displayProfileImageURL: String? = nil
+	@State private var displayUsername: String = ""
 	
 	var body: some View {
 		HStack(spacing: 12) {
-			// Profile Picture (40-50dp, circular)
-			if let profileImageURL = update.profileImageURL, !profileImageURL.isEmpty, let url = URL(string: profileImageURL) {
+			// Profile Picture (40-50dp, circular) - real-time updates
+			if let profileImageURL = displayProfileImageURL, !profileImageURL.isEmpty, let url = URL(string: profileImageURL) {
 				WebImage(url: url) { image in
 					image
 						.resizable()
@@ -611,9 +710,9 @@ struct ActionRequiredUpdateRow: View {
 					)
 			}
 			
-			// Text Content
+			// Text Content - real-time updates
 			VStack(alignment: .leading, spacing: 4) {
-				Text(update.username)
+				Text(displayUsername.isEmpty ? update.username : displayUsername)
 					.font(.system(size: 14, weight: .bold))
 					.foregroundColor(.primary)
 				

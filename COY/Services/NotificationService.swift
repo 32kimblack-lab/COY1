@@ -46,19 +46,28 @@ final class NotificationService {
 		
 		let db = Firestore.firestore()
 		
-		// Get all admins (owners array)
-		let admins = collection.owners
+		// Get all recipients: owner + all admins (excluding requester)
+		var recipients = Set<String>()
 		
-		// Create or update notification for each admin (ONE notification per admin, not multiple)
-		// Use retry logic for all Firestore operations
-		for adminId in admins {
-			// Skip if requester is the admin
-			if adminId == currentUserId {
-				continue
+		// Add owner
+		if collection.ownerId != currentUserId {
+			recipients.insert(collection.ownerId)
+		}
+		
+		// Add all admins (from owners array, excluding owner if they're in there)
+		for adminId in collection.owners {
+			// Skip if requester is the admin, or if it's the owner (already added above)
+			if adminId != currentUserId && adminId != collection.ownerId {
+				recipients.insert(adminId)
 			}
+		}
+		
+		// Create or update notification for each recipient (owner + admins)
+		// Use retry logic for all Firestore operations
+		for recipientId in recipients {
 			
 			let notificationsRef = db.collection("users")
-				.document(adminId)
+				.document(recipientId)
 				.collection("notifications")
 			
 			// First, delete ALL existing pending request notifications from this user for this collection
@@ -85,7 +94,7 @@ final class NotificationService {
 					},
 					operationName: "Delete notification"
 				)
-				print("🗑️ NotificationService: Deleted existing collection request notification for admin: \(adminId)")
+				print("🗑️ NotificationService: Deleted existing collection request notification for recipient: \(recipientId)")
 			}
 			
 			// Now create a fresh notification (with retry)
@@ -109,7 +118,8 @@ final class NotificationService {
 				},
 				operationName: "Create notification"
 			)
-			print("✅ NotificationService: Sent collection request notification to admin: \(adminId)")
+			let recipientType = recipientId == collection.ownerId ? "owner" : "admin"
+			print("✅ NotificationService: Sent collection request notification to \(recipientType): \(recipientId)")
 		}
 		
 		// Post notification to trigger UI update
@@ -301,8 +311,18 @@ final class NotificationService {
 		
 		let db = Firestore.firestore()
 		
-		// Get all admins (owners array)
-		let admins = collection.owners
+		// Get all recipients: owner + all admins
+		var recipients = Set<String>()
+		
+		// Add owner
+		recipients.insert(collection.ownerId)
+		
+		// Add all admins (from owners array, excluding owner if they're in there)
+		for adminId in collection.owners {
+			if adminId != collection.ownerId {
+				recipients.insert(adminId)
+			}
+		}
 		
 		// Build message with all usernames
 		let usernames = joinedUsers.compactMap { $0["username"] as? String }
@@ -311,18 +331,18 @@ final class NotificationService {
 		let message: String
 		if count == 1 {
 			message = "\(usernames.first ?? "Someone") joined \(collectionName)"
-		} else if count <= 7 {
-			// Show all usernames when 7 or fewer people join
+		} else if count <= 6 {
+			// Show all usernames when 6 or fewer people join
 			message = "\(usernames.joined(separator: ", ")) joined \(collectionName)"
 		} else {
-			// If more than 7, show first few and remaining count
+			// If more than 6, show first few and remaining count
 			let firstFew = usernames.prefix(3).joined(separator: ", ")
 			let remaining = count - 3
 			message = "\(firstFew) and \(remaining) other\(remaining == 1 ? "" : "s") joined \(collectionName)"
 		}
 		
-		// Create notification for each admin
-		for adminId in admins {
+		// Create notification for each recipient (owner + admins)
+		for recipientId in recipients {
 			let notificationData: [String: Any] = [
 				"type": "collection_join",
 				"userId": joinedUsers.first?["userId"] as? String ?? "", // Use first user as primary
@@ -337,14 +357,15 @@ final class NotificationService {
 				"createdAt": Timestamp()
 			]
 			
-			// Add notification to admin's notifications subcollection
+			// Add notification to recipient's notifications subcollection
 			let notificationRef = db.collection("users")
-				.document(adminId)
+				.document(recipientId)
 				.collection("notifications")
 				.document()
 			
 			try await notificationRef.setData(notificationData)
-			print("✅ NotificationService: Sent batch join notification to admin: \(adminId) for \(count) users")
+			let recipientType = recipientId == collection.ownerId ? "owner" : "admin"
+			print("✅ NotificationService: Sent batch join notification to \(recipientType): \(recipientId) for \(count) users")
 		}
 		
 		// Post notification to trigger UI update
@@ -460,18 +481,43 @@ final class NotificationService {
 		postThumbnailURL: String?,
 		collectionMemberIds: [String]
 	) async throws {
-		// Don't notify if user posted in their own collection
-		// Get collection to find owners
-		guard try await CollectionService.shared.getCollection(collectionId: collectionId) != nil else {
+		// Get collection to check type and get owner/admins
+		guard let collection = try await CollectionService.shared.getCollection(collectionId: collectionId) else {
+			return
+		}
+		
+		// Only send notifications for "Request" and "Invite" type collections
+		guard collection.type == "Request" || collection.type == "Invite" else {
+			print("⏭️ NotificationService: Skipping collection post notification - collection type is '\(collection.type)', only 'Request' and 'Invite' collections receive notifications")
 			return
 		}
 		
 		let db = Firestore.firestore()
 		
-		// Notify all collection members except the post author
-		let membersToNotify = collectionMemberIds.filter { $0 != postAuthorId }
+		// Get all recipients: owner + admins + members (excluding post author)
+		var recipients = Set<String>()
 		
-		for memberId in membersToNotify {
+		// Add owner
+		if collection.ownerId != postAuthorId {
+			recipients.insert(collection.ownerId)
+		}
+		
+		// Add all admins (from owners array, excluding owner if they're in there)
+		for adminId in collection.owners {
+			if adminId != postAuthorId && adminId != collection.ownerId {
+				recipients.insert(adminId)
+			}
+		}
+		
+		// Add all members (excluding post author)
+		for memberId in collectionMemberIds {
+			if memberId != postAuthorId {
+				recipients.insert(memberId)
+			}
+		}
+		
+		// Send notification to all recipients
+		for recipientId in recipients {
 			let notificationData: [String: Any] = [
 				"type": "collection_post",
 				"userId": postAuthorId,
@@ -479,21 +525,22 @@ final class NotificationService {
 				"userProfileImageURL": postAuthorProfileImageURL ?? "",
 				"collectionId": collectionId,
 				"collectionName": collectionName,
-				"message": "\(postAuthorUsername) has posted in the collection \"\(collectionName)\"",
+				"message": "\(postAuthorUsername) has posted in the collection\n\"\(collectionName)\"",
 				"isRead": false,
 				"postId": postId,
 				"postThumbnailURL": postThumbnailURL ?? "",
 				"createdAt": Timestamp()
 			]
 			
-			// Add notification to member's notifications subcollection
+			// Add notification to recipient's notifications subcollection
 			let notificationRef = db.collection("users")
-				.document(memberId)
+				.document(recipientId)
 				.collection("notifications")
 				.document()
 			
 			try await notificationRef.setData(notificationData)
-			print("✅ NotificationService: Sent collection post notification to user: \(memberId)")
+			let recipientType = recipientId == collection.ownerId ? "owner" : (collection.owners.contains(recipientId) ? "admin" : "member")
+			print("✅ NotificationService: Sent collection post notification to \(recipientType): \(recipientId)")
 		}
 		
 		// Post notification to trigger UI update

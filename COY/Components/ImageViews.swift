@@ -9,7 +9,9 @@ struct CachedProfileImageView: View {
 	var body: some View {
 		if !url.isEmpty, let imageURL = URL(string: url) {
 			ZStack {
+				// Placeholder shown immediately
 				DefaultProfileImageView(size: size)
+				// Full image loads lazily with fade transition
 				WebImage(url: imageURL)
 					.resizable()
 					.indicator(.activity)
@@ -17,6 +19,7 @@ struct CachedProfileImageView: View {
 					.scaledToFill()
 					.frame(width: size, height: size)
 					.clipShape(Circle())
+					// Placeholder remains visible on failure automatically
 			}
 		} else {
 			DefaultProfileImageView(size: size)
@@ -31,18 +34,21 @@ struct CachedBackgroundImageView: View {
 	var body: some View {
 		if !url.isEmpty, let imageURL = URL(string: url) {
 			ZStack {
-				Color.clear
+				// Placeholder shown immediately
+				Color.gray.opacity(0.1)
 					.frame(height: height)
+				// Full image loads lazily
 				WebImage(url: imageURL)
 					.resizable()
 					.indicator(.activity)
-					.transition(.fade(duration: 0.2))
+					.transition(.fade(duration: 0.3))
 					.scaledToFill()
 					.frame(height: height)
 					.clipped()
+					// Placeholder remains visible on failure automatically
 			}
 		} else {
-			Color.clear
+			Color.gray.opacity(0.1)
 				.frame(height: height)
 		}
 	}

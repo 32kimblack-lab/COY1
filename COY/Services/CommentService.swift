@@ -96,6 +96,11 @@ final class CommentService {
 			"commentCount": FieldValue.increment(Int64(1))
 		])
 		
+		// Track engagement (comment count)
+		Task {
+			await EngagementService.shared.trackPostComment(postId: postId, isAdded: true)
+		}
+		
 		// Send comment/reply notification
 		Task {
 			do {

@@ -104,6 +104,12 @@ class FriendService {
 		}
 		
 		try await batch.commit()
+		
+		// Post updated friend request count for the recipient (toUid)
+		// The recipient's count should increase when they receive a new request
+		// Note: We can't directly get the recipient's count from here, so we'll rely on
+		// the real-time listener in AddFriendsScreen to update the count
+		// The count will be updated when the recipient's app receives the new request via listener
 	}
 	
 	// MARK: - Restore Friendship (Direct Re-add)
@@ -278,6 +284,9 @@ class FriendService {
 		// OPTIMIZATION: Clear cache after friend status change
 		clearCache()
 		
+		// Get updated friend request count and post notification
+		let updatedCount = try await getTotalPendingFriendRequestCount()
+		
 		// Notify that friend request was accepted (for UI updates)
 		await MainActor.run {
 			NotificationCenter.default.post(
@@ -287,6 +296,12 @@ class FriendService {
 			NotificationCenter.default.post(
 				name: NSNotification.Name("FriendAdded"),
 				object: fromUid
+			)
+			// Post updated friend request count
+			NotificationCenter.default.post(
+				name: NSNotification.Name("FriendRequestCountChanged"),
+				object: nil,
+				userInfo: ["count": updatedCount]
 			)
 		}
 		
@@ -305,6 +320,18 @@ class FriendService {
 		try await db.collection("friend_requests").document(requestId).updateData([
 			"status": "denied"
 		])
+		
+		// Get updated friend request count and post notification
+		let updatedCount = try await getTotalPendingFriendRequestCount()
+		
+		await MainActor.run {
+			// Post updated friend request count
+			NotificationCenter.default.post(
+				name: NSNotification.Name("FriendRequestCountChanged"),
+				object: nil,
+				userInfo: ["count": updatedCount]
+			)
+		}
 	}
 	
 	// MARK: - Remove Friend (Unadd)
@@ -708,6 +735,22 @@ class FriendService {
 			.whereField("toUid", isEqualTo: currentUid)
 			.whereField("status", isEqualTo: "pending")
 			.whereField("seen", isEqualTo: false)
+			.getDocuments()
+		
+		return snapshot.documents.count
+	}
+	
+	// MARK: - Get Total Pending Friend Request Count
+	/// Get total count of ALL pending friend requests (not just unseen)
+	/// This count should persist until requests are accepted or denied
+	func getTotalPendingFriendRequestCount() async throws -> Int {
+		guard let currentUid = currentUid else {
+			throw FriendServiceError.notAuthenticated
+		}
+		
+		let snapshot = try await db.collection("friend_requests")
+			.whereField("toUid", isEqualTo: currentUid)
+			.whereField("status", isEqualTo: "pending")
 			.getDocuments()
 		
 		return snapshot.documents.count

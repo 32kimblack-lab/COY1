@@ -56,9 +56,10 @@ struct CYInsideCollectionView: View {
 	@State private var postToDelete: CollectionPost?
 	@State private var showPostDeleteAlert = false
 	
-	// Cache for collection posts (keyed by collection ID)
-	private class CollectionPostsCache {
-		static let shared = CollectionPostsCache()
+	// Local cache for collection posts (keyed by collection ID)
+	// Note: This is separate from the global CollectionPostsCache in CollectionRowDesign.swift
+	private class LocalCollectionPostsCache {
+		static let shared = LocalCollectionPostsCache()
 		private init() {}
 		
 		private var cache: [String: [CollectionPost]] = [:]
@@ -101,33 +102,11 @@ struct CYInsideCollectionView: View {
 					.environmentObject(authService)
 			}
 			.refreshable {
-				// Pull-to-refresh: Check for new posts, reorder if none found
-				await refreshCollectionPosts()
+				// Complete refresh: Clear all caches and force fresh reload
+				await completeRefresh()
 			}
 			.onAppear {
-				loadCollectionData()
-				// ALWAYS use cache first - no auto-refresh on view appearance
-				if CollectionPostsCache.shared.hasDataLoaded(for: collection.id) {
-					if let cachedPosts = CollectionPostsCache.shared.getCachedPosts(for: collection.id) {
-						// Use cached data immediately (no network call)
-						posts = cachedPosts
-					} else {
-						loadInitialPosts()
-					}
-				} else {
-					// No cache exists, load fresh
-					loadInitialPosts()
-				}
-				// Remove real-time listener - use pagination instead
-				// setupPostListener() // REMOVED - using pagination
-				// Set up real-time listener for owner's profile (so other users see updates)
-				setupOwnerProfileListener()
-				// Initialize shared request state manager
-				Task {
-					await CollectionRequestStateManager.shared.initializeState()
-					// Then update follow state
-					await updateFollowState()
-				}
+			handleOnAppear()
 			}
 			.onDisappear {
 				// Clean up listener when view disappears
@@ -1032,6 +1011,32 @@ struct CYInsideCollectionView: View {
 	}
 	
 	// MARK: - Functions
+	private func handleOnAppear() {
+		loadCollectionData()
+		// ALWAYS use cache first - no auto-refresh on view appearance
+		if LocalCollectionPostsCache.shared.hasDataLoaded(for: collection.id) {
+			if let cachedPosts = LocalCollectionPostsCache.shared.getCachedPosts(for: collection.id) {
+				// Use cached data immediately (no network call)
+				posts = cachedPosts
+			} else {
+				loadInitialPosts()
+			}
+		} else {
+			// No cache exists, load fresh
+			loadInitialPosts()
+		}
+		// Remove real-time listener - use pagination instead
+		// setupPostListener() // REMOVED - using pagination
+		// Set up real-time listener for owner's profile (so other users see updates)
+		setupOwnerProfileListener()
+		// Initialize shared request state manager
+		Task {
+			await CollectionRequestStateManager.shared.initializeState()
+			// Then update follow state
+			await updateFollowState()
+		}
+	}
+	
 	private func loadCollectionData() {
 		Task {
 			// Load collection data to get updated info
@@ -1183,6 +1188,42 @@ struct CYInsideCollectionView: View {
 		}
 	}
 	
+	// MARK: - Complete Refresh (Pull-to-Refresh)
+	/// Complete refresh: Clear all caches, reload collection data, reload everything from scratch
+	/// Equivalent to exiting and re-entering the app
+	private func completeRefresh() async {
+		guard let currentUserId = authService.user?.uid else { return }
+		
+		print("🔄 CYInsideCollectionView: Starting COMPLETE refresh (equivalent to app restart)")
+		
+		// Step 1: Clear ALL caches first (including user profile caches)
+		await MainActor.run {
+			// Clear local cache for this collection
+			LocalCollectionPostsCache.shared.clearCache(for: collection.id)
+			// Clear global cache (from CollectionRowDesign.swift)
+			CollectionPostsCache.shared.clearAllCache()
+			HomeViewCache.shared.clearCache()
+			// Clear user profile caches to force fresh profile image/name loads
+			UserService.shared.clearUserCache(userId: collection.ownerId)
+			UserService.shared.clearUserCache(userId: currentUserId)
+			print("✅ CYInsideCollectionView: Cleared all caches (including user profile caches)")
+		}
+		
+		// Step 2: Reload current user data - FORCE FRESH
+		do {
+			// Stop existing listener and reload fresh
+			CYServiceManager.shared.stopListening()
+			try await CYServiceManager.shared.loadCurrentUser()
+			print("✅ CYInsideCollectionView: Reloaded current user data (fresh from Firestore)")
+		} catch {
+			print("⚠️ CYInsideCollectionView: Error reloading current user: \(error)")
+		}
+		
+		// Step 3: Reload collection data and posts - FORCE FRESH
+		loadCollectionData()
+		await refreshCollectionPosts()
+	}
+	
 	// MARK: - Pull-to-Refresh with Reordering
 	/// Refresh collection posts: Check for new posts, reorder if none found
 	private func refreshCollectionPosts() async {
@@ -1190,6 +1231,23 @@ struct CYInsideCollectionView: View {
 		isLoadingPosts = true
 		lastPostDocument = nil
 		hasMorePosts = true
+		
+		// First verify collection still exists (not deleted)
+		do {
+			guard let freshCollection = try await CollectionService.shared.getCollection(collectionId: collection.id) else {
+				// Collection was deleted, dismiss view
+				print("⚠️ CYInsideCollectionView: Collection was deleted during refresh, dismissing view")
+				await MainActor.run {
+					dismiss()
+				}
+				return
+			}
+			await MainActor.run {
+				self.collection = freshCollection
+			}
+		} catch {
+			print("❌ CYInsideCollectionView: Error verifying collection exists: \(error)")
+		}
 		
 		do {
 			let (firebasePosts, lastDoc, hasMore) = try await PostService.shared.getCollectionPostsPaginated(
@@ -1214,34 +1272,10 @@ struct CYInsideCollectionView: View {
 			}
 			
 			await MainActor.run {
-				// Check if we have new posts compared to cached data
-				if CollectionPostsCache.shared.hasDataLoaded(for: collection.id) {
-					if let cachedPosts = CollectionPostsCache.shared.getCachedPosts(for: collection.id) {
-						let cachedPostIds = Set(cachedPosts.map { $0.id })
-						let newPostIds = Set(filteredPosts.map { $0.id })
-						let hasNewPosts = !newPostIds.subtracting(cachedPostIds).isEmpty
-						
-						if hasNewPosts {
-							// New posts found - use them
+				// Always use fresh data from Firestore (cache was cleared in completeRefresh)
+				// This ensures deleted posts are removed and new posts appear
 							posts = filteredPosts
-							CollectionPostsCache.shared.setCachedPosts(filteredPosts, for: collection.id)
-						} else {
-							// No new posts - reorder/shuffle existing feed
-							var reorderedPosts = cachedPosts
-							reorderedPosts.shuffle()
-							posts = reorderedPosts
-							CollectionPostsCache.shared.setCachedPosts(reorderedPosts, for: collection.id)
-						}
-					} else {
-						// No cached posts, use new ones
-						posts = filteredPosts
-						CollectionPostsCache.shared.setCachedPosts(filteredPosts, for: collection.id)
-					}
-				} else {
-					// No cached data exists - use new posts
-					posts = filteredPosts
-					CollectionPostsCache.shared.setCachedPosts(filteredPosts, for: collection.id)
-				}
+				LocalCollectionPostsCache.shared.setCachedPosts(filteredPosts, for: collection.id)
 				
 				lastPostDocument = lastDoc
 				hasMorePosts = hasMore
@@ -1561,6 +1595,25 @@ struct CYInsideCollectionView: View {
 		isProcessing = true
 		do {
 			let newPinState = !post.isPinned
+			
+			// If pinning a new post, check if there are already 4 pinned posts
+			// If so, unpin the oldest one (least recently pinned)
+			if newPinState {
+				let pinnedPosts = posts.filter { $0.isPinned && $0.id != post.id }
+				if pinnedPosts.count >= 4 {
+					// Find the oldest pinned post (lowest pinnedAt date)
+					if let oldestPinnedPost = pinnedPosts.min(by: { post1, post2 in
+						let date1 = post1.pinnedAt ?? post1.createdAt
+						let date2 = post2.pinnedAt ?? post2.createdAt
+						return date1 < date2
+					}) {
+						print("📌 Unpinning oldest post (ID: \(oldestPinnedPost.id)) to make room for new pin")
+						try await CollectionService.shared.togglePostPin(postId: oldestPinnedPost.id, isPinned: false)
+					}
+				}
+			}
+			
+			// Now pin/unpin the requested post
 			try await CollectionService.shared.togglePostPin(postId: post.id, isPinned: newPinState)
 			print("✅ Post pin toggled successfully")
 			

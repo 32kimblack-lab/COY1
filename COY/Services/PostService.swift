@@ -87,6 +87,9 @@ final class PostService {
 			"taggedUsers": taggedUsers ?? [],
 			"isPinned": false,
 			"commentCount": 0, // OPTIMIZATION: Initialize comment count for efficient counting
+			"likeCount": 0, // Initialize like count
+			"viewCount": 0, // Initialize view count
+			"engagementScore": 0.0, // Initialize engagement score
 			"createdAt": Timestamp()
 		]
 		
@@ -105,6 +108,50 @@ final class PostService {
 		let postId = docRef.documentID
 		
 		print("✅ Post saved to Firebase: \(postId) with allowDownload=\(allowDownload), allowReplies=\(allowReplies)")
+		
+		// Send collection post notification to members/admins/owner (for Request/Invite collections only)
+		Task {
+			do {
+				// Get collection to get members and name
+				if let collection = try? await CollectionService.shared.getCollection(collectionId: collectionId) {
+					// Get post thumbnail URL
+					let firstMedia = postData["firstMediaItem"] as? [String: Any]
+					let thumbnailURL: String? = {
+						if let isVideo = firstMedia?["isVideo"] as? Bool, isVideo {
+							// Video: prefer thumbnailURL, fallback to imageURL
+							return firstMedia?["thumbnailURL"] as? String ?? firstMedia?["imageURL"] as? String
+						} else {
+							// Image: use imageURL directly
+							return firstMedia?["imageURL"] as? String
+						}
+					}()
+					
+					// Get author username and profile image
+					let author = try? await UserService.shared.getUser(userId: userId)
+					let authorUsername = author?.username ?? ""
+					let authorProfileImageURL = author?.profileImageURL
+					
+					// Get all collection members (owner, admins, members)
+					var allMemberIds = [collection.ownerId]
+					allMemberIds.append(contentsOf: collection.owners.filter { $0 != collection.ownerId })
+					allMemberIds.append(contentsOf: collection.members)
+					
+					// Send notification (only for Request/Invite collections - handled inside the function)
+					try await NotificationService.shared.sendCollectionPostNotification(
+						collectionId: collectionId,
+						collectionName: collection.name,
+						postAuthorId: userId,
+						postAuthorUsername: authorUsername,
+						postAuthorProfileImageURL: authorProfileImageURL,
+						postId: postId,
+						postThumbnailURL: thumbnailURL,
+						collectionMemberIds: allMemberIds
+					)
+				}
+			} catch {
+				print("⚠️ PostService: Error sending collection post notification: \(error.localizedDescription)")
+			}
+		}
 		
 		// Send notification for real-time updates (replaces expensive listeners)
 		await MainActor.run {
@@ -388,6 +435,11 @@ final class PostService {
 			])
 		}
 		
+		// Track engagement (like count)
+		Task {
+			await EngagementService.shared.trackPostLike(postId: postId, isLiked: isStarred)
+		}
+		
 		// Post notification to update UI
 		Task { @MainActor in
 			NotificationCenter.default.post(
@@ -505,6 +557,12 @@ final class PostService {
 		let isPinned = data["isPinned"] as? Bool ?? false
 		let caption = data["caption"] as? String
 		
+		let authorId = data["authorId"] as? String ?? ""
+		// Subscribe to real-time updates for post author
+		if !authorId.isEmpty {
+			UserService.shared.subscribeToUserProfile(userId: authorId)
+		}
+		
 		let titleValue: String = {
 			if let title = data["title"] as? String, !title.isEmpty {
 				return title
@@ -512,11 +570,17 @@ final class PostService {
 			return caption ?? ""
 		}()
 		
+		// Parse engagement metrics
+		let likeCount = data["likeCount"] as? Int ?? 0
+		let commentCount = data["commentCount"] as? Int ?? 0
+		let viewCount = data["viewCount"] as? Int ?? 0
+		let engagementScore = data["engagementScore"] as? Double ?? 0.0
+		
 		return CollectionPost(
 			id: doc.documentID,
 			title: titleValue,
 			collectionId: data["collectionId"] as? String ?? "",
-			authorId: data["authorId"] as? String ?? "",
+			authorId: authorId,
 			authorName: data["authorName"] as? String ?? "",
 			createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
 			firstMediaItem: firstMediaItem,
@@ -526,7 +590,11 @@ final class PostService {
 			caption: caption,
 			allowReplies: data["allowReplies"] as? Bool ?? true,
 			allowDownload: data["allowDownload"] as? Bool ?? false,
-			taggedUsers: data["taggedUsers"] as? [String] ?? []
+			taggedUsers: data["taggedUsers"] as? [String] ?? [],
+			likeCount: likeCount,
+			commentCount: commentCount,
+			viewCount: viewCount,
+			engagementScore: engagementScore
 		)
 	}
 	

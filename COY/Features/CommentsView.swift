@@ -589,6 +589,9 @@ struct CommentRow: View {
 	@Environment(\.colorScheme) var colorScheme
 	@EnvironmentObject var authService: AuthService
 	@State private var showDeleteAlert = false
+	@State private var displayName: String = ""
+	@State private var displayUsername: String = ""
+	@State private var displayProfileImageURL: String? = nil
 	
 	// Consistent sizing system (scaled for iPad)
 	private var isIPad: Bool {
@@ -613,7 +616,7 @@ struct CommentRow: View {
 		HStack(alignment: .top, spacing: commentSpacing) {
 			// Profile Image
 			NavigationLink(destination: ViewerProfileView(userId: comment.userId).environmentObject(authService)) {
-				if let imageURL = comment.profileImageURL, !imageURL.isEmpty, let url = URL(string: imageURL) {
+				if let imageURL = displayProfileImageURL, !imageURL.isEmpty, let url = URL(string: imageURL) {
 					WebImage(url: url)
 						.resizable()
 						.scaledToFill()
@@ -628,10 +631,10 @@ struct CommentRow: View {
 			// Comment Content
 			VStack(alignment: .leading, spacing: commentPadding) {
 				HStack(spacing: 4 * scaleFactor) {
-					Text(comment.name)
+					Text(displayName.isEmpty ? comment.name : displayName)
 						.font(.system(size: nameFontSize, weight: .semibold))
 						.foregroundColor(.primary)
-					Text("@\(comment.username)")
+					Text("@\(displayUsername.isEmpty ? comment.username : displayUsername)")
 						.font(.system(size: smallFontSize))
 						.foregroundColor(.secondary)
 					Text("•")
@@ -671,6 +674,31 @@ struct CommentRow: View {
 			}
 			
 			Spacer()
+		}
+		.onAppear {
+			// Initialize with comment data
+			displayName = comment.name
+			displayUsername = comment.username
+			displayProfileImageURL = comment.profileImageURL
+			
+			// Subscribe to real-time updates for this user
+			UserService.shared.subscribeToUserProfile(userId: comment.userId)
+		}
+		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("UserProfileUpdated"))) { notification in
+			// Update display when user profile changes
+			if let updatedUserId = notification.object as? String,
+			   updatedUserId == comment.userId,
+			   let userInfo = notification.userInfo {
+				if let newName = userInfo["name"] as? String {
+					displayName = newName
+				}
+				if let newUsername = userInfo["username"] as? String {
+					displayUsername = newUsername
+				}
+				if let newProfileImageURL = userInfo["profileImageURL"] as? String {
+					displayProfileImageURL = newProfileImageURL.isEmpty ? nil : newProfileImageURL
+				}
+			}
 		}
 		.alert("Delete Comment", isPresented: $showDeleteAlert) {
 			Button("Cancel", role: .cancel) { }

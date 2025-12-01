@@ -89,13 +89,19 @@ final class CollectionService {
 		
 		guard let data = doc.data() else { return nil }
 		
+		let ownerId = data["ownerId"] as? String ?? ""
+		// Subscribe to real-time updates for collection owner
+		if !ownerId.isEmpty {
+			UserService.shared.subscribeToUserProfile(userId: ownerId)
+		}
+		
 		return CollectionData(
 			id: doc.documentID,
 			name: data["name"] as? String ?? "",
 			description: data["description"] as? String ?? "",
 			type: data["type"] as? String ?? "Individual",
 			isPublic: data["isPublic"] as? Bool ?? false,
-			ownerId: data["ownerId"] as? String ?? "",
+			ownerId: ownerId,
 			ownerName: data["ownerName"] as? String ?? "",
 			owners: data["owners"] as? [String] ?? [data["ownerId"] as? String ?? ""],
 			imageURL: data["imageURL"] as? String,
@@ -131,12 +137,17 @@ final class CollectionService {
 		}
 		
 		let firstMediaItem = allMediaItems.first
+		let authorId = data["authorId"] as? String ?? ""
+		// Subscribe to real-time updates for post author
+		if !authorId.isEmpty {
+			UserService.shared.subscribeToUserProfile(userId: authorId)
+		}
 		
 		return CollectionPost(
 			id: doc.documentID,
 			title: data["title"] as? String ?? "",
 			collectionId: data["collectionId"] as? String ?? "",
-			authorId: data["authorId"] as? String ?? "",
+			authorId: authorId,
 			authorName: data["authorName"] as? String ?? "",
 			createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
 			firstMediaItem: firstMediaItem,
@@ -187,6 +198,11 @@ final class CollectionService {
 			let collectionIsPublic = data["isPublic"] as? Bool ?? false
 			let collectionOwnerId = data["ownerId"] as? String ?? userId
 			let collectionOwnerName = data["ownerName"] as? String ?? ""
+		
+		// Subscribe to real-time updates for collection owner
+		if !collectionOwnerId.isEmpty {
+			UserService.shared.subscribeToUserProfile(userId: collectionOwnerId)
+		}
 			
 			let collection = CollectionData(
 				id: collectionId,
@@ -294,13 +310,19 @@ final class CollectionService {
 		var collections: [CollectionData] = []
 		for doc in snapshot.documents {
 			let data = doc.data()
+			let ownerId = data["ownerId"] as? String ?? userId
+			// Subscribe to real-time updates for collection owner
+			if !ownerId.isEmpty {
+				UserService.shared.subscribeToUserProfile(userId: ownerId)
+			}
+			
 			let collection = CollectionData(
 				id: doc.documentID,
 				name: data["name"] as? String ?? "",
 				description: data["description"] as? String ?? "",
 				type: data["type"] as? String ?? "Individual",
 				isPublic: data["isPublic"] as? Bool ?? false,
-				ownerId: data["ownerId"] as? String ?? userId,
+				ownerId: ownerId,
 				ownerName: data["ownerName"] as? String ?? "",
 				owners: data["owners"] as? [String] ?? [userId],
 				imageURL: data["imageURL"] as? String,
@@ -326,6 +348,7 @@ final class CollectionService {
 	}
 	
 	/// Get visible collections for a user with pagination (for viewing other users' profiles)
+	/// Includes public collections AND private collections where viewing user is in allowedUsers
 	func getVisibleCollectionsPaginated(
 		profileUserId: String,
 		viewingUserId: String?,
@@ -334,28 +357,90 @@ final class CollectionService {
 	) async throws -> (collections: [CollectionData], lastDocument: DocumentSnapshot?, hasMore: Bool) {
 		let db = Firestore.firestore()
 		
-		var query: Query = db.collection("collections")
+		// Query 1: Public collections
+		let publicQuery: Query = db.collection("collections")
 			.whereField("ownerId", isEqualTo: profileUserId)
 			.whereField("isPublic", isEqualTo: true)
 			.order(by: "createdAt", descending: true)
 		
-		if let lastDoc = lastDocument {
-			query = query.start(afterDocument: lastDoc)
+		// Query 2: Private collections where viewing user is in allowedUsers
+		let allowedQuery: Query = {
+			var query: Query = db.collection("collections")
+				.whereField("ownerId", isEqualTo: profileUserId)
+				.whereField("isPublic", isEqualTo: false)
+			
+			// Only query allowedUsers if we have a viewing user
+			if let viewingUserId = viewingUserId {
+				query = query.whereField("allowedUsers", arrayContains: viewingUserId)
+			} else {
+				// If no viewing user, skip the allowedUsers query (no results)
+				query = query.limit(to: 0)
+			}
+			
+			return query.order(by: "createdAt", descending: true)
+		}()
+		
+		// Execute both queries in parallel
+		async let publicSnapshot = publicQuery.getDocuments()
+		async let allowedSnapshot = allowedQuery.getDocuments()
+		
+		let (publicDocs, allowedDocs) = try await (publicSnapshot, allowedSnapshot)
+		
+		// Combine results and remove duplicates
+		var allDocs: [QueryDocumentSnapshot] = []
+		var seenIds: Set<String> = []
+		
+		for doc in publicDocs.documents {
+			if !seenIds.contains(doc.documentID) {
+				allDocs.append(doc)
+				seenIds.insert(doc.documentID)
+			}
 		}
-		query = query.limit(to: limit)
 		
-		let snapshot = try await query.getDocuments()
+		for doc in allowedDocs.documents {
+			if !seenIds.contains(doc.documentID) {
+				allDocs.append(doc)
+				seenIds.insert(doc.documentID)
+			}
+		}
 		
+		// Sort by createdAt descending
+		allDocs.sort { doc1, doc2 in
+			let date1 = (doc1.data()["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+			let date2 = (doc2.data()["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+			return date1 > date2
+		}
+		
+		// Apply pagination
+		var paginatedDocs = allDocs
+		if let lastDoc = lastDocument {
+			// Find the index of the last document
+			let lastDocId = lastDoc.documentID
+			if let lastIndex = allDocs.firstIndex(where: { $0.documentID == lastDocId }) {
+				paginatedDocs = Array(allDocs.suffix(from: allDocs.index(after: lastIndex)))
+		}
+		}
+		
+		// Apply limit
+		paginatedDocs = Array(paginatedDocs.prefix(limit))
+		
+		// Parse collections
 		var collections: [CollectionData] = []
-		for doc in snapshot.documents {
+		for doc in paginatedDocs {
 			let data = doc.data()
+			let ownerId = data["ownerId"] as? String ?? profileUserId
+			// Subscribe to real-time updates for collection owner
+			if !ownerId.isEmpty {
+				UserService.shared.subscribeToUserProfile(userId: ownerId)
+			}
+			
 			let collection = CollectionData(
 				id: doc.documentID,
 				name: data["name"] as? String ?? "",
 				description: data["description"] as? String ?? "",
 				type: data["type"] as? String ?? "Individual",
 				isPublic: data["isPublic"] as? Bool ?? false,
-				ownerId: data["ownerId"] as? String ?? profileUserId,
+				ownerId: ownerId,
 				ownerName: data["ownerName"] as? String ?? "",
 				owners: data["owners"] as? [String] ?? [profileUserId],
 				imageURL: data["imageURL"] as? String,
@@ -371,10 +456,10 @@ final class CollectionService {
 			collections.append(collection)
 		}
 		
-		let lastDoc = snapshot.documents.last
-		let hasMore = snapshot.documents.count == limit
+		let lastDoc = paginatedDocs.last
+		let hasMore = allDocs.count > (lastDocument != nil ? (allDocs.firstIndex(where: { $0.documentID == lastDocument?.documentID }) ?? 0) + limit : limit)
 		
-		// Filter out hidden collections (mutual blocking, blocked users, etc.)
+		// Filter out hidden collections and denied collections (mutual blocking, blocked users, etc.)
 		let filteredCollections = await CollectionService.filterCollections(collections)
 		
 		return (filteredCollections, lastDoc, hasMore)
@@ -423,11 +508,17 @@ final class CollectionService {
 			
 			let firstMediaItem = allMediaItems.first
 			
+			let authorId = data["authorId"] as? String ?? ""
+			// Subscribe to real-time updates for post author
+			if !authorId.isEmpty {
+				UserService.shared.subscribeToUserProfile(userId: authorId)
+			}
+			
 			return CollectionPost(
 				id: doc.documentID,
 				title: data["title"] as? String ?? data["caption"] as? String ?? "",
 				collectionId: data["collectionId"] as? String ?? "",
-				authorId: data["authorId"] as? String ?? "",
+				authorId: authorId,
 				authorName: data["authorName"] as? String ?? "",
 				createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
 				firstMediaItem: firstMediaItem,
@@ -899,13 +990,19 @@ final class CollectionService {
 				return nil
 			}
 			
+			let finalOwnerId = data["ownerId"] as? String ?? ownerId
+			// Subscribe to real-time updates for collection owner
+			if !finalOwnerId.isEmpty {
+				UserService.shared.subscribeToUserProfile(userId: finalOwnerId)
+			}
+			
 			let collection = CollectionData(
 				id: doc.documentID,
 				name: data["name"] as? String ?? "",
 				description: data["description"] as? String ?? "",
 				type: data["type"] as? String ?? "Individual",
 				isPublic: data["isPublic"] as? Bool ?? false,
-				ownerId: data["ownerId"] as? String ?? ownerId,
+				ownerId: finalOwnerId,
 				ownerName: data["ownerName"] as? String ?? "",
 				owners: data["owners"] as? [String] ?? [ownerId],
 				imageURL: data["imageURL"] as? String,
@@ -1460,17 +1557,29 @@ final class CollectionService {
 		let db = Firestore.firestore()
 		let collectionRef = db.collection("collections").document(collectionId)
 		
-		// Get current memberJoinDates
+		// Get current memberJoinDates and deniedUsers
 		let collectionDoc = try await collectionRef.getDocument()
-		var memberJoinDates = collectionDoc.data()?["memberJoinDates"] as? [String: Timestamp] ?? [:]
+		let collectionData = collectionDoc.data() ?? [:]
+		var memberJoinDates = collectionData["memberJoinDates"] as? [String: Timestamp] ?? [:]
 		memberJoinDates[requesterId] = Timestamp()
+		var deniedUsers = collectionData["deniedUsers"] as? [String] ?? []
+		
+		// Remove from deniedUsers if they were previously denied
+		deniedUsers.removeAll { $0 == requesterId }
 		
 		// Add requester to members
-		try await collectionRef.updateData([
+		var updateData: [String: Any] = [
 			"members": FieldValue.arrayUnion([requesterId]),
 			"memberCount": FieldValue.increment(Int64(1)),
 			"memberJoinDates": memberJoinDates
-		])
+		]
+		
+		// Update deniedUsers if it changed
+		if deniedUsers != (collectionData["deniedUsers"] as? [String] ?? []) {
+			updateData["deniedUsers"] = deniedUsers
+		}
+		
+		try await collectionRef.updateData(updateData)
 		
 		// Also add collection to requester's user document (for profile display)
 		let userRef = db.collection("users").document(requesterId)
@@ -1553,6 +1662,22 @@ final class CollectionService {
 			throw NSError(domain: "CollectionService", code: 403, userInfo: [NSLocalizedDescriptionKey: "Only owner or admins can deny requests"])
 		}
 		
+		// Add requester to deniedUsers array to prevent future requests
+		let db = Firestore.firestore()
+		let collectionRef = db.collection("collections").document(collectionId)
+		
+		// Get current deniedUsers
+		let collectionDoc = try await collectionRef.getDocument()
+		var deniedUsers = collectionDoc.data()?["deniedUsers"] as? [String] ?? []
+		
+		// Add requester to deniedUsers if not already there
+		if !deniedUsers.contains(requesterId) {
+			deniedUsers.append(requesterId)
+			try await collectionRef.updateData([
+				"deniedUsers": deniedUsers
+			])
+		}
+		
 		// Delete the notification that was clicked
 		try await NotificationService.shared.deleteNotification(
 			notificationId: notificationId,
@@ -1614,22 +1739,6 @@ final class CollectionService {
 			throw NSError(domain: "CollectionService", code: 403, userInfo: [NSLocalizedDescriptionKey: "User is not in the invited users list"])
 		}
 		
-		// Post notifications immediately for synchronization (same pattern as join button)
-		NotificationCenter.default.post(
-			name: NSNotification.Name("CollectionInviteAccepted"),
-			object: collectionId,
-			userInfo: ["userId": currentUserId]
-		)
-		NotificationCenter.default.post(
-			name: NSNotification.Name("CollectionUpdated"),
-			object: collectionId,
-			userInfo: ["action": "memberAdded", "userId": currentUserId]
-		)
-		NotificationCenter.default.post(
-			name: NSNotification.Name("UserCollectionsUpdated"),
-			object: currentUserId
-		)
-		
 		do {
 			// Use Firebase directly (same pattern as acceptCollectionRequest - direct updates work better for permissions)
 			let db = Firestore.firestore()
@@ -1663,15 +1772,28 @@ final class CollectionService {
 			)
 			
 			print("✅ CollectionService: Collection invite accepted and notification deleted for user \(currentUserId)")
+			
+			// Post notifications AFTER successful update (same pattern as acceptCollectionRequest)
+			Task { @MainActor in
+				NotificationCenter.default.post(
+					name: NSNotification.Name("CollectionInviteAccepted"),
+					object: collectionId,
+					userInfo: ["userId": currentUserId]
+				)
+				NotificationCenter.default.post(
+					name: NSNotification.Name("CollectionUpdated"),
+					object: collectionId,
+					userInfo: ["action": "memberAdded", "userId": currentUserId]
+				)
+				NotificationCenter.default.post(
+					name: NSNotification.Name("UserCollectionsUpdated"),
+					object: currentUserId
+				)
+			}
 		} catch {
-			// Revert notifications on error
+			// Log error but don't post notifications on error
 			print("❌ CollectionService: Error accepting invite: \(error.localizedDescription)")
 			print("❌ CollectionService: Error details: \(error)")
-			NotificationCenter.default.post(
-				name: NSNotification.Name("CollectionInviteDenied"),
-				object: collectionId,
-				userInfo: ["userId": currentUserId]
-			)
 			throw error
 		}
 	}
@@ -1686,29 +1808,35 @@ final class CollectionService {
 			throw NSError(domain: "CollectionService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Collection not found"])
 		}
 		
-		// Remove from invitedUsers if present
-		let db = Firestore.firestore()
-		let collectionRef = db.collection("collections").document(collectionId)
-		try await collectionRef.updateData([
-			"invitedUsers": FieldValue.arrayRemove([currentUserId])
-		])
-		
-		// Delete the notification
-		try await NotificationService.shared.deleteNotification(
-			notificationId: notificationId,
-			userId: currentUserId
-		)
-		
-		// Post notification to update UI
-		Task { @MainActor in
-			NotificationCenter.default.post(
-				name: NSNotification.Name("CollectionInviteDenied"),
-				object: collectionId,
-				userInfo: ["userId": currentUserId]
+		do {
+			// Remove from invitedUsers if present
+			let db = Firestore.firestore()
+			let collectionRef = db.collection("collections").document(collectionId)
+			try await collectionRef.updateData([
+				"invitedUsers": FieldValue.arrayRemove([currentUserId])
+			])
+			
+			// Delete the notification
+			try await NotificationService.shared.deleteNotification(
+				notificationId: notificationId,
+				userId: currentUserId
 			)
+			
+			print("✅ CollectionService: Collection invite denied for user \(currentUserId)")
+			
+			// Post notification to update UI AFTER successful update
+			Task { @MainActor in
+				NotificationCenter.default.post(
+					name: NSNotification.Name("CollectionInviteDenied"),
+					object: collectionId,
+					userInfo: ["userId": currentUserId]
+				)
+			}
+		} catch {
+			print("❌ CollectionService: Error denying invite: \(error.localizedDescription)")
+			print("❌ CollectionService: Error details: \(error)")
+			throw error
 		}
-		
-		print("✅ CollectionService: Collection invite denied for user \(currentUserId)")
 	}
 	
 	// MARK: - Join Collection (Open Collections)
@@ -1732,38 +1860,27 @@ final class CollectionService {
 			throw NSError(domain: "CollectionService", code: 400, userInfo: [NSLocalizedDescriptionKey: "User is already a member"])
 		}
 		
-		// Post notifications immediately for synchronization (same pattern as invite/request)
-		NotificationCenter.default.post(
-			name: NSNotification.Name("CollectionJoined"),
-			object: collectionId,
-			userInfo: ["userId": currentUserId]
-		)
-		NotificationCenter.default.post(
-			name: NSNotification.Name("CollectionUpdated"),
-			object: collectionId,
-			userInfo: ["action": "memberAdded", "userId": currentUserId]
-		)
-		NotificationCenter.default.post(
-			name: NSNotification.Name("UserCollectionsUpdated"),
-			object: currentUserId
-		)
-		
 		// Get current user info before transaction
 		guard let currentUser = try await UserService.shared.getUser(userId: currentUserId) else {
 			throw NSError(domain: "CollectionService", code: -1, userInfo: [NSLocalizedDescriptionKey: "User not found"])
 		}
 		
-		// Use Firebase directly with transaction for atomic operation
-		let db = Firestore.firestore()
-		let collectionRef = db.collection("collections").document(collectionId)
-		
 		// Use transaction to atomically add member and handle batch notifications
-		var shouldSendNotification = false
-		var pendingJoinsToNotify: [[String: Any]] = []
-		var collectionNameForNotification = ""
-		
 		do {
-			_ = try await db.runTransaction { transaction, errorPointer -> Any? in
+			// Run transaction with User-initiated QoS to avoid priority inversion
+			// Create Firestore references inside the detached task to ensure they're on the correct thread
+			let notificationData = try await Task.detached(priority: .userInitiated) {
+				var shouldSendNotification = false
+				var pendingJoinsToNotify: [[String: Any]] = []
+				var collectionNameForNotification = ""
+				
+				// Create Firestore references inside the detached task
+				let db = Firestore.firestore()
+				let collectionRef = db.collection("collections").document(collectionId)
+				
+				// Execute transaction - result is intentionally unused as we only need side effects
+				// Note: Firestore SDK may use default QoS internally, causing priority inversion warnings
+				let _ = try await db.runTransaction { transaction, errorPointer -> Any? in
 				// Get current collection data
 				do {
 					let collectionDoc = try transaction.getDocument(collectionRef)
@@ -1796,8 +1913,8 @@ final class CollectionService {
 					]
 					pendingJoins.append(joinInfo)
 					
-					// Threshold is 7 for batch notifications
-					let threshold = 7
+						// Threshold is 6 for batch notifications
+						let threshold = 6
 					
 					// Check if we've reached the threshold
 					if pendingJoins.count >= threshold {
@@ -1835,6 +1952,27 @@ final class CollectionService {
 					return nil
 				}
 			}
+				
+				return (shouldSendNotification, pendingJoinsToNotify, collectionNameForNotification)
+			}.value
+			
+			let (shouldSendNotification, pendingJoinsToNotify, collectionNameForNotification) = notificationData
+			
+			// Post notifications after successful transaction (same pattern as invite/request)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionJoined"),
+				object: collectionId,
+				userInfo: ["userId": currentUserId]
+			)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("CollectionUpdated"),
+				object: collectionId,
+				userInfo: ["action": "memberAdded", "userId": currentUserId]
+			)
+			NotificationCenter.default.post(
+				name: NSNotification.Name("UserCollectionsUpdated"),
+				object: currentUserId
+			)
 			
 			// Send notification outside transaction if threshold reached
 			if shouldSendNotification {
@@ -2242,18 +2380,30 @@ extension CollectionService {
 			return true
 		}
 		
-		// NEW ACCESS SYSTEM:
-		// If user is in deniedUsers → hide collection (return false)
+		// ACCESS CONTROL SYSTEM:
+		// If user is in deniedUsers → hide collection everywhere (return false, treat as private)
 		if collection.deniedUsers.contains(userId) {
 			return false
 		}
 		
-		// If user is in allowedUsers → show collection everywhere (return true, even if private)
+		// If user is in allowedUsers → show collection everywhere (return true, treat as public)
+		// This makes private collections with granted access behave like public collections
 		if collection.allowedUsers.contains(userId) {
 			return true
 		}
 		
 		// Default behavior: public collections are visible, private collections are not
+		return collection.isPublic
+	}
+	
+	/// Check if a collection should be treated as "public" for a specific user
+	/// Returns true if the collection is public OR if the user is in allowedUsers
+	nonisolated static func isCollectionPublicForUser(_ collection: CollectionData, userId: String) -> Bool {
+		// If user is in allowedUsers, treat as public (visible everywhere)
+		if collection.allowedUsers.contains(userId) {
+			return true
+		}
+		// Otherwise, use the actual isPublic flag
 		return collection.isPublic
 	}
 	

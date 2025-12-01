@@ -6,7 +6,7 @@ struct CYUser: Identifiable {
 	let username: String
 	var profileImageURL: String
 	
-	init(id: String, name: String, username: String, profileImageURL: String = "") {
+	nonisolated init(id: String, name: String, username: String, profileImageURL: String = "") {
 		self.id = id
 		self.name = name
 		self.username = username

@@ -19,6 +19,8 @@ struct CYEditCollectionView: View {
 	@State private var showPhotoPicker: Bool = false
 	@State private var showInviteSheet: Bool = false
 	@State private var invitedUserIds: Set<String> = []
+	@State private var allUsers: [User] = []
+	@State private var searchText: String = ""
 	@State private var isSaving: Bool = false
 	@State private var isUploading: Bool = false
 	@State private var showError: Bool = false
@@ -106,9 +108,12 @@ struct CYEditCollectionView: View {
 			ImagePicker(image: $selectedImage)
 		}
 		.sheet(isPresented: $showInviteSheet) {
-			// TODO: Implement EditInviteUsersView
-			Text("Invite Users - Coming Soon")
-				.padding()
+			EditInviteUsersSheet(
+				collection: collection,
+				allUsers: $allUsers,
+				invitedUsers: $invitedUserIds,
+				searchText: $searchText
+			)
 		}
 		.alert("Error", isPresented: $showError) {
 			Button("OK", role: .cancel) {}
@@ -283,6 +288,7 @@ struct CYEditCollectionView: View {
 	
 	private var inviteUsersButton: some View {
 		Button(action: {
+			loadAllUsers()
 			showInviteSheet = true
 		}) {
 			HStack {
@@ -291,6 +297,11 @@ struct CYEditCollectionView: View {
 				Text("Invite Users")
 					.font(.headline)
 					.foregroundColor(.blue)
+				if !invitedUserIds.isEmpty {
+					Text("(\(invitedUserIds.count))")
+						.font(.subheadline)
+						.foregroundColor(.blue)
+				}
 				Spacer()
 				Image(systemName: "chevron.right")
 					.foregroundColor(.blue)
@@ -359,38 +370,45 @@ struct CYEditCollectionView: View {
 	
 	private func loadPreviouslyInvitedUsers() {
 		Task {
-			guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+			guard Auth.auth().currentUser?.uid != nil else { return }
 			
 			var invitedUserIds = Set<String>()
 			
-			// Method 1: Check collection's allowedUsers field
+			// Primary source: collection's invitedUsers field
+			if !collection.invitedUsers.isEmpty {
+				invitedUserIds.formUnion(Set(collection.invitedUsers))
+			}
+			
+			// Fallback: Check collection's allowedUsers field (for backward compatibility)
 			let allowedUsers = collection.allowedUsers
 			if !allowedUsers.isEmpty {
 				let pendingInvites = allowedUsers.filter { userId in
-					!collection.members.contains(userId) && userId != collection.ownerId
+					!collection.members.contains(userId) && 
+					userId != collection.ownerId &&
+					!collection.owners.contains(userId)
 				}
 				invitedUserIds.formUnion(Set(pendingInvites))
 			}
 			
-			// Method 2: Get notifications from Firebase (if available)
-			do {
-				let db = Firestore.firestore()
-				let notificationsSnapshot = try await db.collection("notifications")
-					.whereField("type", isEqualTo: "collectionInvite")
-					.whereField("collectionId", isEqualTo: collection.id)
-					.whereField("fromUserId", isEqualTo: currentUserId)
-					.getDocuments()
-				
-				let notificationInvites = Set(notificationsSnapshot.documents.compactMap { doc in
-					doc.data()["toUserId"] as? String
-				})
-				invitedUserIds.formUnion(notificationInvites)
-			} catch {
-				print("⚠️ CYEditCollectionView: Could not load notifications: \(error)")
-			}
-			
 			await MainActor.run {
 				self.invitedUserIds = invitedUserIds
+			}
+		}
+	}
+	
+	private func loadAllUsers() {
+		Task {
+			do {
+				let userService = UserService.shared
+				let users = try await userService.getAllUsers()
+				await MainActor.run {
+					self.allUsers = users
+				}
+			} catch {
+				print("❌ CYEditCollectionView: Error loading users: \(error)")
+				await MainActor.run {
+					self.allUsers = []
+				}
 			}
 		}
 	}
@@ -464,6 +482,11 @@ struct CYEditCollectionView: View {
 				imageURL: uploadedImageURL, // Send Firebase Storage URL
 				isPublic: isPublicValue
 			)
+			
+			// Handle invites for Invite collections
+			if collection.type == "Invite" {
+				await handleInvites()
+			}
 			
 			// CRITICAL: Reload collection from Firebase to verify update was saved (like edit profile)
 			print("🔍 Verifying collection update was saved...")
@@ -578,6 +601,232 @@ struct CYEditCollectionView: View {
 			return "Public collections can be discovered by anyone. Private collections are only visible to you and invited members."
 		}
 		return ""
+	}
+	
+	// Handle sending new invites and removing uninvited users
+	private func handleInvites() async {
+		guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+		
+		// Get the original invited users from the collection
+		let originalInvitedUsers = Set(collection.invitedUsers)
+		let newInvitedUsers = invitedUserIds
+		
+		// Find newly invited users (in newInvitedUsers but not in originalInvitedUsers)
+		let usersToInvite = newInvitedUsers.subtracting(originalInvitedUsers)
+		
+		// Find users to uninvite (in originalInvitedUsers but not in newInvitedUsers)
+		let usersToUninvite = originalInvitedUsers.subtracting(newInvitedUsers)
+		
+		// Get owner info for notifications
+		guard let owner = try? await UserService.shared.getUser(userId: currentUserId) else {
+			print("⚠️ CYEditCollectionView: Could not load owner info for invites")
+			return
+		}
+		
+		// Send invites to newly invited users
+		for userId in usersToInvite {
+			do {
+				try await NotificationService.shared.sendCollectionInviteNotification(
+					collectionId: collection.id,
+					collectionName: collection.name,
+					inviterId: currentUserId,
+					inviterUsername: owner.username,
+					inviterProfileImageURL: owner.profileImageURL,
+					invitedUserId: userId
+				)
+				print("✅ CYEditCollectionView: Sent invite to user \(userId)")
+			} catch {
+				print("❌ CYEditCollectionView: Failed to send invite to user \(userId): \(error)")
+			}
+		}
+		
+		// Remove invites for uninvited users (delete notifications)
+		if !usersToUninvite.isEmpty {
+			do {
+				let db = Firestore.firestore()
+				// Notifications are stored in each user's notifications subcollection
+				for userId in usersToUninvite {
+					let notificationsSnapshot = try await db.collection("users")
+						.document(userId)
+						.collection("notifications")
+						.whereField("type", isEqualTo: "collection_invite")
+						.whereField("collectionId", isEqualTo: collection.id)
+						.whereField("userId", isEqualTo: currentUserId)
+						.getDocuments()
+					
+					for doc in notificationsSnapshot.documents {
+						try await doc.reference.delete()
+						print("✅ CYEditCollectionView: Removed invite notification for user \(userId)")
+					}
+				}
+			} catch {
+				print("❌ CYEditCollectionView: Failed to remove invite notifications: \(error)")
+			}
+		}
+		
+		// Update collection's invitedUsers field
+		if !usersToInvite.isEmpty || !usersToUninvite.isEmpty {
+			do {
+				let db = Firestore.firestore()
+				try await db.collection("collections").document(collection.id).updateData([
+					"invitedUsers": Array(newInvitedUsers)
+				])
+				print("✅ CYEditCollectionView: Updated collection's invitedUsers field")
+			} catch {
+				print("❌ CYEditCollectionView: Failed to update collection's invitedUsers: \(error)")
+			}
+		}
+	}
+}
+
+// MARK: - Edit Invite Users Sheet
+struct EditInviteUsersSheet: View {
+	let collection: CollectionData
+	@Environment(\.dismiss) var dismiss
+	@Environment(\.colorScheme) var colorScheme
+	@EnvironmentObject var authService: AuthService
+	@Binding var allUsers: [User]
+	@Binding var invitedUsers: Set<String>
+	@Binding var searchText: String
+	
+	// Get all existing collection members (owner, admins, members) to filter them out
+	private var existingMemberIds: Set<String> {
+		var memberIds = Set<String>()
+		memberIds.insert(collection.ownerId)
+		memberIds.formUnion(collection.owners)
+		memberIds.formUnion(collection.members)
+		return memberIds
+	}
+	
+	var filteredUsers: [User] {
+		guard let currentUserId = authService.user?.uid else { return [] }
+		
+		// Get blocked users list
+		let blockedUserIds = Set(CYServiceManager.shared.currentUser?.blockedUsers ?? [])
+		
+		// Filter out current user, blocked users, and existing members/admins/owner
+		let availableUsers = allUsers.filter { user in
+			user.id != currentUserId &&
+			!blockedUserIds.contains(user.id) &&
+			!existingMemberIds.contains(user.id)
+		}
+		
+		if searchText.isEmpty {
+			return availableUsers
+		} else {
+			return availableUsers.filter { user in
+				user.name.lowercased().contains(searchText.lowercased()) ||
+				user.username.lowercased().contains(searchText.lowercased())
+			}
+		}
+	}
+	
+	var body: some View {
+		NavigationView {
+			VStack(spacing: 0) {
+				// Search Bar
+				HStack {
+					Image(systemName: "magnifyingglass")
+						.foregroundColor(.gray)
+					
+					TextField("Search users...", text: $searchText)
+						.textFieldStyle(PlainTextFieldStyle())
+				}
+				.padding()
+				.background(colorScheme == .dark ? Color(white: 0.1) : Color(white: 0.9))
+				.cornerRadius(10)
+				.padding(.horizontal)
+				.padding(.top)
+				
+				// Users List
+				ScrollView {
+					LazyVStack(spacing: 12) {
+						ForEach(filteredUsers, id: \.id) { user in
+							EditInviteUserRow(
+								user: user,
+								isInvited: invitedUsers.contains(user.id),
+								onInviteToggle: {
+									if invitedUsers.contains(user.id) {
+										invitedUsers.remove(user.id)
+									} else {
+										invitedUsers.insert(user.id)
+									}
+								}
+							)
+						}
+					}
+					.padding(.horizontal)
+					.padding(.top)
+				}
+				
+				Spacer()
+			}
+			.navigationTitle("Invite Users")
+			.navigationBarTitleDisplayMode(.inline)
+			.toolbar {
+				ToolbarItem(placement: .navigationBarLeading) {
+					Button("Cancel") {
+						dismiss()
+					}
+				}
+				
+				ToolbarItem(placement: .navigationBarTrailing) {
+					Button("Done") {
+						dismiss()
+					}
+					.fontWeight(.semibold)
+				}
+			}
+			.background(colorScheme == .dark ? Color.black : Color.white)
+		}
+	}
+}
+
+// MARK: - Edit Invite User Row
+struct EditInviteUserRow: View {
+	let user: User
+	let isInvited: Bool
+	let onInviteToggle: () -> Void
+	@Environment(\.colorScheme) var colorScheme
+	
+	var body: some View {
+		HStack(spacing: 12) {
+			// Profile Image
+			if let profileImageURL = user.profileImageURL, !profileImageURL.isEmpty {
+				CachedProfileImageView(url: profileImageURL, size: 50)
+			} else {
+				DefaultProfileImageView(size: 50)
+			}
+			
+			// User Info
+			VStack(alignment: .leading, spacing: 2) {
+				Text(user.name)
+					.font(.headline)
+					.foregroundColor(colorScheme == .dark ? .white : .black)
+				
+				Text("@\(user.username)")
+					.font(.subheadline)
+					.foregroundColor(.gray)
+			}
+			
+			Spacer()
+			
+			// Invite Button
+			Button(action: onInviteToggle) {
+				Text(isInvited ? "Invited" : "Invite")
+					.font(.subheadline)
+					.fontWeight(.semibold)
+					.foregroundColor(isInvited ? .gray : .blue)
+					.padding(.horizontal, 16)
+					.padding(.vertical, 8)
+					.background(isInvited ? Color.gray.opacity(0.2) : Color.blue.opacity(0.1))
+					.cornerRadius(20)
+			}
+			.disabled(isInvited)
+		}
+		.padding()
+		.background(colorScheme == .dark ? Color(white: 0.1) : Color(white: 0.9))
+		.cornerRadius(12)
 	}
 }
 

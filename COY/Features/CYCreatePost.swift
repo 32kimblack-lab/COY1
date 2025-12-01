@@ -5,6 +5,7 @@ import PhotosUI
 import AVFoundation
 import UniformTypeIdentifiers
 import FirebaseAuth
+import FirebaseFirestore
 
 struct CYCreatePost: View {
 	@Binding var selectedMedia: [CreatePostMediaItem]
@@ -367,10 +368,81 @@ struct CYCreatePost: View {
 	
 	private func loadAllUsers() async {
 		isLoadingUsers = true
-		// TODO: Implement fetchAllUsers - for now using empty array
-		// This would need to be implemented in UserService
+		
+		guard let currentUid = Auth.auth().currentUser?.uid else {
+			await MainActor.run {
 		allUsers = []
 		isLoadingUsers = false
+			}
+			return
+		}
+		
+		do {
+			let db = Firestore.firestore()
+			
+			// Get current user's friends list (mutual friends who have added each other back)
+			let userDoc = try await db.collection("users").document(currentUid).getDocument()
+			guard let userData = userDoc.data(),
+				  let friendIds = userData["friends"] as? [String],
+				  !friendIds.isEmpty else {
+				await MainActor.run {
+					allUsers = []
+					isLoadingUsers = false
+				}
+				return
+			}
+			
+			// Load user data for each friend in parallel
+			let friends = await withTaskGroup(of: CYUser?.self) { group in
+				var users: [CYUser] = []
+				
+				for friendId in friendIds {
+					group.addTask {
+						do {
+							let friendDoc = try await db.collection("users").document(friendId).getDocument()
+							guard let friendData = friendDoc.data(),
+								  let name = friendData["name"] as? String,
+								  let username = friendData["username"] as? String else {
+								return nil
+							}
+							
+							let profileImageURL = friendData["profileImageURL"] as? String ?? ""
+							return CYUser(
+								id: friendId,
+								name: name,
+								username: username,
+								profileImageURL: profileImageURL
+							)
+						} catch {
+							print("❌ CYCreatePost: Error loading friend \(friendId): \(error)")
+							return nil
+						}
+					}
+				}
+				
+				for await user in group {
+					if let user = user {
+						users.append(user)
+					}
+				}
+				
+				return users
+			}
+			
+			// Sort by name alphabetically
+			let sortedFriends = friends.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+			
+			await MainActor.run {
+				allUsers = sortedFriends
+				isLoadingUsers = false
+			}
+		} catch {
+			print("❌ CYCreatePost: Error loading friends: \(error)")
+			await MainActor.run {
+				allUsers = []
+				isLoadingUsers = false
+			}
+		}
 	}
 	
 	private func loadUserCollections() async {
@@ -579,13 +651,17 @@ struct TagFriendsView: View {
 	@State private var searchText = ""
 	
 	var filteredUsers: [CYUser] {
+		guard let currentUserId = Auth.auth().currentUser?.uid else { return [] }
+		
+		// Filter out current user by ID (not username)
+		let availableUsers = allUsers.filter { $0.id != currentUserId }
+		
 		if searchText.isEmpty {
-			return allUsers.filter { $0.id != services.currentUser?.username }
+			return availableUsers
 		} else {
-			return allUsers.filter { 
-				$0.id != services.currentUser?.username && 
-				($0.username.localizedCaseInsensitiveContains(searchText) || 
-				 $0.name.localizedCaseInsensitiveContains(searchText))
+			return availableUsers.filter { 
+				$0.username.localizedCaseInsensitiveContains(searchText) || 
+				$0.name.localizedCaseInsensitiveContains(searchText)
 			}
 		}
 	}

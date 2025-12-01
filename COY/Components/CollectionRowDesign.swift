@@ -155,7 +155,7 @@ struct CollectionRowDesign: View {
 			// Description
 			if !collection.description.isEmpty {
 				Text(collection.description)
-					.font(isIPad ? .body : .caption)
+					.font(isIPad ? .caption : .caption2)
 					.foregroundColor(.secondary)
 					.lineLimit(isIPad ? 3 : 2)
 					.padding(.horizontal, isIPad ? 20 : 16)
@@ -208,8 +208,9 @@ struct CollectionRowDesign: View {
 				print("✅ CollectionRowDesign: Persisting existing posts to cache for collection '\(collection.name)' (ID: \(collection.id)) - \(previewPosts.count) posts")
 			}
 			// Set up real-time listener for owner's profile (so other users see updates)
-			// NOTE: Removed post listener for scalability - using notification-based updates instead
 			setupOwnerProfileListener()
+			// Set up real-time listener for posts to get immediate updates
+			setupPostListener()
 		}
 		.onChange(of: collection.id) { oldId, newId in
 			// Reload posts when collection changes
@@ -229,11 +230,20 @@ struct CollectionRowDesign: View {
 			}
 		}
 		.onReceive(NotificationCenter.default.publisher(for: Notification.Name("PostCreated"))) { notification in
-			// Reload posts when a new post is created in this collection
+			// Immediately update preview when a new post is created in this collection
 			// Check both object and userInfo for collectionId
 			var createdCollectionId: String?
+			
+			// Check if notification.object is collectionId or postId
 			if let id = notification.object as? String {
+				// Could be either collectionId or postId - check userInfo first
+				if let userInfo = notification.userInfo,
+				   let collectionId = userInfo["collectionId"] as? String {
+					createdCollectionId = collectionId
+				} else {
+					// No userInfo, assume object is collectionId
 				createdCollectionId = id
+				}
 			} else if let userInfo = notification.userInfo,
 					  let id = userInfo["collectionId"] as? String {
 				createdCollectionId = id
@@ -241,11 +251,12 @@ struct CollectionRowDesign: View {
 			
 			if let collectionId = createdCollectionId,
 			   collectionId == collection.id {
-				#if VERBOSE_DEBUG
-				print("🔄 CollectionRowDesign: New post created in collection '\(collection.name)', reloading preview posts")
-				#endif
-				// Clear cache immediately so all users see the update
+				print("🔄 CollectionRowDesign: New post created in collection '\(collection.name)', immediately updating preview")
+				
+				// Immediately clear cache and reload to show the new post
+				// This ensures the new post appears right away, just like in CYInsideCollectionView
 				CollectionPostsCache.shared.clearCache(for: collection.id)
+				// Force immediate reload - don't use cache
 				loadPreviewPosts(forceRefresh: true)
 			}
 		}
@@ -763,8 +774,8 @@ struct CollectionRowDesign: View {
 			return
 		}
 		
-		// Don't reload if already loading
-		if CollectionPostsCache.shared.isLoading(for: collectionId) {
+		// Don't reload if already loading (unless forcing refresh for new post)
+		if !forceRefresh && CollectionPostsCache.shared.isLoading(for: collectionId) {
 			print("⏭️ CollectionRowDesign: Already loading posts for collection '\(collection.name)' (ID: \(collectionId)), skipping")
 			return
 		}
@@ -778,9 +789,8 @@ struct CollectionRowDesign: View {
 			return 
 		}
 		
-		// Only clear existing posts if forcing refresh AND we have no posts in state
-		// This prevents clearing posts that are already displayed
-		if forceRefresh && previewPosts.isEmpty {
+		// If forcing refresh, always clear cache to get fresh data
+		if forceRefresh {
 			CollectionPostsCache.shared.clearCache(for: collectionId)
 		}
 		
@@ -789,13 +799,13 @@ struct CollectionRowDesign: View {
 		
 		Task {
 			do {
-				// Fetch posts from collection (prioritize pinned, then most recent)
+				// Fetch posts from collection - use "Pinned First" to match CYInsideCollectionView sorting
 				// Load only 4 posts for preview (paginated)
 				let (posts, _, _) = try await PostService.shared.getCollectionPostsPaginated(
 					collectionId: collection.id,
 					limit: 4,
 					lastDocument: nil,
-					sortBy: "Newest to Oldest"
+					sortBy: "Pinned First"
 				)
 				var allPosts = posts
 				#if VERBOSE_DEBUG
@@ -820,17 +830,13 @@ struct CollectionRowDesign: View {
 				let pinnedPosts = allPosts.filter { $0.isPinned }
 				let unpinnedPosts = allPosts.filter { !$0.isPinned }
 				
-				// Sort pinned posts by pinnedAt (most recently pinned first)
-				let sortedPinned = pinnedPosts.sorted { post1, post2 in
-						let date1 = post1.pinnedAt ?? post1.createdAt
-						let date2 = post2.pinnedAt ?? post2.createdAt
-					return date1 > date2 // Most recent first
-				}
+				// Sort pinned posts by pinnedAt (most recently pinned first) - matching CYInsideCollectionView
+				let sortedPinned = pinnedPosts.sorted { ($0.pinnedAt ?? $0.createdAt) > ($1.pinnedAt ?? $1.createdAt) }
 				
-				// Sort unpinned posts by date (newest first) - matching CYInsideCollectionView default "Newest to Oldest"
+				// Sort unpinned posts by date (newest first) - matching CYInsideCollectionView
 				let sortedUnpinned = unpinnedPosts.sorted { $0.createdAt > $1.createdAt }
 				
-				// Combine: pinned first, then unpinned
+				// Combine: pinned first, then unpinned - matching CYInsideCollectionView order
 				let sortedPosts = sortedPinned + sortedUnpinned
 				
 				// Take first 4 posts for the grid (pinned first, then most recent)
@@ -904,13 +910,54 @@ struct CollectionRowDesign: View {
 	}
 	
 	// MARK: - Real-time Post Listener
-	// REMOVED: Real-time listener for posts (expensive at scale)
-	// Using notification-based updates instead (PostCreated, PostDeleted notifications)
-	// This reduces Firebase costs and improves scalability
+	/// Set up real-time Firestore listener for posts in this collection
+	/// This ensures preview posts update immediately when new posts are added
 	private func setupPostListener() {
-		// No longer using real-time listener - removed for scalability
-		// Posts are updated via notifications (PostCreated, PostDeleted, etc.)
-		// This is much more cost-effective at scale
+		// Remove existing listener if any
+		postListener?.remove()
+		
+		let collectionId = collection.id
+		let db = Firestore.firestore()
+		
+		// Set up real-time listener for the 4 most recent posts (for preview)
+		// This ensures immediate updates when new posts are created
+		// Note: We capture collectionId and collection.name as local constants since we can't use [weak self] with structs
+		let currentCollectionId = collectionId
+		let currentCollectionName = collection.name
+		
+		postListener = db.collection("posts")
+			.whereField("collectionId", isEqualTo: collectionId)
+			.order(by: "createdAt", descending: true)
+			.limit(to: 4)
+			.addSnapshotListener { snapshot, error in
+				Task { @MainActor in
+					if let error = error {
+						print("❌ CollectionRowDesign: Error in post listener: \(error.localizedDescription)")
+						return
+					}
+					
+					guard let snapshot = snapshot else { return }
+					
+					// Only update if there are actual changes (new posts added)
+					guard !snapshot.documentChanges.isEmpty else { return }
+					
+					// Check if any changes are additions (new posts)
+					let hasNewPosts = snapshot.documentChanges.contains { $0.type == .added }
+					
+					if hasNewPosts {
+						print("🔄 CollectionRowDesign: Real-time listener detected new post(s) in collection '\(currentCollectionName)', immediately updating preview")
+						// Clear cache and post notification to trigger reload
+						// Since we can't directly call loadPreviewPosts (struct limitation),
+						// we post a notification that will be caught by the existing PostCreated handler
+						CollectionPostsCache.shared.clearCache(for: currentCollectionId)
+						NotificationCenter.default.post(
+							name: Notification.Name("PostCreated"),
+							object: nil,
+							userInfo: ["collectionId": currentCollectionId]
+						)
+					}
+				}
+			}
 	}
 }
 
