@@ -11,6 +11,16 @@ import SDWebImage
 	func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
 		// Firebase is already configured in COYApp.init()
 		
+		// CRITICAL: Enable Firestore offline persistence for better UX and reduced reads
+		let db = Firestore.firestore()
+		let settings = FirestoreSettings()
+		settings.isPersistenceEnabled = true
+		settings.cacheSizeBytes = 100 * 1024 * 1024 // 100MB cache (Firestore default is 40MB)
+		db.settings = settings
+		#if DEBUG
+		print("✅ Firestore offline persistence enabled (100MB cache)")
+		#endif
+		
 		// Initialize connection state monitoring (for offline/online detection)
 		Task { @MainActor in
 			_ = ConnectionStateManager.shared // Initialize connection monitoring

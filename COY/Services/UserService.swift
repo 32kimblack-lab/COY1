@@ -312,10 +312,10 @@ final class UserService: ObservableObject {
 	
 	func getAllUsers() async throws -> [User] {
 		let db = Firestore.firestore()
-		// CRITICAL FIX: Add limit to prevent loading all users (could be millions)
-		// This should only be used for admin/search purposes with proper limits
+		// CRITICAL FIX: Reduced limit from 1000 to 50 for cost control
+		// This should only be used for admin/search purposes with proper pagination
 		let snapshot = try await db.collection("users")
-			.limit(to: 1000) // Maximum 1000 users (should use search/pagination instead)
+			.limit(to: 50) // Maximum 50 users (use pagination for more)
 			.getDocuments()
 		
 		let users = snapshot.documents.compactMap { doc -> AppUser? in

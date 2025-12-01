@@ -498,11 +498,14 @@ final class PostService {
 			query = query.order(by: "createdAt", descending: true)
 		}
 		
+		// CRITICAL: Enforce query limit (max 50 posts per query to prevent cost explosion)
+		let safeLimit = min(limit, 50)
+		
 		// Add pagination
 		if let lastDoc = lastDocument {
 			query = query.start(afterDocument: lastDoc)
 		}
-		query = query.limit(to: limit)
+		query = query.limit(to: safeLimit)
 		
 		let snapshot = try await query.getDocuments()
 		

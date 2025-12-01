@@ -166,10 +166,10 @@ final class CollectionService {
 		let db = Firestore.firestore()
 		
 		// Query 1: Collections where user is the owner
-		// CRITICAL FIX: Add limit to prevent loading all collections
+		// CRITICAL FIX: Add limit to prevent loading all collections (max 50 for cost control)
 		let ownedSnapshot = try await db.collection("collections")
 			.whereField("ownerId", isEqualTo: userId)
-			.limit(to: 100) // Limit to 100 owned collections max
+			.limit(to: 50) // Reduced from 100 to 50 for better performance and cost control
 			.getDocuments()
 		
 		// Query 2: Get user's collections array from user document
@@ -300,10 +300,13 @@ final class CollectionService {
 			.whereField("ownerId", isEqualTo: userId)
 			.order(by: "createdAt", descending: true)
 		
+		// CRITICAL: Enforce query limit (max 50 collections per query)
+		let safeLimit = min(limit, 50)
+		
 		if let lastDoc = lastDocument {
 			query = query.start(afterDocument: lastDoc)
 		}
-		query = query.limit(to: limit)
+		query = query.limit(to: safeLimit)
 		
 		let snapshot = try await query.getDocuments()
 		
@@ -468,11 +471,11 @@ final class CollectionService {
 	/// Get posts for a collection from Firebase (source of truth) - DEPRECATED: Use PostService.getCollectionPostsPaginated instead
 	func getCollectionPostsFromFirebase(collectionId: String) async throws -> [CollectionPost] {
 		let db = Firestore.firestore()
-		// CRITICAL FIX: Add limit to prevent loading thousands of posts
+		// CRITICAL FIX: Reduced limit from 100 to 50 for cost control
 		// Query without orderBy to avoid index requirement, then sort in memory
 		let snapshot = try await db.collection("posts")
 			.whereField("collectionId", isEqualTo: collectionId)
-			.limit(to: 100) // Limit to 100 posts max (use pagination for more)
+			.limit(to: 50) // Reduced from 100 - use pagination for more
 			.getDocuments()
 		
 		let loadedPosts = snapshot.documents.compactMap { doc -> CollectionPost? in
@@ -908,10 +911,11 @@ final class CollectionService {
 		
 		// Step 6: Delete collection-related notifications
 		// Delete all notifications related to this collection (requests, invites, etc.)
+		// CRITICAL: Reduced limit from 500 to 100 for cost control
 		print("🧹 Cleaning up collection-related notifications...")
 		let notificationsQuery = db.collection("notifications")
 			.whereField("collectionId", isEqualTo: collectionId)
-			.limit(to: 500)
+			.limit(to: 100) // Reduced from 500 - batch delete if more exist
 		
 		let notificationsSnapshot = try? await notificationsQuery.getDocuments()
 		if let notifications = notificationsSnapshot?.documents, !notifications.isEmpty {

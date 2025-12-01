@@ -134,6 +134,15 @@ struct CYHome: View {
 				loadFollowedCollectionsAndPosts()
 			}
 		}
+		.onDisappear {
+			// CRITICAL: Clean up all Firestore listeners when view disappears
+			// This prevents memory leaks and battery drain
+			FirestoreListenerManager.shared.removeAllListeners(for: "CYHome")
+			#if DEBUG
+			let remainingCount = FirestoreListenerManager.shared.getActiveListenerCount()
+			print("✅ CYHome: Cleaned up listeners (remaining: \(remainingCount))")
+			#endif
+		}
 		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CollectionFollowed"))) { notification in
 			// Reload when user follows a collection
 			if let userId = notification.userInfo?["userId"] as? String,
@@ -858,8 +867,13 @@ struct CYHome: View {
 				var allPosts: [(post: CollectionPost, collection: CollectionData)] = []
 				let initialLimit = isIPad ? 30 : 24 // More for grid view
 				
+				// CRITICAL: Limit to first 10 collections initially to prevent loading 1,000+ posts
+				// Load remaining collections on-demand as user scrolls
+				let initialCollections = Array(followed.prefix(10))
+				let remainingCollections = Array(followed.dropFirst(10))
+				
 				await withTaskGroup(of: [(post: CollectionPost, collection: CollectionData)].self) { group in
-					for collection in followed {
+					for collection in initialCollections {
 						group.addTask {
 							// Skip hidden collections entirely - don't even load posts
 							let isHidden = await MainActor.run { () -> Bool in
@@ -871,10 +885,11 @@ struct CYHome: View {
 							}
 							
 							do {
-								// Load limited posts per collection to reduce initial load time
+								// CRITICAL: Reduced from 25 to 10 posts per collection for initial load
+								// This prevents loading 250+ posts (10 collections × 25 posts) on first load
 								let (posts, _, _) = try await PostService.shared.getCollectionPostsPaginated(
 									collectionId: collection.id,
-									limit: 25, // Reduced from 100 to improve performance
+									limit: 10, // Reduced from 25 to improve initial load performance
 									lastDocument: nil,
 									sortBy: "Newest to Oldest"
 								)
@@ -885,6 +900,15 @@ struct CYHome: View {
 								print("Error loading posts for collection \(collection.id): \(error)")
 								return []
 							}
+						}
+					}
+					
+					// Store remaining collections for lazy loading
+					if !remainingCollections.isEmpty {
+						await MainActor.run {
+							// Add remaining collections to followedCollections but don't load posts yet
+							// Posts will load as user scrolls or when collection becomes visible
+							self.followedCollections.append(contentsOf: remainingCollections)
 						}
 					}
 					

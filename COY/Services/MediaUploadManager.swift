@@ -242,61 +242,107 @@ final class MediaUploadManager {
 	
 	// MARK: - Compression
 	
-	/// Compress video with Instagram-style optimized settings (network-optimized, ~2-5 Mbps)
+	/// Compress video with aggressive settings to enforce 8-15MB max (CRITICAL for scale)
+	/// Uses iterative compression if needed to hit target size
 	nonisolated private func compressVideoIfNeeded(videoURL: URL) async throws -> URL {
 		// This method is nonisolated, so it runs off main thread automatically when called from TaskGroup
 		let fileAttributes = try FileManager.default.attributesOfItem(atPath: videoURL.path)
 		let fileSize = fileAttributes[.size] as? Int64 ?? 0
-		let compressionThreshold: Int64 = 15 * 1024 * 1024 // 15MB - compress if larger
+		let maxFileSize: Int64 = 15 * 1024 * 1024 // 15MB hard limit (70-90% reduction from typical 100MB+)
+		let compressionThreshold: Int64 = 8 * 1024 * 1024 // 8MB - compress if larger
 		
-		// REMOVED: 100MB check - Firebase accepts up to 5GB per file, and we compress anyway
-		// The check was causing false failures after successful compression
-		
-		// If video is small enough, upload directly
+		// If video is already small enough, upload directly
 		if fileSize <= compressionThreshold {
 			return videoURL
 		}
 		
-		// Compress large videos with Instagram-style settings
-		print("📹 Compressing video from \(String(format: "%.1f", Double(fileSize) / 1024 / 1024))MB...")
-		
-		let asset = AVURLAsset(url: videoURL)
-		// Use MediumQuality preset - it provides ~2-5 Mbps bitrate (perfect for Instagram/Reels)
-		// This is faster and more reliable than custom bitrate settings
-		guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetMediumQuality) else {
-			throw NSError(domain: "MediaUploadManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create video export session"])
+		// CRITICAL: Enforce hard limit - reject videos that can't be compressed below 15MB
+		if fileSize > 200 * 1024 * 1024 { // 200MB+ videos are too large
+			throw NSError(
+				domain: "MediaUploadManager",
+				code: -1,
+				userInfo: [NSLocalizedDescriptionKey: "Video is too large (\(String(format: "%.1f", Double(fileSize) / 1024 / 1024))MB). Please use a shorter video or compress it first."]
+			)
 		}
 		
-		// Create temporary output URL
-		let outputURL = FileManager.default.temporaryDirectory
+		// Compress large videos with aggressive settings
+		print("📹 Compressing video from \(String(format: "%.1f", Double(fileSize) / 1024 / 1024))MB (target: <15MB)...")
+		
+		let asset = AVURLAsset(url: videoURL)
+		
+		// Try MediumQuality first (usually gets us to 8-15MB range)
+		var exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetMediumQuality)
+		var outputURL = FileManager.default.temporaryDirectory
 			.appendingPathComponent(UUID().uuidString)
 			.appendingPathExtension("mp4")
 		
-		exportSession.outputURL = outputURL
-		exportSession.outputFileType = .mp4
-		exportSession.shouldOptimizeForNetworkUse = true // CRITICAL: Instagram uses this - optimizes for upload speed
-		// This setting alone reduces file size by 20-30% and makes uploads 2-3x faster
+		exportSession?.outputURL = outputURL
+		exportSession?.outputFileType = .mp4
+		exportSession?.shouldOptimizeForNetworkUse = true
 		
-		// Export video (this compresses it)
+		// Export video
 		await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-			exportSession.exportAsynchronously {
+			exportSession?.exportAsynchronously {
 				continuation.resume()
 			}
 		}
 		
-		guard exportSession.status == .completed else {
-			if let error = exportSession.error {
+		guard exportSession?.status == .completed else {
+			if let error = exportSession?.error {
 				throw error
 			}
 			throw NSError(domain: "MediaUploadManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Video compression failed"])
 		}
 		
-		// Check compressed file size (for logging only - no rejection)
+		// Check compressed file size
 		let compressedAttributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
-		let compressedSize = compressedAttributes[.size] as? Int64 ?? 0
+		var compressedSize = compressedAttributes[.size] as? Int64 ?? 0
 		print("✅ Video compressed to \(String(format: "%.1f", Double(compressedSize) / 1024 / 1024))MB (was \(String(format: "%.1f", Double(fileSize) / 1024 / 1024))MB)")
 		
-		// REMOVED: Size check after compression - Firebase accepts up to 5GB, compressed files are fine
+		// If still too large, try LowQuality preset (more aggressive compression)
+		if compressedSize > maxFileSize {
+			print("⚠️ Video still too large (\(String(format: "%.1f", Double(compressedSize) / 1024 / 1024))MB), applying aggressive compression...")
+			
+			// Clean up first attempt
+			try? FileManager.default.removeItem(at: outputURL)
+			
+			// Try LowQuality preset (more aggressive)
+			exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetLowQuality)
+			outputURL = FileManager.default.temporaryDirectory
+				.appendingPathComponent(UUID().uuidString)
+				.appendingPathExtension("mp4")
+			
+			exportSession?.outputURL = outputURL
+			exportSession?.outputFileType = .mp4
+			exportSession?.shouldOptimizeForNetworkUse = true
+			
+			await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+				exportSession?.exportAsynchronously {
+					continuation.resume()
+				}
+			}
+			
+			guard exportSession?.status == .completed else {
+				if let error = exportSession?.error {
+					throw error
+				}
+				throw NSError(domain: "MediaUploadManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Aggressive video compression failed"])
+			}
+			
+			let newAttributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
+			compressedSize = newAttributes[.size] as? Int64 ?? 0
+			print("✅ Aggressively compressed to \(String(format: "%.1f", Double(compressedSize) / 1024 / 1024))MB")
+		}
+		
+		// Final check: if still over 15MB after aggressive compression, reject
+		if compressedSize > maxFileSize {
+			try? FileManager.default.removeItem(at: outputURL)
+			throw NSError(
+				domain: "MediaUploadManager",
+				code: -1,
+				userInfo: [NSLocalizedDescriptionKey: "Video could not be compressed below 15MB. Please use a shorter video."]
+			)
+		}
 		
 		return outputURL
 	}

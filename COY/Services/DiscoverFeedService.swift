@@ -146,11 +146,12 @@ final class DiscoverFeedService {
 		let userLocation = try? await loadUserLocation(userId: currentUserId)
 		
 		// Load collections (public + accessible private)
+		// CRITICAL: Reduced limit from 200 to 50 for cost control and performance
 		var allCollections: [CollectionData] = []
 		let collectionsSnapshot = try await db.collection("collections")
 			.whereField("isPublic", isEqualTo: true)
 			.order(by: "createdAt", descending: true)
-			.limit(to: 200)
+			.limit(to: 50) // Reduced from 200 to prevent expensive queries
 			.getDocuments()
 		
 		for doc in collectionsSnapshot.documents {
@@ -189,10 +190,11 @@ final class DiscoverFeedService {
 		}
 		
 		// Load posts from public collections
+		// CRITICAL: Reduced limit from 200 to 50 for cost control and performance
 		var allPosts: [(post: CollectionPost, collection: CollectionData)] = []
 		let postsSnapshot = try await db.collection("posts")
 			.order(by: "createdAt", descending: true)
-			.limit(to: 200)
+			.limit(to: 50) // Reduced from 200 to prevent expensive queries
 			.getDocuments()
 		
 		for doc in postsSnapshot.documents {
